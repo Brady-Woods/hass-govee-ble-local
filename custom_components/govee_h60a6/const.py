@@ -118,4 +118,10 @@ BROKEN_SCENE_NAMES = {
     "winter",
 }
 
-POLL_INTERVAL_SECONDS = 30
+# 60s (not 30s): with 4 lights sharing one adapter, every poll opens a BLE
+# connection that locks the device's single slot and competes with the
+# others plus HA's own background scanning. Halving the poll frequency
+# roughly halves that contention, which was causing frequent dropped status
+# chunks (notably the per-segment chunks, leaving segments unavailable).
+# These are near-static ceiling lights; 60s freshness is plenty.
+POLL_INTERVAL_SECONDS = 60
