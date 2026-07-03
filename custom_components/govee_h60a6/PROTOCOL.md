@@ -210,6 +210,54 @@ chunks received" instead of waiting for the *specific* keys needed caused
 real, hard-to-diagnose bugs (one of the chunks we needed would go missing
 while an unrecognized one took its place in the count).
 
+### 5.3 More chunks exist than this project has ever collected (newly found, not yet decoded)
+
+The real app's own status query (captured 2026-07-02, same session as
+§4.2's per-segment discovery) received chunks `0x00` through `0x08`, then
+`0xFF` - **nine numbered chunks**, not the five (`0x00`-`0x04`) this
+project's `STATUS_CHUNK_ORDER` has ever collected. `client.py`'s
+`_query_status_chunks()` only waits for `(0x00, 0x01, 0x02, 0x03, 0x04,
+0xFF)` and stops as soon as those specific keys arrive - chunks `0x05`
+through `0x08` have been silently available and silently ignored this
+entire time.
+
+Reassembling chunks `0x05`-`0x08`+`0xFF` and looking at the raw bytes
+(captured while the device was in a solid warm-white color-temp state)
+found a **strongly repeating 4-byte pattern**: `64 ff ae 54` appears 13
+times, mostly in consecutive runs of 4, separated by short marker bytes
+(`11 01`, then `a5 11 02`, `a5 11 03`, `a5 05 04`, i.e. an incrementing
+index). `64` = 100 (a percentage - brightness?) and `ff ae 54` = `(255,
+174, 84)` - **the exact 2700K warm-white RGB tint from §4.1's Kelvin
+approximation table**, which is exactly the color/mode the device was in
+during this capture.
+
+**Working hypothesis, unconfirmed**: this looks like **per-segment status
+readback** - each segment's current brightness+RGB, in groups matching
+the 12-segment addressing scheme discovered in §4.2, all reporting the
+same value here because a solid color-temp command affects every segment
+uniformly. If true, this would be a significant capability this project
+has never used - genuine granular state readback, not just genuinely
+one-way commands.
+
+**Not yet done, needed before trusting this**:
+- A capture with *different* colors set on different segments (using
+  §4.2's new `set_segment_color`) immediately before a status query, to
+  see whether the corresponding 4-byte groups actually change to match -
+  the single-uniform-color capture available so far can't distinguish
+  "this is genuinely per-segment state" from "this is some other 12-count
+  structure that happens to look uniform right now."
+- Working out the exact index/marker byte meaning (why `11 01` for the
+  first group but `a5 11 0N` for the rest) and where the true chunk/group
+  boundaries are - not confirmed precisely, this section describes the
+  pattern found by inspection, not a fully reverse-engineered structure.
+- Deciding whether `_query_status_chunks()` should be changed to wait for
+  the fuller `0x00`-`0x08`+`0xFF` set - not done yet, since the *known*
+  fields this project already relies on (MAC, hw version, brightness,
+  scene ID, zone state) are all confirmed reachable via the current
+  shorter chunk set, and asking for more chunks means more can go wrong
+  in an already-fragile status query (§5.1's mode-dependent layout issues
+  and §5.2's zone-state mystery are both about the chunks already in use).
+
 ### 5.1 Mode-dependent layout (important, non-obvious)
 
 **The status response layout changes depending on whether the device is
@@ -768,12 +816,24 @@ header (`chunk_count, 0x00, <unexplained>, 0x01, field_id`) followed by
 the ASCII serial string, zero-padded to the end of the last chunk.
 
 Field `0x02` and `0x04` are not currently used by the integration -
-`0x02`'s meaning is undetermined (too short to be interesting) and `0x04`
-looks like a device secret/certificate, not something to surface in a UI
-even if its exact purpose were confirmed.
+`0x02`'s meaning is undetermined (too short to be interesting), and
+**field `0x04` is now confirmed to be time-based, not static**: its
+141-character value's first 10 characters (`1783038040`) decode as a Unix
+timestamp of `2026-07-03 00:20:40 UTC` - matching the exact moment the
+capture was taken. This rules out "firmware version" or "hardware
+version" for this field definitively (a real version string wouldn't
+track wall-clock time), and supports the existing "device
+certificate/secret for cloud pairing" hypothesis - a freshly-issued,
+time-stamped signed token is exactly what that would look like. Not
+something to surface in any UI even if its exact purpose were nailed
+down further.
 
-**Firmware version was not found anywhere** — not in `ac` status chunks,
-not in any `ab` field queried by the app, even with the phone in airplane
+**Firmware version still not found anywhere**, re-confirmed by explicitly
+re-examining every byte of both `ab` field responses actually queried by
+the app (`0x02`, `0x04`, `0x05`) and the full `ac` status response
+including chunks `0x05`-`0x08` that this project had never looked at
+before (§5.3) - not in `ac` status chunks, not in any `ab` field queried
+by the app, even with the phone in airplane
 mode (network fully disabled, forcing BLE-only operation). The app may
 simply display a value cached from a prior cloud sync rather than querying
 it fresh. Model (`H60A6`) is a fixed constant, not queried.
