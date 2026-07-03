@@ -26,10 +26,21 @@ around the *code*, not the *wire format*.
 | --- | --- | --- |
 | Main light | `light` | On/off, brightness, RGB color, color temperature (2700–6500 K), scenes/effects |
 | Upper ring / Lower panel | `switch` ×2 | Independent on/off for each physical zone |
-| Segment 0–11 | `light` ×12 | Per-segment color/brightness (**disabled by default** — enable in the entity settings if you want them) |
 
 A **diagnostics** download is available from the device page (MAC addresses
 and serial number are redacted).
+
+> **Per-segment control is currently disabled.** The 12 individually
+> addressable segments were briefly exposed as `light` entities, but
+> reading their state requires a much longer BLE status response whose tail
+> (the segment data) is dropped on the large majority of polls under
+> real-world adapter contention (see PROTOCOL.md §5.3.2), leaving the
+> entities unavailable most of the time. The integration now uses the
+> shorter, more reliable status query. The segment protocol is fully
+> reverse-engineered and documented (PROTOCOL.md §4.2/§5.3) and the client
+> retains the command/parse primitives, so the feature can be re-enabled if
+> the reliability problem is solved (e.g. tolerating a dropped tail to
+> parse the segments that don't depend on it).
 
 ## Installation
 

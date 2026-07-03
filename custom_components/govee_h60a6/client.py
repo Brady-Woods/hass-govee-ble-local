@@ -30,19 +30,24 @@ DISCONNECT_DELAY = 2  # seconds of inactivity before dropping the BLE connection
 # __init__.py), not by cutting retry resilience.
 CONNECT_MAX_ATTEMPTS = 4
 STATUS_CHUNK_TIMEOUT = 2  # seconds to wait for each status chunk
-# The original status query trigger (`ac 03 02 41 30`) only ever returns
-# chunks 0x00-0x04+0xFF. The real app instead sends `ac 03 03 41 30 a5`
-# (PROTOCOL.md 5.3) - a different 3rd byte and one extra trailing byte -
-# which additionally returns chunks 0x05-0x08, carrying per-segment
-# status (see SEGMENT_COUNT below). STATUS_CHUNK_REQUIRED is what a status
-# query must have to be considered successful (unchanged from before, so
-# existing reliability for MAC/hw-version/brightness/scene-id/zone-state
-# isn't put at risk by this addition); STATUS_CHUNK_ACCEPTED additionally
-# captures 0x05-0x08 when they show up, without requiring them - if a
-# future capture ever finds a mode where they're absent, status queries
-# for everything else keep working, only per-segment data goes missing.
+# Status query trigger. Two variants exist:
+#   * `ac 03 02 41 30`       -> chunks 0x00-0x04 + 0xFF   (6 notifications)
+#   * `ac 03 03 41 30 a5`    -> chunks 0x00-0x08 + 0xFF  (10 notifications),
+#                               additionally carrying per-segment status.
+# We use the SHORT variant. The longer one was adopted for a while to expose
+# per-segment entities, but its response is a much longer burst of BLE
+# notifications, and under adapter contention (4 lights + HA scanning on one
+# radio) the tail of that burst - exactly the per-segment chunks - dropped on
+# the large majority of polls, leaving segments unavailable and adding churn
+# to every poll. The per-segment feature has been disabled (see light.py /
+# README) and we're back on the short, more reliable query, which is all the
+# zone/brightness/scene/MAC/hw-version state needs. The segment protocol
+# primitives below (set_segment_*, _parse_segment_records, GoveeH60A6Segment)
+# are retained as tested, documented capability (PROTOCOL.md 4.2/5.3) but are
+# no longer exercised in production; with the short query, status.segments is
+# always None.
 STATUS_CHUNK_REQUIRED = (0x00, 0x01, 0x02, 0x03, 0x04, 0xFF)
-STATUS_CHUNK_ACCEPTED = STATUS_CHUNK_REQUIRED + (0x05, 0x06, 0x07, 0x08)
+STATUS_CHUNK_ACCEPTED = STATUS_CHUNK_REQUIRED
 METADATA_FIELD_TIMEOUT = 2  # seconds to wait for each `ab` metadata field chunk
 SEGMENT_COUNT = 12  # confirmed via live testing (PROTOCOL.md 4.2/5.3) - bits/records 0-11
 
@@ -533,12 +538,13 @@ class GoveeH60A6Client:
     async def _query_status_chunks(self) -> dict[int, bytes]:
         assert self._client is not None and self._session_key is not None
         await self._drain_notify_queue()
-        # `ac 03 03 41 30 a5` - the real app's exact bytes (PROTOCOL.md
-        # 5.3), not the `ac 03 02 41 30` this project used originally.
-        # That difference (3rd byte, one extra trailing byte) is what
-        # unlocks chunks 0x05-0x08 (per-segment status) in addition to the
-        # original 0x00-0x04+0xFF.
-        plaintext = _build_plaintext(bytes([0xAC, 0x03, 0x03, 0x41, 0x30, 0xA5]))
+        # Short status query `ac 03 02 41 30` -> chunks 0x00-0x04 + 0xFF only.
+        # (The longer `ac 03 03 41 30 a5` variant additionally returns the
+        # per-segment chunks 0x05-0x08 but produces a much longer, drop-prone
+        # notification burst - see the STATUS_CHUNK_* comment above and
+        # PROTOCOL.md 5.3.2. Per-segment entities are disabled, so we use the
+        # short, reliable query.)
+        plaintext = _build_plaintext(bytes([0xAC, 0x03, 0x02, 0x41, 0x30]))
         ciphertext = _encrypt_packet(self._session_key, plaintext)
         _LOGGER.debug("Requesting status from %s", self._ble_device.address)
         await self._client.write_gatt_char(WRITE_CHAR_UUID, ciphertext, response=False)
@@ -691,17 +697,13 @@ class GoveeH60A6Client:
         chunk00 = chunks.get(0x00)
         has_chunk00 = chunk00 is not None
 
-        # Regression found and fixed live (2026-07-02): switching
-        # _query_status_chunks() to the fuller trigger (5.3) changed what
-        # ends up tagged chunk 0xFF - with more total data now in the
-        # response, the same underlying bytes that used to be the
-        # terminator chunk in the shorter response are now tagged 0x05
-        # instead (confirmed byte-for-byte: bytes 0-12 identical between
-        # the old chunk_ff and the new chunk_05 across multiple captures).
-        # 0xFF in the fuller response is now the tail end of segment data,
-        # not zone state. Prefer 0x05 (the fuller query's real terminator
-        # equivalent); fall back to 0xFF for safety if a future capture
-        # ever returns the shorter structure again.
+        # Zone state lives in the terminator chunk. In the SHORT query we
+        # now use, that's chunk 0xFF. (In the longer per-segment query, the
+        # same underlying bytes were relabeled 0x05 while 0xFF became the
+        # segment-data tail - confirmed byte-for-byte, bytes 0-12 identical
+        # between the two. The `0x05 or 0xFF` below therefore reads the
+        # right chunk under either query: with the short query 0x05 is
+        # absent so it falls through to 0xFF.)
         chunk_ff = chunks.get(0x05) or chunks.get(0xFF)
         if chunk_ff is not None and len(chunk_ff) >= 16:
             shift = 0 if has_chunk00 else 1
