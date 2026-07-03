@@ -22,6 +22,7 @@ async def async_setup_entry(
 ) -> None:
     data = hass.data[DOMAIN][entry.entry_id]
     address = entry.data["address"]
+    serial_number = data.get("serial_number")
     async_add_entities(
         [
             GoveeH60A6ZoneSwitch(
@@ -32,6 +33,7 @@ async def async_setup_entry(
                 ZONE_UPPER,
                 "Upper Ring",
                 "mdi:wall-sconce-flat-variant",
+                serial_number,
             ),
             GoveeH60A6ZoneSwitch(
                 data["coordinator"],
@@ -41,6 +43,7 @@ async def async_setup_entry(
                 ZONE_LOWER,
                 "Lower Panel",
                 "mdi:wall-sconce-flat",
+                serial_number,
             ),
         ]
     )
@@ -58,8 +61,9 @@ class GoveeH60A6ZoneSwitch(GoveeH60A6Entity, SwitchEntity):
         zone: int,
         zone_name: str,
         icon: str,
+        serial_number: str | None = None,
     ) -> None:
-        super().__init__(coordinator, address, device_name)
+        super().__init__(coordinator, address, device_name, serial_number)
         self._client = client
         self._zone = zone
         self._attr_unique_id = f"{address}_zone_{zone}"

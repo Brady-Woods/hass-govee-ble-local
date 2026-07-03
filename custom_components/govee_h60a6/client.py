@@ -30,6 +30,7 @@ DISCONNECT_DELAY = 2  # seconds of inactivity before dropping the BLE connection
 CONNECT_MAX_ATTEMPTS = 4
 STATUS_CHUNK_TIMEOUT = 2  # seconds to wait for each status chunk
 STATUS_CHUNK_ORDER = (0x00, 0x01, 0x02, 0x03, 0x04, 0xFF)
+METADATA_FIELD_TIMEOUT = 2  # seconds to wait for each `ab` metadata field chunk
 
 
 def _aes_ecb(key16: bytes, block16: bytes, encrypt: bool) -> bytes:
@@ -66,6 +67,22 @@ def _decrypt_packet(key16: bytes, ciphertext20: bytes) -> bytes:
 
 def _format_mac(mac_bytes: bytes) -> str:
     return ":".join(f"{b:02X}" for b in mac_bytes)
+
+
+def _parse_metadata_field_text(raw: bytes) -> str | None:
+    """Extract the ASCII text value from a reassembled `ab` metadata field
+    response (PROTOCOL.md 8). Response format: a 5-byte header (chunk
+    count, an unexplained byte, a fixed 0x01, and the field id that was
+    queried) followed by an ASCII string, zero-padded to the end of the
+    last chunk. Returns None if there's nothing past the header, or if it
+    doesn't decode cleanly as non-empty ASCII."""
+    if len(raw) <= 5:
+        return None
+    value = raw[5:].rstrip(b"\x00")
+    try:
+        return value.decode("ascii") or None
+    except UnicodeDecodeError:
+        return None
 
 
 def _kelvin_to_rgb(kelvin: int) -> tuple[int, int, int]:
@@ -471,6 +488,69 @@ class GoveeH60A6Client:
             status = self._parse_status(chunks)
             _LOGGER.debug("Status from %s: %s", self._ble_device.address, status)
             return status
+
+    async def _query_metadata_field(self, field_id: int) -> bytes:
+        """Query a device metadata field via the `ab` opcode (PROTOCOL.md 8).
+
+        Returns the raw reassembled multi-chunk payload, header bytes
+        included - callers are expected to know how to interpret their
+        specific field. Returns b"" if the device never responds (no
+        chunk 0xFF seen within the timeout).
+        """
+        assert self._client is not None and self._session_key is not None
+        await self._drain_notify_queue()
+        plaintext = _build_plaintext(bytes([0xAB, 0x01, field_id]))
+        ciphertext = _encrypt_packet(self._session_key, plaintext)
+        await self._client.write_gatt_char(WRITE_CHAR_UUID, ciphertext, response=False)
+
+        chunks: dict[int, bytes] = {}
+        try:
+            while 0xFF not in chunks:
+                resp = await asyncio.wait_for(
+                    self._notify_queue.get(), timeout=METADATA_FIELD_TIMEOUT
+                )
+                pt = _decrypt_packet(self._session_key, resp)
+                if pt[0] != 0xAB:
+                    continue
+                chunks[pt[1]] = pt[2:19]
+        except asyncio.TimeoutError:
+            _LOGGER.debug(
+                "Metadata field 0x%02x query from %s incomplete: got chunks %s",
+                field_id,
+                self._ble_device.address,
+                sorted(chunks.keys()),
+            )
+
+        if not chunks:
+            return b""
+        ordered_seqs = sorted(k for k in chunks if k != 0xFF)
+        if 0xFF in chunks:
+            ordered_seqs.append(0xFF)
+        return b"".join(chunks[s] for s in ordered_seqs)
+
+    async def get_serial_number(self) -> str | None:
+        """Query the device's serial/UID string.
+
+        Uses `ab` field 0x05 (PROTOCOL.md 8) - confirmed stable across two
+        independently captured sessions (identical value both times).
+        Returns None if the device doesn't respond or the payload doesn't
+        decode cleanly - this is a "nice to have" field, not worth raising
+        an error over if it's unavailable.
+        """
+        async with self._lock:
+            await self._connect()
+            self._cancel_disconnect_timer()
+            raw = await self._query_metadata_field(0x05)
+            self._schedule_disconnect()
+
+        value = _parse_metadata_field_text(raw)
+        if value is None:
+            _LOGGER.debug(
+                "Serial number field from %s did not parse cleanly: %s",
+                self._ble_device.address,
+                raw.hex(),
+            )
+        return value
 
     def _parse_status(self, chunks: dict[int, bytes]) -> GoveeH60A6Status:
         # The device's status layout is mode-dependent: when it's in

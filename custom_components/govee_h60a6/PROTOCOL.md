@@ -752,6 +752,26 @@ order):
 | `0x04` | Long hex-string blob, likely a device certificate/secret for cloud pairing — not firmware version | `1782966739436b879a...` (~140 hex chars) |
 | `0x05` | Device serial/UID, ASCII hex string | `F19130565FE741AF` |
 
+**Field `0x05` reconfirmed via a second, independent capture** (2026-07-02,
+see §4.2's capture) — produced the exact same value (`F19130565FE741AF`)
+as the original capture that documented this field, strong evidence it's
+a genuinely stable per-device identifier, not something that varies per
+session/connection.
+
+**Now implemented**: `client.py`'s `get_serial_number()` (queries field
+`0x05`) and the underlying `_query_metadata_field(field_id)` /
+`_parse_metadata_field_text(raw)` helpers. Wired into `__init__.py` (fetched
+once at setup, not on every poll - it's static) and exposed as
+`serial_number` on the HA device registry entry via `entity.py`'s
+`device_info`. Response format for field `0x05`, byte-for-byte: a 5-byte
+header (`chunk_count, 0x00, <unexplained>, 0x01, field_id`) followed by
+the ASCII serial string, zero-padded to the end of the last chunk.
+
+Field `0x02` and `0x04` are not currently used by the integration -
+`0x02`'s meaning is undetermined (too short to be interesting) and `0x04`
+looks like a device secret/certificate, not something to surface in a UI
+even if its exact purpose were confirmed.
+
 **Firmware version was not found anywhere** — not in `ac` status chunks,
 not in any `ab` field queried by the app, even with the phone in airplane
 mode (network fully disabled, forcing BLE-only operation). The app may

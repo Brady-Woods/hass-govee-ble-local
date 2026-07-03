@@ -619,5 +619,26 @@ class TestFormatMac(unittest.TestCase):
         self.assertEqual(result, "5C:E7:53:F4:74:57")
 
 
+class TestParseMetadataFieldText(unittest.TestCase):
+    def test_real_capture_serial_number_field(self):
+        # Real capture of "ab" field 0x05's reassembled response
+        # (PROTOCOL.md 8) - two independently captured sessions produced
+        # this identical value, strong evidence it's stable.
+        header = bytes([0x02, 0x00, 0x04, 0x01, 0x05])
+        raw = header + b"F19130565FE741AF" + b"\x00" * 13
+        self.assertEqual(client_mod._parse_metadata_field_text(raw), "F19130565FE741AF")
+
+    def test_empty_response_gives_none(self):
+        self.assertIsNone(client_mod._parse_metadata_field_text(b""))
+
+    def test_header_only_no_value_gives_none(self):
+        self.assertIsNone(client_mod._parse_metadata_field_text(bytes([0x01, 0x00, 0x00, 0x01, 0x05])))
+
+    def test_non_ascii_payload_gives_none_not_a_crash(self):
+        header = bytes([0x02, 0x00, 0x04, 0x01, 0x05])
+        raw = header + bytes([0xFF, 0xFE, 0xFD])
+        self.assertIsNone(client_mod._parse_metadata_field_text(raw))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

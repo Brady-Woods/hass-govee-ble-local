@@ -47,6 +47,7 @@ async def async_setup_entry(
                 entry.data["address"],
                 entry.title,
                 data.get("scene_library") or {},
+                data.get("serial_number"),
             )
         ]
     )
@@ -92,8 +93,9 @@ class GoveeH60A6Light(GoveeH60A6Entity, LightEntity):
         address: str,
         device_name: str,
         scene_library: dict[str, SceneData],
+        serial_number: str | None = None,
     ) -> None:
-        super().__init__(coordinator, address, device_name)
+        super().__init__(coordinator, address, device_name, serial_number)
         self._client = client
         self._attr_unique_id = f"{address}_light"
         self._scene_library = scene_library

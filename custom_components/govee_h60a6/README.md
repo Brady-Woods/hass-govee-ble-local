@@ -108,6 +108,55 @@ traceback as an "unexpected error."
   integrations (e.g. a network-monitoring integration that also knows the
   device's WiFi MAC) in HA's device registry.
 
+### Device identity: name, MAC addresses, and serial number
+
+Three things worth understanding clearly, since they look surprising at
+first glance:
+
+**The HA device name is already the BLE broadcast name, automatically.**
+`config_flow.py` sets the config entry's title from `discovery_info.name`
+(Bluetooth-discovery flow) or the equivalent value collected via
+`bluetooth.async_discovered_service_info` (manual-entry flow) — both are
+the device's actual over-the-air BLE local name, not something typed in
+by hand. Confirmed directly against a live config entry: title
+`GVH60A67457` for address `5C:E7:53:F4:74:57`, i.e. the model prefix plus
+the last two MAC octets. This is **not** the friendly name you set in the
+Govee app (e.g. "Kitchen Light") — that's confirmed cloud-only (§9 in
+`PROTOCOL.md`), never broadcast over BLE or exposed through any `ab`
+metadata field found so far. If you want a friendlier HA name, rename the
+device in HA directly (Settings → Devices), or pull `deviceName` from
+Govee's authenticated Cloud API (`GET /user/devices`, see `PROTOCOL.md`
+§6.5 for how this project has queried that endpoint before) and set it by
+hand — there's no way to get that specific string over BLE.
+
+**Multiple MAC-like addresses per physical device is expected, not a
+bug.** Each unit actually has (at least) three distinct address-shaped
+identifiers, confirmed directly against the same real device:
+- **BLE MAC** (`5C:E7:53:F4:74:57`) — what this integration connects to.
+- **WiFi MAC** (`5C:E7:53:F4:74:56`) — reported via the device's own
+  status query (`status.wifi_mac`), differs from the BLE MAC by exactly 1
+  in the last octet.
+- **Cloud API device ID** (`2D:DB:5C:E7:53:F4:74:56`) — an 8-byte value
+  Govee's authenticated Cloud API uses to address the device, which
+  itself embeds the WiFi MAC as its last 6 bytes plus a 2-byte prefix.
+
+This is normal for combo WiFi+BLE chips, which commonly derive separate
+per-radio MAC addresses from one base address with a small fixed offset,
+since WiFi and Bluetooth are logically separate network interfaces even
+on the same physical chip. `entity.py`'s `device_info` deliberately
+registers **both** the BLE and WiFi MACs as `connections` on the same HA
+device entry specifically so other integrations that discover this
+device via a *different* interface (e.g. a network-scanning integration
+that only ever sees the WiFi MAC) get correlated onto the same device in
+HA's registry, rather than showing up as an unrelated duplicate.
+
+**The device serial number is available over BLE**, despite not being
+somewhere obvious — `client.get_serial_number()` queries `ab` metadata
+field `0x05` (see `PROTOCOL.md` §8) and is wired into `device_info` as
+`serial_number`, fetched once at setup rather than on every poll since
+it's static. Confirmed stable across two independently captured sessions
+(identical value both times).
+
 ### Scene / effect activation
 
 `light.py`'s `_activate_scene` prefers a **full data upload**

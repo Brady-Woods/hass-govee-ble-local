@@ -5,6 +5,7 @@ import asyncio
 import logging
 import zlib
 
+from bleak.exc import BleakError
 from homeassistant.components import bluetooth
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
@@ -49,6 +50,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     _LOGGER.debug("Fetching initial status for %s", address)
     await coordinator.async_config_entry_first_refresh()
 
+    # Serial number is static (queried once, not part of the regular poll
+    # cycle - no reason to re-fetch it every 30s). A "nice to have," not
+    # essential to the integration working, so a failure here is logged
+    # and setup continues rather than blocking on it - matches the same
+    # graceful-degradation pattern as the scene library fetch above.
+    try:
+        serial_number = await client.get_serial_number()
+    except BleakError as err:
+        _LOGGER.debug("Could not fetch serial number for %s: %s", address, err)
+        serial_number = None
+    if serial_number:
+        _LOGGER.debug("Serial number for %s: %s", address, serial_number)
+
     @callback
     def _sync_device_registry() -> None:
         # device_info on entities is only applied once, at initial entity
@@ -69,6 +83,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             manufacturer="Govee",
             model="H60A6",
             hw_version=status.hardware_version,
+            serial_number=serial_number,
         )
 
     _sync_device_registry()
@@ -91,6 +106,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "client": client,
         "coordinator": coordinator,
         "scene_library": scene_library,
+        "serial_number": serial_number,
     }
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True

@@ -26,11 +26,16 @@ class GoveeH60A6Entity(CoordinatorEntity[GoveeH60A6Coordinator]):
     _attr_has_entity_name = True
 
     def __init__(
-        self, coordinator: GoveeH60A6Coordinator, address: str, device_name: str
+        self,
+        coordinator: GoveeH60A6Coordinator,
+        address: str,
+        device_name: str,
+        serial_number: str | None = None,
     ) -> None:
         super().__init__(coordinator)
         self._address = address
         self._device_name = device_name
+        self._serial_number = serial_number
 
     async def _run_client_command(self, coro: Coroutine[Any, Any, Any]) -> Any:
         """Run a client BLE call, turning a BleakError into a clean UI error.
@@ -61,4 +66,5 @@ class GoveeH60A6Entity(CoordinatorEntity[GoveeH60A6Coordinator]):
             manufacturer="Govee",
             model="H60A6",
             hw_version=status.hardware_version if status else None,
+            serial_number=self._serial_number,
         )
