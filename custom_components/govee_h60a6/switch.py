@@ -65,19 +65,9 @@ class GoveeH60A6ZoneSwitch(GoveeH60A6Entity, SwitchEntity):
         self._attr_unique_id = f"{address}_zone_{zone}"
         self._attr_name = zone_name
         self._attr_icon = icon
-        # Zone status readback is known-unreliable whenever the two zones
-        # differ (PROTOCOL.md 5.2) - confirmed via live testing to happen
-        # during ordinary toggling, not just "scene mode" as originally
-        # believed. Tracked optimistically from the last command sent
-        # until the real byte encoding is solved; None until this session
-        # has issued a command, so a fresh start still shows the
-        # coordinator's best-effort polled guess rather than nothing.
-        self._optimistic_is_on: bool | None = None
 
     @property
     def is_on(self) -> bool | None:
-        if self._optimistic_is_on is not None:
-            return self._optimistic_is_on
         status = self.coordinator.data
         if status is None:
             return None
@@ -86,13 +76,9 @@ class GoveeH60A6ZoneSwitch(GoveeH60A6Entity, SwitchEntity):
     async def async_turn_on(self, **kwargs: Any) -> None:
         _LOGGER.debug("Turning zone %d on", self._zone)
         await self._run_client_command(self._client.set_zone(self._zone, True))
-        self._optimistic_is_on = True
-        self.async_write_ha_state()
         await self.coordinator.async_request_refresh()
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         _LOGGER.debug("Turning zone %d off", self._zone)
         await self._run_client_command(self._client.set_zone(self._zone, False))
-        self._optimistic_is_on = False
-        self.async_write_ha_state()
         await self.coordinator.async_request_refresh()

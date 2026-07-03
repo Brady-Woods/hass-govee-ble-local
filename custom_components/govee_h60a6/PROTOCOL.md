@@ -273,28 +273,47 @@ triggerable any time the two zones differ - which is essentially any
 ordinary on/off toggle, not a special case - making it far more
 consequential than originally scoped.
 
-**Mitigation applied** (`light.py`, `switch.py`): on/off state is now
-tracked **optimistically** from the last command issued, the same pattern
-already used elsewhere in this project for RGB color and color
-temperature (see `README.md`'s architecture section - those two
-attributes have no BLE readback at all, so they've always been tracked
-this way). `GoveeH60A6Light._optimistic_is_on` and
-`GoveeH60A6ZoneSwitch._optimistic_is_on` are set immediately after a
-successful `set_zone` call and preferred over the coordinator's polled
-value whenever set. This makes the HA UI reflect what was actually
-commanded rather than an unreliable decode, at the cost of the known
-trade-off already accepted for RGB/color-temp: if zone state is changed
-from outside HA (the physical Govee app, a remote), HA won't reflect it
-until a command is issued through HA again. Given the status decode is
-unreliable in exactly the cases where this would matter most (the two
-zones differing), this is judged a clear net improvement, not a
-regression in honesty about what HA actually knows.
+**Mitigation applied, then reverted - the real lesson is below.**
+`light.py`/`switch.py` briefly tracked on/off **optimistically** from the
+last command issued (`_optimistic_is_on`), the same pattern used
+elsewhere in this project for RGB/color-temp (which have no BLE readback
+at all). This made the HA UI reflect what was commanded rather than the
+unreliable decode - but it had a real cost: if zone state changed from
+*outside* HA (the physical Govee app, a remote), HA would never reflect
+it, since the optimistic value always won once set. This wasn't
+theoretical - a user reported HA no longer staying in sync with app-side
+changes almost immediately after the mitigation shipped.
+
+**More importantly, it turned out to be solving the wrong problem for the
+case that prompted it.** Continued investigation of a persistent "still
+can't turn the light on/off" report - after the optimistic mitigation was
+already live - found the device's power state was stuck at the hardware
+level, confirmed by commanding power off through Govee's completely
+separate, official Cloud API and observing the same non-response (a
+`powerSwitch` command reported "success" but the device's own subsequent
+state query still showed it on). Brightness/color continued to work
+correctly on the same device throughout, over both BLE and cloud. That
+pattern - LED driver responsive, power/relay logic unresponsive, across
+two independent control paths - is a hardware/firmware wedge, not a
+protocol decoding bug. A physical power cycle resolved it.
+
+**Given that, the optimistic-tracking mitigation was reverted.** It cost
+real functionality (external-change sync) to paper over a symptom that,
+in the case that triggered it, wasn't actually caused by the decoding bug
+this section documents at all. The zone-state decoding bug itself is
+real and still unresolved (see the byte-level evidence above), but
+"on/off doesn't seem to respond" has at least two distinct possible
+causes now - the decode issue, and a device getting hardware-wedged - and
+conflating them led to a fix that made a real, unrelated problem (sync
+with external changes) worse without reliably solving the one it targeted.
+If a similar report recurs, check for a stuck device first (cross-check
+via the Cloud API control path, independent of this project's BLE code)
+before assuming it's this decoding bug.
 
 **Still fully unresolved**: the actual byte-level zone-state encoding in
-`_parse_status()`. This mitigation makes the symptom in HA go away; it
-does not fix the underlying decode, which remains needed for anything
-that depends on genuinely reading the device's real-world zone state
-(e.g. detecting an external change made via the Govee app).
+`_parse_status()`, needed for anything that depends on genuinely reading
+the device's real-world zone state (e.g. detecting an external change
+made via the Govee app).
 
 ## 6. Scene / effect data upload (`a3` opcode)
 

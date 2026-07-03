@@ -212,33 +212,52 @@ device, remove the corresponding names from that set.
 
 ### Zone on/off status readback is unreliable whenever the two zones differ
 
-Independent of the above, `PROTOCOL.md` §5.2/§5.2.1 documents an
-unresolved bug in how zone on/off state is *decoded from a status query*
-(not a problem with the on/off *command*, which is solid) — the
-byte-level encoding used for that field doesn't fit the simple model this
-integration currently implements. This was originally thought to be
-specific to the device being in "scene mode," but live testing showed
-it's broader: it can misreport any time the upper and lower zones simply
-differ from each other, which is essentially any ordinary partial on/off
-state, not a special case.
+`PROTOCOL.md` §5.2/§5.2.1 documents an unresolved bug in how zone on/off
+state is *decoded from a status query* (not a problem with the on/off
+*command*, which is solid) — the byte-level encoding used for that field
+doesn't fit the simple model this integration currently implements. It
+can misreport any time the upper and lower zones simply differ from each
+other, which is essentially any ordinary partial on/off state, not a
+special case.
 
-**This is mitigated in the UI, not fixed at the protocol level.** The
-light and both zone switch entities now track on/off **optimistically**
-from the last command actually sent, rather than trusting this unreliable
-decode — the same pattern already used for RGB color and color
-temperature (which have no BLE readback at all). This means the toggle in
-Home Assistant reliably reflects what you last told it to do. The
-trade-off, already accepted for RGB/color-temp: if zone state changes
-from *outside* HA (the physical Govee app, a remote), HA won't pick that
-up until a command is issued through HA again — since the status decode
-can't be trusted to reveal that anyway in exactly the cases where it
-would matter, this was judged a clear net improvement.
+An optimistic-tracking mitigation was tried and then **reverted** — see
+`PROTOCOL.md` §5.2.1 for the full account. Short version: it broke this
+integration's ability to notice zone changes made outside HA (the Govee
+app, a remote), and it turned out to be the wrong fix for the specific
+report that prompted it anyway (see below). `light.py`/`switch.py` once
+again trust the coordinator's polled zone state directly, with the known
+readback bug intact and unresolved. See `PROTOCOL.md` §10 item 5 for what
+real testing would be needed to actually fix the decode.
 
-The actual byte-level zone-state decode remains unresolved and would
-still be needed for anything that depends on genuinely reading real-world
-zone state (e.g. detecting an external change). See `PROTOCOL.md` §10
-item 5 for what's been ruled out so far and what real testing would be
-needed to solve it properly.
+### "The light won't turn on/off" isn't always this bug — check for a stuck device first
+
+A device can get wedged at the hardware/firmware level such that it
+stops responding to power/zone commands entirely, while still responding
+normally to brightness and color changes. This looks superficially
+similar to the status-decode bug above but is a completely different,
+unrelated problem — and no software fix in this integration can address
+it, because the device isn't executing the command at all, on *any*
+control path.
+
+**How to tell the difference**: command power off through Govee's
+official Cloud API directly (`POST /device/control` with
+`devices.capabilities.on_off`/`powerSwitch`, requires a Govee Developer
+API key), independent of this integration's BLE code entirely. If it
+reports success but a follow-up `POST /device/state` query still shows
+the device on, the device itself is wedged, not this integration. The fix
+is a physical power cycle (the wall switch, or the breaker for a hardwired
+fixture) — not a code change.
+
+One related, separate gotcha observed after a power cycle: the device can
+take a while to become visible to Home Assistant's Bluetooth stack again,
+independent of whether it's already back online via WiFi/the Govee app.
+Symptom in the log: `bleak_retry_connector.BleakOutOfConnectionSlotsError`
+with `never seen by any scanner`. This was confirmed to be a real
+Bluetooth-visibility gap, not a code bug — checked directly with
+`bluetoothctl devices` / `bluetoothctl scan on` on the HA host, which also
+didn't see the device. If this doesn't clear up within a few minutes on
+its own, try moving the device closer to the host's Bluetooth adapter, or
+restarting Home Assistant to force a fresh Bluetooth scan pass.
 
 ## File structure
 

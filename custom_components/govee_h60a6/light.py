@@ -105,18 +105,6 @@ class GoveeH60A6Light(GoveeH60A6Entity, LightEntity):
         self._optimistic_color_mode: ColorMode = ColorMode.COLOR_TEMP
         self._optimistic_rgb_color: tuple[int, int, int] | None = None
         self._optimistic_color_temp_kelvin: int | None = 4000
-        # Zone on/off status readback is known-unreliable whenever the two
-        # zones differ from each other (PROTOCOL.md 5.2) - live testing
-        # found this isn't limited to "scene mode" as originally believed,
-        # it can misreport during ordinary on/off toggling too, which made
-        # the light appear unresponsive/stuck in HA even though the
-        # command itself was landing correctly. Until the actual byte
-        # encoding is solved, on/off is tracked optimistically from the
-        # last command sent, same pattern as RGB/color-temp above (which
-        # have no reliable BLE readback at all). None until a command has
-        # been issued this session, so a fresh HA start still shows the
-        # coordinator's best-effort polled guess rather than nothing.
-        self._optimistic_is_on: bool | None = None
 
         if scene_library:
             self._attr_effect_list = _sorted_selectable_scenes(scene_library.keys())
@@ -129,8 +117,6 @@ class GoveeH60A6Light(GoveeH60A6Entity, LightEntity):
 
     @property
     def is_on(self) -> bool | None:
-        if self._optimistic_is_on is not None:
-            return self._optimistic_is_on
         status = self.coordinator.data
         if status is None or status.zone_upper_on is None or status.zone_lower_on is None:
             return None
@@ -238,17 +224,9 @@ class GoveeH60A6Light(GoveeH60A6Entity, LightEntity):
             await self._run_client_command(self._client.set_zone(ZONE_UPPER, True))
             await self._run_client_command(self._client.set_zone(ZONE_LOWER, True))
 
-        # Set after the commands above succeed (an exception raised by
-        # _run_client_command propagates before this line, so a failed
-        # command correctly leaves the optimistic state unchanged rather
-        # than claiming success it didn't have).
-        self._optimistic_is_on = True
-        self.async_write_ha_state()
         await self.coordinator.async_request_refresh()
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         await self._run_client_command(self._client.set_zone(ZONE_UPPER, False))
         await self._run_client_command(self._client.set_zone(ZONE_LOWER, False))
-        self._optimistic_is_on = False
-        self.async_write_ha_state()
         await self.coordinator.async_request_refresh()
