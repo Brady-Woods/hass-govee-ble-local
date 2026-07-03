@@ -66,17 +66,29 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     @callback
     def _sync_device_registry() -> None:
         # device_info on entities is only applied once, at initial entity
-        # registration. Re-syncing on every successful poll means a bad
-        # value from one flaky update (e.g. two lights' BLE traffic briefly
-        # cross-contaminating at startup) gets corrected on the next good
-        # one, instead of silently sticking in the registry forever.
+        # registration. Re-syncing on every successful poll is meant to
+        # let a bad value from one flaky update (e.g. two lights' BLE
+        # traffic briefly cross-contaminating at startup, or an old
+        # parsing bug) get corrected on the next good one - but
+        # async_get_or_create()'s `connections` argument only ever ADDS to
+        # the existing set (merge semantics), it never removes anything.
+        # A bad connection written once therefore stuck around forever
+        # sitting alongside the correct one, silently defeating the
+        # self-healing this was meant to provide (confirmed live: real
+        # device registry entries were found with a stale, garbled MAC
+        # connection alongside the correct one, months after the bad
+        # value was first written). async_update_device's
+        # `new_connections` does a full replace instead of a merge, so use
+        # that for the actual self-healing correction.
         status = coordinator.data
         if status is None:
             return
         connections = {(CONNECTION_BLE, address)}
         if status.wifi_mac:
             connections.add((dr.CONNECTION_NETWORK_MAC, status.wifi_mac))
-        dr.async_get(hass).async_get_or_create(
+
+        registry = dr.async_get(hass)
+        device_entry = registry.async_get_or_create(
             config_entry_id=entry.entry_id,
             identifiers={(DOMAIN, address)},
             connections=connections,
@@ -85,6 +97,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             hw_version=status.hardware_version,
             serial_number=serial_number,
         )
+        if device_entry.connections != connections:
+            registry.async_update_device(device_entry.id, new_connections=connections)
 
     _sync_device_registry()
     entry.async_on_unload(coordinator.async_add_listener(_sync_device_registry))

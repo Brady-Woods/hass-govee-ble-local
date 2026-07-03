@@ -150,6 +150,28 @@ device via a *different* interface (e.g. a network-scanning integration
 that only ever sees the WiFi MAC) get correlated onto the same device in
 HA's registry, rather than showing up as an unrelated duplicate.
 
+**A real bug, found and fixed via this question**: if you ever see *more
+than 2* MAC-shaped connections on the device page, that's not a third
+legitimate address - it's stale garbage. `__init__.py`'s
+`_sync_device_registry` re-syncs the registry on every successful poll
+specifically so a bad value from one flaky read self-heals on the next
+good one, but it originally did this via
+`device_registry.async_get_or_create(connections=...)`, whose
+`connections` argument only ever **adds** to the existing set - it never
+removes anything. A bad connection written once (e.g. from an early
+version of the WiFi-MAC parsing logic, or two lights' BLE traffic briefly
+cross-contaminating at startup) therefore stuck around forever sitting
+*alongside* the correct one, silently defeating the self-healing this was
+meant to provide. Confirmed live: real device registry entries were found
+carrying a garbled MAC (the correct WiFi MAC's bytes shifted by one
+position with a stray `10` appended) that had persisted for months
+alongside the correct one, invisible to every previous "self-heals on
+next poll" assumption. Fixed by switching to
+`device_registry.async_update_device(device_id, new_connections=...)`,
+whose `new_connections` does a full replace instead of a merge - verified
+live, the stale connection was gone after the very next successful poll,
+no manual registry editing needed.
+
 **The device serial number is available over BLE**, despite not being
 somewhere obvious — `client.get_serial_number()` queries `ab` metadata
 field `0x05` (see `PROTOCOL.md` §8) and is wired into `device_info` as
