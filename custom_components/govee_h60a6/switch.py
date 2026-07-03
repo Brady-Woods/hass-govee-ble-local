@@ -80,11 +80,11 @@ class GoveeH60A6ZoneSwitch(GoveeH60A6Entity, SwitchEntity):
         return status.zone_upper_on if self._zone == ZONE_UPPER else status.zone_lower_on
 
     async def async_turn_on(self, **kwargs: Any) -> None:
-        _LOGGER.debug("Turning zone %d on", self._zone)
+        _LOGGER.debug("Turning zone %d on for %s", self._zone, self._address)
         await self._run_client_command(self._client.set_zone(self._zone, True))
         await self.coordinator.async_request_refresh()
 
     async def async_turn_off(self, **kwargs: Any) -> None:
-        _LOGGER.debug("Turning zone %d off", self._zone)
+        _LOGGER.debug("Turning zone %d off for %s", self._zone, self._address)
         await self._run_client_command(self._client.set_zone(self._zone, False))
         await self.coordinator.async_request_refresh()

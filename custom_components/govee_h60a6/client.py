@@ -705,8 +705,21 @@ class GoveeH60A6Client:
         chunk_ff = chunks.get(0x05) or chunks.get(0xFF)
         if chunk_ff is not None and len(chunk_ff) >= 16:
             shift = 0 if has_chunk00 else 1
-            status.zone_lower_on = bool(chunk_ff[13 + shift])
-            status.zone_upper_on = bool(chunk_ff[14 + shift])
+            # BUG FOUND AND FIXED (2026-07-02): these two were swapped. The
+            # main light entity's is_on (zone_upper_on OR zone_lower_on)
+            # masked this for a long time since it doesn't care which byte
+            # is which, and the per-zone switches were assumed correct
+            # without ever being independently verified against a known,
+            # asymmetric physical state. Confirmed live: commanded
+            # upper=ON/lower=OFF via set_zone, then read status directly
+            # over BLE from Bazzite (isolated from core's own concurrent
+            # polling, which would otherwise contend for the device's
+            # single connection slot) - byte 13+shift read True and
+            # byte 14+shift read False, while the user visually confirmed
+            # the UPPER zone was the one actually lit. So byte 13+shift is
+            # upper, not lower.
+            status.zone_upper_on = bool(chunk_ff[13 + shift])
+            status.zone_lower_on = bool(chunk_ff[14 + shift])
 
         if has_chunk00 and len(chunk00) >= 16:
             status.brightness_pct = chunk00[10]

@@ -600,18 +600,44 @@ class TestParseStatus(unittest.TestCase):
         self.assertIsNone(rgb_status.scene_id)
 
     def test_zone_state_shift_applied_when_chunk_00_absent(self):
-        # KNOWN GAP (see PROTOCOL.md section 5.2): both fixtures here happen
-        # to have upper==lower, so this only confirms parsing doesn't crash
-        # and produces a bool - NOT that the value is correct in general.
-        # A live controlled test (upper=off, lower=on, chunk 0x00 present)
-        # proved the two-independent-flag model this code uses is wrong in
-        # at least one real case. Do not treat a pass here as validating
-        # zone-state correctness; it only covers the cases these two
-        # fixtures happen to represent.
+        # These two fixtures happen to have upper==lower, so this only
+        # confirms parsing doesn't crash and produces a bool for both modes'
+        # chunk layouts (chunk 0x00 present vs absent) - see
+        # test_zone_upper_lower_byte_assignment below for the test that
+        # actually locks in which byte is which zone.
         for chunks in (STATUS_CHUNKS_SCENE_MODE, STATUS_CHUNKS_RGB_MODE):
             status = self.client._parse_status(chunks)
             self.assertIsInstance(status.zone_upper_on, bool)
             self.assertIsInstance(status.zone_lower_on, bool)
+
+    def test_zone_upper_lower_byte_assignment(self):
+        # BUG FOUND AND FIXED (2026-07-02, see client.py's _parse_status):
+        # zone_upper_on and zone_lower_on were reading each other's byte.
+        # Confirmed live: commanded upper=ON/lower=OFF via set_zone, then
+        # queried status directly over BLE (isolated on Bazzite, away from
+        # core's own concurrent polling of the same device - two clients
+        # fighting over the device's single connection slot was corrupting
+        # earlier attempts at this same test) - the user visually confirmed
+        # the UPPER zone was the one actually lit, while the pre-fix code
+        # reported zone_lower_on=True/zone_upper_on=False for that exact
+        # response. This directly encodes that finding: byte 13+shift is
+        # upper, byte 14+shift is lower - not the other way around.
+        chunk_05 = bytearray(17)
+        chunk_05[13] = 1  # upper marker
+        chunk_05[14] = 0  # lower marker
+        chunks = {0x00: bytes(17), 0x05: bytes(chunk_05)}  # chunk 0x00 present -> shift=0
+        status = self.client._parse_status(chunks)
+        self.assertTrue(status.zone_upper_on)
+        self.assertFalse(status.zone_lower_on)
+
+        # And the inverse, to rule out a symmetric/coincidental pass above.
+        chunk_05_inverse = bytearray(17)
+        chunk_05_inverse[13] = 0
+        chunk_05_inverse[14] = 1
+        chunks_inverse = {0x00: bytes(17), 0x05: bytes(chunk_05_inverse)}
+        status_inverse = self.client._parse_status(chunks_inverse)
+        self.assertFalse(status_inverse.zone_upper_on)
+        self.assertTrue(status_inverse.zone_lower_on)
 
     def test_empty_chunks_produces_all_none_without_raising(self):
         status = self.client._parse_status({})
