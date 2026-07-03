@@ -210,54 +210,6 @@ chunks received" instead of waiting for the *specific* keys needed caused
 real, hard-to-diagnose bugs (one of the chunks we needed would go missing
 while an unrecognized one took its place in the count).
 
-### 5.3 More chunks exist than this project has ever collected (newly found, not yet decoded)
-
-The real app's own status query (captured 2026-07-02, same session as
-§4.2's per-segment discovery) received chunks `0x00` through `0x08`, then
-`0xFF` - **nine numbered chunks**, not the five (`0x00`-`0x04`) this
-project's `STATUS_CHUNK_ORDER` has ever collected. `client.py`'s
-`_query_status_chunks()` only waits for `(0x00, 0x01, 0x02, 0x03, 0x04,
-0xFF)` and stops as soon as those specific keys arrive - chunks `0x05`
-through `0x08` have been silently available and silently ignored this
-entire time.
-
-Reassembling chunks `0x05`-`0x08`+`0xFF` and looking at the raw bytes
-(captured while the device was in a solid warm-white color-temp state)
-found a **strongly repeating 4-byte pattern**: `64 ff ae 54` appears 13
-times, mostly in consecutive runs of 4, separated by short marker bytes
-(`11 01`, then `a5 11 02`, `a5 11 03`, `a5 05 04`, i.e. an incrementing
-index). `64` = 100 (a percentage - brightness?) and `ff ae 54` = `(255,
-174, 84)` - **the exact 2700K warm-white RGB tint from §4.1's Kelvin
-approximation table**, which is exactly the color/mode the device was in
-during this capture.
-
-**Working hypothesis, unconfirmed**: this looks like **per-segment status
-readback** - each segment's current brightness+RGB, in groups matching
-the 12-segment addressing scheme discovered in §4.2, all reporting the
-same value here because a solid color-temp command affects every segment
-uniformly. If true, this would be a significant capability this project
-has never used - genuine granular state readback, not just genuinely
-one-way commands.
-
-**Not yet done, needed before trusting this**:
-- A capture with *different* colors set on different segments (using
-  §4.2's new `set_segment_color`) immediately before a status query, to
-  see whether the corresponding 4-byte groups actually change to match -
-  the single-uniform-color capture available so far can't distinguish
-  "this is genuinely per-segment state" from "this is some other 12-count
-  structure that happens to look uniform right now."
-- Working out the exact index/marker byte meaning (why `11 01` for the
-  first group but `a5 11 0N` for the rest) and where the true chunk/group
-  boundaries are - not confirmed precisely, this section describes the
-  pattern found by inspection, not a fully reverse-engineered structure.
-- Deciding whether `_query_status_chunks()` should be changed to wait for
-  the fuller `0x00`-`0x08`+`0xFF` set - not done yet, since the *known*
-  fields this project already relies on (MAC, hw version, brightness,
-  scene ID, zone state) are all confirmed reachable via the current
-  shorter chunk set, and asking for more chunks means more can go wrong
-  in an already-fragile status query (§5.1's mode-dependent layout issues
-  and §5.2's zone-state mystery are both about the chunks already in use).
-
 ### 5.1 Mode-dependent layout (important, non-obvious)
 
 **The status response layout changes depending on whether the device is
@@ -425,6 +377,63 @@ before assuming it's this decoding bug.
 `_parse_status()`, needed for anything that depends on genuinely reading
 the device's real-world zone state (e.g. detecting an external change
 made via the Govee app).
+
+### 5.3 More status chunks exist than this project has ever collected - and they're genuine per-segment status readback (confirmed)
+
+**The status query trigger this project has used all along is
+incomplete.** `client.py` sends `ac 03 02 41 30`; the real app sends `ac
+03 03 41 30 a5` - a different third byte (`0x03` not `0x02`) and one
+extra trailing byte (`0xa5`). Sending the app's exact bytes instead of
+ours gets a **9-chunk response** (`0x00` through `0x08`), not the 5
+(`0x00`-`0x04`) `STATUS_CHUNK_ORDER` has ever asked for - chunks `0x05`
+through `0x08` have been silently reachable and silently never requested
+this entire time.
+
+**What's in those extra chunks is now confirmed, not just hypothesized.**
+An initial capture (device in a solid warm-white color-temp state) found
+a repeating 4-byte pattern - `64 ff ae 54`, i.e. 100% brightness + the
+exact 2700K RGB tint from §4.1 - appearing 13 times in groups, separated
+by incrementing index markers. That alone was ambiguous (a static color
+looks the same whether it's genuinely per-segment or some other
+uniform-right-now structure). The decisive test: the user set a solid
+color on the device (blue) through the real Govee app, then this project
+queried the fuller status directly (`ac 03 03 41 30 a5`, live, via
+`client.py`'s primitives) and found **every segment record now reporting
+RGB `(0, 0, 255)`** - the color genuinely tracks live device state, not
+something stale or coincidental.
+
+**Bonus finding from the same test**: the brightness byte preceding each
+segment's RGB triplet did *not* reset to a uniform value after the solid
+color change - it retained per-segment values (50, 60, 70, 81, 90, 100,
+1, 5, 10, 19...) matching, closely, the exact slider-drag sequence from
+the original per-segment brightness discovery (§4.2), captured hours
+earlier in a separate session. That's strong evidence brightness and
+color are stored **independently per segment** at the device level: a
+solid-color command updates every segment's color while leaving each
+segment's individually-set brightness alone. This is a second, unplanned
+confirmation that the underlying hardware genuinely has independent
+per-segment state, not just independent per-segment *commands*.
+
+**Still not done**:
+- A symmetric check on a second device (set to a different color, e.g.
+  red) for full confirmation - attempted, but the second device wasn't
+  reachable from the test host at the time (a real BLE-visibility gap,
+  not a code issue - confirmed with a 30s scan finding nothing). The
+  single blue-light confirmation is strong on its own, but a second data
+  point would rule out any remaining coincidence.
+- Working out the exact index/marker byte structure precisely (why the
+  first group's marker looks different from the rest) - the *content* of
+  the segment records is now confirmed live and accurate; the exact
+  chunk/group boundary bytes around them are understood by inspection,
+  not fully reverse-engineered.
+- Deciding whether to switch `_query_status_chunks()`/`STATUS_CHUNK_ORDER`
+  to the fuller trigger and actually parse per-segment state into
+  `GoveeH60A6Status` - not done yet. This would be a real, valuable
+  capability (genuine granular readback, useful independent of the
+  zone-state mystery in §5.2), but changes the status query this project
+  already depends on for MAC/hw-version/brightness/scene-id/zone-state,
+  all of which work today with the shorter trigger - worth doing
+  deliberately, not folding in casually.
 
 ## 6. Scene / effect data upload (`a3` opcode)
 
