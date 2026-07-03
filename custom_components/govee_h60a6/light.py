@@ -258,10 +258,16 @@ class GoveeH60A6Light(GoveeH60A6Entity, LightEntity):
 class GoveeH60A6SegmentLight(GoveeH60A6Entity, LightEntity):
     """One individually-addressable segment (PROTOCOL.md 4.2/5.3).
 
-    Unlike the main light entity's RGB/color-temp, segment color and
-    brightness genuinely can be read back from the device (confirmed live
-    - PROTOCOL.md 5.3), so this entity reflects real polled state instead
-    of tracking commands optimistically.
+    Segment color and brightness can be read back from the device, but
+    only via the opportunistic status chunks 0x05-0x08 (PROTOCOL.md 5.3),
+    which get dropped on many polls whenever the adapter is contended
+    (PROTOCOL.md 5.3.2) - so `status.segments` is frequently None even
+    though the device is perfectly reachable. To avoid the entity flapping
+    to unavailable (and becoming untoggleable) on every such poll, it
+    retains the last good reading and keeps showing it until a fresh one
+    arrives, and applies optimistic state on turn_on/turn_off so a command
+    is reflected immediately rather than waiting for a poll that might drop
+    the segment chunks.
 
     Named "Segment 0" through "Segment 11" by raw bitmask/record index,
     not a physical position (e.g. "front-left") - which bit corresponds
@@ -296,12 +302,20 @@ class GoveeH60A6SegmentLight(GoveeH60A6Entity, LightEntity):
         self._mask = 1 << index
         self._attr_unique_id = f"{address}_segment_{index}"
         self._attr_translation_placeholders = {"index": str(index)}
+        # Last successfully-read (or optimistically-set) segment state,
+        # retained across polls that drop the opportunistic segment chunks.
+        self._last_segment: GoveeH60A6Segment | None = None
 
     def _segment(self) -> GoveeH60A6Segment | None:
+        # Refresh the cache whenever this poll actually carried segment
+        # data; otherwise fall back to the last good reading. Returns None
+        # only before we've ever seen segment data for this device (a truly
+        # offline device is handled separately by `available` via the
+        # coordinator's last_update_success).
         status = self.coordinator.data
-        if status is None or status.segments is None:
-            return None
-        return status.segments[self._index]
+        if status is not None and status.segments is not None:
+            self._last_segment = status.segments[self._index]
+        return self._last_segment
 
     @property
     def is_on(self) -> bool | None:
@@ -326,35 +340,50 @@ class GoveeH60A6SegmentLight(GoveeH60A6Entity, LightEntity):
 
     @property
     def available(self) -> bool:
-        # In addition to the usual coordinator-availability check, a
-        # segment entity specifically needs segment data to have parsed
-        # successfully at least once - which isn't guaranteed the same
-        # way the rest of status is (PROTOCOL.md 5.3: chunks 0x05-0x08
-        # are captured opportunistically, not required for the status
-        # query to otherwise succeed).
+        # Available as long as the device itself is reachable (coordinator
+        # succeeding) AND we've seen segment data at least once - after
+        # which the retained last-known reading keeps the entity usable
+        # through the frequent polls that drop the segment chunks, instead
+        # of flapping to unavailable on every one of them.
         return super().available and self._segment() is not None
 
     async def async_turn_on(self, **kwargs: Any) -> None:
+        # Seed the optimistic result from the last known state so an
+        # unspecified attribute (e.g. color-only command) keeps its
+        # previous value.
+        current = self._segment()
+        new_r, new_g, new_b = (current.r, current.g, current.b) if current else (255, 255, 255)
+        new_bri = current.brightness_pct if current else 100
+
         if ATTR_RGB_COLOR in kwargs:
-            r, g, b = kwargs[ATTR_RGB_COLOR]
-            _LOGGER.debug("Setting segment %d color to (%d, %d, %d)", self._index, r, g, b)
-            await self._run_client_command(self._client.set_segment_color(self._mask, r, g, b))
+            new_r, new_g, new_b = kwargs[ATTR_RGB_COLOR]
+            _LOGGER.debug("Setting segment %d color to (%d, %d, %d)", self._index, new_r, new_g, new_b)
+            await self._run_client_command(self._client.set_segment_color(self._mask, new_r, new_g, new_b))
 
         if ATTR_BRIGHTNESS in kwargs:
-            pct = round(kwargs[ATTR_BRIGHTNESS] / 255 * 100)
-            _LOGGER.debug("Setting segment %d brightness to %d%%", self._index, pct)
-            await self._run_client_command(self._client.set_segment_brightness(self._mask, pct))
+            new_bri = round(kwargs[ATTR_BRIGHTNESS] / 255 * 100)
+            _LOGGER.debug("Setting segment %d brightness to %d%%", self._index, new_bri)
+            await self._run_client_command(self._client.set_segment_brightness(self._mask, new_bri))
         elif not self.is_on:
             # Plain "turn on" with no explicit brightness, and the segment
             # was previously off (brightness 0, our only concept of "off"
             # for a segment - PROTOCOL.md 5.3 found no separate on/off bit)
             # - restore to full brightness rather than silently staying at 0.
+            new_bri = 100
             _LOGGER.debug("Turning on segment %d at full brightness", self._index)
             await self._run_client_command(self._client.set_segment_brightness(self._mask, 100))
 
+        # Reflect the command immediately, and keep showing it through polls
+        # that drop the segment chunks (a real poll overwrites this later).
+        self._last_segment = GoveeH60A6Segment(self._index, new_bri, new_r, new_g, new_b)
+        self.async_write_ha_state()
         await self.coordinator.async_request_refresh()
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         _LOGGER.debug("Turning off segment %d (brightness -> 0)", self._index)
         await self._run_client_command(self._client.set_segment_brightness(self._mask, 0))
+        current = self._segment()
+        r, g, b = (current.r, current.g, current.b) if current else (0, 0, 0)
+        self._last_segment = GoveeH60A6Segment(self._index, 0, r, g, b)
+        self.async_write_ha_state()
         await self.coordinator.async_request_refresh()
