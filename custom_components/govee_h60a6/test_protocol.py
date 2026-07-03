@@ -362,6 +362,48 @@ class TestCommandConstruction(unittest.TestCase):
         kelvin = (prefix[7] << 8) | prefix[8]
         self.assertEqual(kelvin, const.MAX_COLOR_TEMP_KELVIN)
 
+    def test_set_segment_color_matches_real_capture_bit5_red(self):
+        # Real captured command (PROTOCOL.md 4.2): bit 5 (mask 0x0020) set
+        # to red while tapping through individual segments in the app.
+        # Full 20-byte capture (with checksum) was
+        # "33051501ff0000000000000020000000000000fd"; drop the trailing
+        # checksum byte since _sent_prefix() returns the pre-checksum
+        # prefix passed into send_command().
+        run(self.client.set_segment_color(0x0020, 0xFF, 0x00, 0x00))
+        expected = bytes.fromhex("33051501ff0000000000000020000000000000fd")[:-1]
+        self.assertEqual(self._sent_prefix(), expected)
+
+    def test_set_segment_color_matches_real_capture_bit11_purple(self):
+        # Real captured command: bit 11 (mask 0x0800) set to purple
+        # (0x8b, 0x00, 0xff) - confirms the mask byte shifts into the
+        # second (high) byte correctly, not just the first. Full capture:
+        # "330515018b00ff0000000000000800000000005e".
+        run(self.client.set_segment_color(0x0800, 0x8B, 0x00, 0xFF))
+        expected = bytes.fromhex("330515018b00ff0000000000000800000000005e")[:-1]
+        self.assertEqual(self._sent_prefix(), expected)
+
+    def test_set_segment_brightness_matches_real_capture(self):
+        # Real captured command (PROTOCOL.md 4.2): 100% brightness, mask
+        # 0x0020 (same segment/bit as the red color test above). Full
+        # capture: "3305150264200000000000000000000000000065".
+        run(self.client.set_segment_brightness(0x0020, 100))
+        expected = bytes.fromhex("3305150264200000000000000000000000000065")[:-1]
+        self.assertEqual(self._sent_prefix(), expected)
+
+    def test_set_segment_brightness_clamps_to_0_100(self):
+        run(self.client.set_segment_brightness(0x0001, 255))
+        self.assertEqual(self._sent_prefix()[4], 100)
+
+        self.client.send_command.reset_mock()
+        run(self.client.set_segment_brightness(0x0001, -10))
+        self.assertEqual(self._sent_prefix()[4], 0)
+
+    def test_set_segment_color_mask_byte_order_is_little_endian(self):
+        # mask 0x1234 -> low byte 0x34 first, high byte 0x12 second
+        run(self.client.set_segment_color(0x1234, 1, 2, 3))
+        prefix = self._sent_prefix()
+        self.assertEqual(prefix[12:14], bytes([0x34, 0x12]))
+
 
 class TestKelvinToRgb(unittest.TestCase):
     def test_warmest_close_to_real_capture(self):

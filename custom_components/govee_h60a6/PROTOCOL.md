@@ -130,6 +130,69 @@ rather than needing more reference points. **2700K–6500K is this device's
 actual supported range** (confirmed as the app's slider min/max), not an
 arbitrary choice.
 
+### 4.2 Per-segment color and brightness control (newly discovered)
+
+A fresh BLE capture (`btsnoop_hci.log`, phone connected via Bazzite,
+2026-07-02) of the app's per-segment controls revealed a **16-bit
+bitmask sub-family of `33 05 15`**, distinct from the solid-color/color-temp
+commands in §4 (which always use a fixed `ff 1f` trailer and no bitmask).
+This is a real capability this device has that neither this project nor
+any prior-art source (§11) had previously found or used.
+
+**Confirmed structure** (checksum verified byte-for-byte against this
+project's own `_checksum` implementation - identical algorithm, no
+surprises):
+
+| Prefix | Meaning |
+|---|---|
+| `33 05 15 01 <r> <g> <b> 00 00 00 00 00 <mask_lo> <mask_hi> 00 00 00 00 00` | Set RGB color on the segment(s) selected by the 16-bit little-endian bitmask. |
+| `33 05 15 02 <pct> <mask_lo> <mask_hi> 00 00 00 00 00 00 00 00 00 00` | Set brightness (0-100 decimal) on the segment(s) selected by the same bitmask scheme. |
+
+Both ack with a generic `33 05 00...` (presence-only, not content-meaningful,
+consistent with §4's general note on ack payloads).
+
+**Bitmask, confirmed via real capture**: the app was used to tap through
+individual segments one at a time, producing exactly one bit set per
+command. Observed bits, in the order tapped:
+
+```
+color family (33 05 15 01), descending through two groups of 6:
+  0x0020 (bit 5)  0x0010 (bit 4)  0x0008 (bit 3)  0x0004 (bit 2)  0x0002 (bit 1)  0x0001 (bit 0)
+  0x0800 (bit 11) 0x0400 (bit 10) 0x0200 (bit 9)  0x0100 (bit 8)  0x0080 (bit 7)  0x0040 (bit 6)
+```
+
+**This strongly suggests 12 individually-addressable segments** (bits
+0-11), tapped in two groups of 6 in the app's UI - plausibly one group of
+6 per physical zone (upper ring / lower panel), though which bits map to
+which physical zone has not yet been confirmed by observation (would need
+a live test watching which physical LEDs actually light up for a given
+bit, not just capturing the command). **Bits 12-15 were never observed
+set in this capture** - unknown whether they're unused, or whether the
+app's UI simply didn't expose a 13th+ segment to tap.
+
+The brightness family (`33 05 15 02`) was captured mid-slider-drag, so
+most samples show a *decreasing* percentage (100 → 100 → 90 → 81 → 70 →
+60 → 50 → 41 → 29 → 19 → 10 → 5 → 1) against a shifting bitmask - consistent
+with "set brightness `<pct>` on segment(s) `<mask>`" fired continuously
+as a slider is dragged across different segment icons. One sample showed
+two adjacent bits set simultaneously (`0x0030` = bits 4 and 5) - plausibly
+a brief multi-segment selection mid-drag, not evidence of a different
+field meaning.
+
+**Not yet done, and needed before trusting this further**:
+- Live testing to confirm which bit actually corresponds to which
+  physical segment/LED position (capture-only evidence establishes the
+  *command format*, not the *physical mapping*).
+- Testing bits 12-15 and combinations of multiple bits set at once
+  deliberately (not just as a drag artifact) to see if genuine
+  multi-segment-at-once addressing works as expected.
+- Checking whether `ac` status queries reveal any per-segment state after
+  using this command family (a quick survey of this same capture found
+  the status query traffic unchanged - still just the same simple
+  heartbeat/device-info chunks documented in §5 - so per-segment state is
+  likely still not exposed via status readback, consistent with
+  everything else found about this device's status query).
+
 ## 5. Status query (`ac` opcode)
 
 Request: `ac 03 02 41 30` (checksummed, encrypted with session key).

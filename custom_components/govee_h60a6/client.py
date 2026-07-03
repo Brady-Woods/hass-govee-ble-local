@@ -265,6 +265,57 @@ class GoveeH60A6Client:
             )
         )
 
+    async def set_segment_color(self, segment_mask: int, r: int, g: int, b: int) -> None:
+        """Set RGB color on one or more individually-addressable segments.
+
+        NEWLY DISCOVERED (see PROTOCOL.md 4.2) - distinct from
+        set_rgb_color's solid-color command (which always uses a fixed
+        `ff 1f` trailer and no bitmask). `segment_mask` is a 16-bit
+        little-endian bitmask; bits 0-11 were confirmed via a real capture
+        of the app's per-segment picker (12 individually-addressable
+        segments, tapped one at a time). Bits 12-15 are untested - not
+        confirmed unused, just never observed set in the capture this was
+        derived from. Which physical bit maps to which physical LED/zone
+        position has NOT been confirmed - only the command format has.
+        """
+        mask_lo = segment_mask & 0xFF
+        mask_hi = (segment_mask >> 8) & 0xFF
+        await self.send_command(
+            bytes(
+                [
+                    0x33, 0x05, 0x15, 0x01,
+                    r, g, b,
+                    0x00, 0x00, 0x00, 0x00, 0x00,
+                    mask_lo, mask_hi,
+                    0x00, 0x00, 0x00, 0x00, 0x00,
+                ]
+            )
+        )
+
+    async def set_segment_brightness(self, segment_mask: int, pct: int) -> None:
+        """Set brightness (0-100) on one or more individually-addressable
+        segments. NEWLY DISCOVERED (see PROTOCOL.md 4.2), same bitmask
+        scheme as set_segment_color but a different sub-opcode (0x02) and
+        the mask sits immediately after the single brightness byte rather
+        than after an RGB triplet. Captured mid-slider-drag in the app, so
+        the exact interaction between multiple simultaneous bits and this
+        value is not yet confirmed - see PROTOCOL.md 4.2 for what's still
+        untested.
+        """
+        pct = max(0, min(100, pct))
+        mask_lo = segment_mask & 0xFF
+        mask_hi = (segment_mask >> 8) & 0xFF
+        await self.send_command(
+            bytes(
+                [
+                    0x33, 0x05, 0x15, 0x02,
+                    pct,
+                    mask_lo, mask_hi,
+                    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                ]
+            )
+        )
+
     async def set_scene(self, scene_id: tuple[int, int]) -> None:
         """Bare scene activation only. Works if the device already has this
         scene's data cached from prior use; otherwise may silently no-op.
