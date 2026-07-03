@@ -58,7 +58,7 @@ of the light.
 
 The BLE control protocol (encryption, handshake, command framing, status
 parsing) is being factored out into a standalone Python package,
-[`govee-ble-local`](https://github.com/bradywoods/govee-ble-local), which this
+[`govee-ble-local`](https://github.com/Brady-Woods/govee-ble-local), which this
 integration depends on. That keeps the reusable device logic independent of
 Home Assistant and testable on its own, with this repo providing the thin HA
 adapter layer (entities, config flow, coordinator).

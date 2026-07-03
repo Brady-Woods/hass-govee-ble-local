@@ -6,7 +6,7 @@
       "local_name": "GVH60A6*"
     }
   ],
-  "codeowners": ["@REPLACE_WITH_YOUR_GITHUB_HANDLE"],
+  "codeowners": ["@Brady-Woods"],
   "config_flow": true,
   "dependencies": ["bluetooth_adapters"],
   "integration_type": "device",
