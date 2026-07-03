@@ -89,9 +89,10 @@ matters is the scene-upload completion ack (§6) and status queries (§5).
 | `33 05 15 01 <r> <g> <b> 00 00 00 00 00 ff 1f` | Set solid RGB color. |
 | `33 05 15 01 ff ff ff <k_hi> <k_lo> <ar> <ag> <ab> ff 1f` | Set color temperature. `k_hi`/`k_lo` = big-endian Kelvin value. `ar/ag/ab` = an approximate RGB tint for that color temperature (see §4.1) — appears to be cosmetic, not authoritative. |
 | `aa 00 ...` (all zero payload) | Heartbeat/keepalive. Sent by the app every ~2s while connected; device echoes it back identically. Not required for command correctness, just observed app behavior. |
-| `ac 03 02 41 30` | Status query trigger (see §5). |
+| `ac 03 03 41 30 a5` | Status query trigger (see §5.3 - supersedes the originally-documented `ac 03 02 41 30`, which only returns a subset of chunks). |
 | `a3 <seq> <17 bytes>` | Scene/effect data chunk (see §6). |
 | `ab 01 <field_id> ...` | Device metadata field query (see §8). |
+| `33 09 6a 47 <2 bytes> 01 f9` | Sent by the app once per connection, immediately after the handshake and before the status/device-info query. Purpose unclear - newly found (2026-07-02, a ~2.5 hour capture spanning multiple connect cycles). `6a 47` was constant across every observed instance; the following 2 bytes varied between connections in a way roughly consistent with elapsed time (differed by ~7 across two connections ~6.7s apart), suggesting a session counter or partial timestamp rather than anything device-specific. Device's ack is a generic `33 09 00...00` echo with no distinguishing content. Not implemented or required by this project - status queries and commands work fine without ever sending this - but worth documenting since it's a real, consistently-observed part of the app's own connection sequence that this project has never replicated. |
 
 Confirmed **not** available over BLE (cloud-only, per live testing with
 phone in airplane mode — see §9): Power-off Memory setting, device display
@@ -690,6 +691,28 @@ outright BLE disconnect, a more severe symptom than the others. Sunset
 clean header pattern and work fine, so the real size threshold is
 somewhere between ~254 and ~336 bytes - still not pinned down, and this
 remains a **separate, unresolved** issue from Cause 1. See §10.
+
+**Still no fresh-upload capture of a `0xFF`-header or oversized scene
+obtained, despite a dedicated attempt.** A ~2.5 hour capture
+(2026-07-02) specifically covering a full cycle through every scene in
+the library found that **every single one of Aurora, Dandelion, Desert,
+Fall, Winter, Green Wheat Field, and Ocean** was activated via bare/cached
+activation (`33 05 04` with no preceding `a3` upload) - the device
+already had every one of them cached from earlier testing in this same
+investigation, despite the long gap and multiple sessions in between.
+This confirms the device's scene cache is durable (survives across
+sessions, possibly indefinitely, not just "recently used"), which is
+useful to know but doesn't get us the reference data cause 1/cause 2
+need. The same capture did yield 9 new real fresh-upload captures for
+*other* scenes (Rainbow, Forest, Firefly, Flower Field, Christmas,
+Christmas B, Halloween, Halloween B, Stream) - all from the
+already-solved "simple" header family (`byte[1] != 0x20`, `byte[0]`
+raw-then-flagged `0x50`→`0x58` exactly matching the existing fix), adding
+more corroboration for that family but nothing new for the `0x20`-family
+mystery. **Getting a real capture for cause 1 or 2 now requires either a
+genuinely fresh/reset device, or deliberately clearing this device's
+scene cache first** (method unknown/unconfirmed) - simply re-activating
+an already-tried scene, however much time has passed, isn't sufficient.
 
 ### 6.4 Practical note: bare activation vs. full upload
 
