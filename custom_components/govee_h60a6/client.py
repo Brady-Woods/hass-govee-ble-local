@@ -705,23 +705,27 @@ class GoveeH60A6Client:
         # right chunk under either query: with the short query 0x05 is
         # absent so it falls through to 0xFF.)
         chunk_ff = chunks.get(0x05) or chunks.get(0xFF)
-        if chunk_ff is not None and len(chunk_ff) >= 16:
+        if chunk_ff is not None:
             shift = 0 if has_chunk00 else 1
-            # BUG FOUND AND FIXED (2026-07-02): these two were swapped. The
-            # main light entity's is_on (zone_upper_on OR zone_lower_on)
-            # masked this for a long time since it doesn't care which byte
-            # is which, and the per-zone switches were assumed correct
-            # without ever being independently verified against a known,
-            # asymmetric physical state. Confirmed live: commanded
-            # upper=ON/lower=OFF via set_zone, then read status directly
-            # over BLE from Bazzite (isolated from core's own concurrent
-            # polling, which would otherwise contend for the device's
-            # single connection slot) - byte 13+shift read True and
-            # byte 14+shift read False, while the user visually confirmed
-            # the UPPER zone was the one actually lit. So byte 13+shift is
-            # upper, not lower.
-            status.zone_upper_on = bool(chunk_ff[13 + shift])
-            status.zone_lower_on = bool(chunk_ff[14 + shift])
+            if len(chunk_ff) >= 16 + shift:
+                # Zone power state. Decoded from a full 4-state truth table
+                # captured live on two devices (2026-07-03, chunk00 present
+                # so shift 0):
+                #     U=0 L=0 -> byte14=0x00 byte15=0x00
+                #     U=1 L=0 -> byte14=0x00 byte15=0x01
+                #     U=0 L=1 -> byte14=0x01 byte15=0x00
+                #     U=1 L=1 -> byte14=0x01 byte15=0x01
+                # => byte 14 = LOWER zone, byte 15 = UPPER zone.
+                #
+                # Earlier revisions read byte 13 for a zone, but byte 13 is a
+                # STATIC 0x02 that never changes with power - so it always
+                # reported that zone ON regardless of the real state (the
+                # "HA shows on when the light is off" bug). An interim "swap
+                # fix" only appeared to work because it was validated against
+                # a single state where byte 13 happened to match. byte 14
+                # (lower) was already correct; byte 15 (upper) is the fix.
+                status.zone_lower_on = bool(chunk_ff[14 + shift])
+                status.zone_upper_on = bool(chunk_ff[15 + shift])
 
         if has_chunk00 and len(chunk00) >= 16:
             status.brightness_pct = chunk00[10]

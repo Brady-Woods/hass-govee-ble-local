@@ -610,34 +610,33 @@ class TestParseStatus(unittest.TestCase):
             self.assertIsInstance(status.zone_upper_on, bool)
             self.assertIsInstance(status.zone_lower_on, bool)
 
-    def test_zone_upper_lower_byte_assignment(self):
-        # BUG FOUND AND FIXED (2026-07-02, see client.py's _parse_status):
-        # zone_upper_on and zone_lower_on were reading each other's byte.
-        # Confirmed live: commanded upper=ON/lower=OFF via set_zone, then
-        # queried status directly over BLE (isolated on Bazzite, away from
-        # core's own concurrent polling of the same device - two clients
-        # fighting over the device's single connection slot was corrupting
-        # earlier attempts at this same test) - the user visually confirmed
-        # the UPPER zone was the one actually lit, while the pre-fix code
-        # reported zone_lower_on=True/zone_upper_on=False for that exact
-        # response. This directly encodes that finding: byte 13+shift is
-        # upper, byte 14+shift is lower - not the other way around.
-        chunk_05 = bytearray(17)
-        chunk_05[13] = 1  # upper marker
-        chunk_05[14] = 0  # lower marker
-        chunks = {0x00: bytes(17), 0x05: bytes(chunk_05)}  # chunk 0x00 present -> shift=0
-        status = self.client._parse_status(chunks)
-        self.assertTrue(status.zone_upper_on)
-        self.assertFalse(status.zone_lower_on)
-
-        # And the inverse, to rule out a symmetric/coincidental pass above.
-        chunk_05_inverse = bytearray(17)
-        chunk_05_inverse[13] = 0
-        chunk_05_inverse[14] = 1
-        chunks_inverse = {0x00: bytes(17), 0x05: bytes(chunk_05_inverse)}
-        status_inverse = self.client._parse_status(chunks_inverse)
-        self.assertFalse(status_inverse.zone_upper_on)
-        self.assertTrue(status_inverse.zone_lower_on)
+    def test_zone_upper_lower_full_truth_table(self):
+        # Full 4-state truth table captured live on two devices (2026-07-03)
+        # by stepping set_zone through every (upper, lower) combination and
+        # reading the terminator chunk each time. byte 14 = LOWER zone,
+        # byte 15 = UPPER zone; byte 13 is a static 0x02 that does NOT track
+        # power (an earlier revision read it as a zone, which is why HA
+        # reported a zone ON even when the light was physically off). This
+        # test encodes all four real states so the mapping can't silently
+        # regress to a single-state coincidence again.
+        #
+        # Real terminator bytes (from the capture), byte13=02 constant:
+        #   U=0 L=0 -> ...30 02 00 00   U=1 L=0 -> ...30 02 00 01
+        #   U=0 L=1 -> ...30 02 01 00   U=1 L=1 -> ...30 02 01 01
+        base = bytes.fromhex("00000080000000804102020130020000a5")
+        for upper, lower in ((0, 0), (1, 0), (0, 1), (1, 1)):
+            term = bytearray(base)
+            term[13] = 0x02  # static marker, must be ignored
+            term[14] = lower
+            term[15] = upper
+            chunks = {0x00: bytes(17), 0x05: bytes(term)}  # chunk00 present -> shift 0
+            status = self.client._parse_status(chunks)
+            self.assertEqual(
+                status.zone_upper_on, bool(upper), f"upper wrong for U={upper} L={lower}"
+            )
+            self.assertEqual(
+                status.zone_lower_on, bool(lower), f"lower wrong for U={upper} L={lower}"
+            )
 
     def test_empty_chunks_produces_all_none_without_raising(self):
         status = self.client._parse_status({})

@@ -14,5 +14,5 @@
   "loggers": ["bleak", "bleak_retry_connector"],
   "quality_scale": "platinum",
   "requirements": ["bleak-retry-connector>=3.0.0", "cryptography>=41.0.0"],
-  "version": "0.8.4"
+  "version": "0.8.5"
 }
