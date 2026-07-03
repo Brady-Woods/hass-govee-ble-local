@@ -96,10 +96,25 @@ traceback as an "unexpected error."
   readback path at all** — the device doesn't expose them via status
   query — so they're tracked optimistically from the last command sent,
   the same pattern used by most write-only BLE light integrations.
+- **`light.py`** (`GoveeH60A6SegmentLight`, one per segment, 12 total) —
+  independent RGB + brightness control for each individually-addressable
+  segment (PROTOCOL.md 4.2/5.3). Unlike the main light, segment color and
+  brightness genuinely can be read back from the device, so these reflect
+  real polled state, not optimistic tracking. Named "Segment 0" through
+  "Segment 11" by raw bitmask/status-record index — not a physical
+  position — since which bit maps to which physical LED hasn't been
+  confirmed by direct observation, only that the command bit and status
+  record index agree with each other. This naming and the
+  one-entity-per-segment approach matches `wez/govee2mqtt`'s convention
+  for other segmented Govee models (researched before implementing — see
+  PROTOCOL.md 5.3.1).
 - **`switch.py`** (`GoveeH60A6ZoneSwitch`, one per zone) — independent
   on/off control for the upper ring and lower panel, for cases where the
   main light entity's combined on/off isn't granular enough (e.g. an
-  automation that only wants the ring, not the panel).
+  automation that only wants the ring, not the panel). Coarser-grained
+  than the per-segment lights above — these two zones are a different,
+  older concept in this project than the 12 individually-addressable
+  segments, and it's not yet confirmed how (or whether) they overlap.
 - **`entity.py`** — shared base class. `_run_client_command` wraps every
   BLE call so a `BleakError` becomes a clean `HomeAssistantError` toast
   instead of a raw traceback in the UI. `device_info` is built fresh from

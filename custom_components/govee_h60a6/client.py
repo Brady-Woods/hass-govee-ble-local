@@ -29,8 +29,21 @@ DISCONNECT_DELAY = 2  # seconds of inactivity before dropping the BLE connection
 # __init__.py), not by cutting retry resilience.
 CONNECT_MAX_ATTEMPTS = 4
 STATUS_CHUNK_TIMEOUT = 2  # seconds to wait for each status chunk
-STATUS_CHUNK_ORDER = (0x00, 0x01, 0x02, 0x03, 0x04, 0xFF)
+# The original status query trigger (`ac 03 02 41 30`) only ever returns
+# chunks 0x00-0x04+0xFF. The real app instead sends `ac 03 03 41 30 a5`
+# (PROTOCOL.md 5.3) - a different 3rd byte and one extra trailing byte -
+# which additionally returns chunks 0x05-0x08, carrying per-segment
+# status (see SEGMENT_COUNT below). STATUS_CHUNK_REQUIRED is what a status
+# query must have to be considered successful (unchanged from before, so
+# existing reliability for MAC/hw-version/brightness/scene-id/zone-state
+# isn't put at risk by this addition); STATUS_CHUNK_ACCEPTED additionally
+# captures 0x05-0x08 when they show up, without requiring them - if a
+# future capture ever finds a mode where they're absent, status queries
+# for everything else keep working, only per-segment data goes missing.
+STATUS_CHUNK_REQUIRED = (0x00, 0x01, 0x02, 0x03, 0x04, 0xFF)
+STATUS_CHUNK_ACCEPTED = STATUS_CHUNK_REQUIRED + (0x05, 0x06, 0x07, 0x08)
 METADATA_FIELD_TIMEOUT = 2  # seconds to wait for each `ab` metadata field chunk
+SEGMENT_COUNT = 12  # confirmed via live testing (PROTOCOL.md 4.2/5.3) - bits/records 0-11
 
 
 def _aes_ecb(key16: bytes, block16: bytes, encrypt: bool) -> bytes:
@@ -85,6 +98,67 @@ def _parse_metadata_field_text(raw: bytes) -> str | None:
         return None
 
 
+def _parse_segment_records(chunks: dict[int, bytes]) -> list["GoveeH60A6Segment"] | None:
+    """Extract per-segment (brightness, r, g, b) state from status chunks
+    0x05-0x08 (+ the tail end of 0xFF) - PROTOCOL.md 5.3.
+
+    Confirmed structure via byte-for-byte comparison of two real captures
+    with different colors set: a fixed 19-byte header (all of chunk 0x05,
+    then the first 2 bytes of chunk 0x06 - identical regardless of color),
+    followed by 3 groups of [4 records of 4 bytes each][a fixed 3-byte
+    marker]. Record layout within each 4-byte group is
+    `[brightness_pct, r, g, b]`. Bit-to-record mapping confirmed identical
+    (record N = segment/bit N) by live-testing bits 0, 1, 5, and 11 -
+    spanning the full range - and observing exactly that record change
+    color each time, no others.
+
+    Returns None if the accepted chunks aren't all present or the
+    reassembled stream is too short to contain all 12 records - this is
+    treated as "segment data unavailable this poll", not a hard failure,
+    since the fields this project has relied on since before this feature
+    existed (MAC, hw version, brightness, scene ID, zone state) don't
+    depend on these chunks at all (see STATUS_CHUNK_REQUIRED).
+    """
+    if any(k not in chunks for k in (0x05, 0x06, 0x07, 0x08)):
+        _LOGGER.debug(
+            "Segment records unavailable: missing chunk(s) from %s (have %s)",
+            {0x05, 0x06, 0x07, 0x08} - set(chunks),
+            sorted(chunks.keys()),
+        )
+        return None
+    stream = b"".join(chunks.get(k, b"") for k in (0x05, 0x06, 0x07, 0x08, 0xFF))
+
+    header_len = 19
+    group_size = 4 * 4  # 4 records x 4 bytes
+    marker_len = 3
+    records_needed = header_len + 2 * (group_size + marker_len) + group_size
+    if len(stream) < records_needed:
+        # Chunk 0xFF's length varies poll to poll (it's whatever's left
+        # over after all preceding chunks, not a fixed size) - this is a
+        # real, seen-live case, not hypothetical: on a host with more BLE
+        # contention (PROTOCOL.md's long-documented adapter-sharing
+        # issues), 0xFF sometimes arrives short by a few bytes, which
+        # isn't caught by the missing-chunk-key check above since all of
+        # 0x05-0x08 can still be fully present.
+        _LOGGER.debug(
+            "Segment records unavailable: reassembled stream too short "
+            "(%d bytes, need %d) - chunk 0xFF was likely truncated this poll",
+            len(stream),
+            records_needed,
+        )
+        return None
+
+    segments = []
+    pos = header_len
+    for _group in range(3):
+        for _ in range(4):
+            brightness, r, g, b = stream[pos : pos + 4]
+            segments.append(GoveeH60A6Segment(len(segments), brightness, r, g, b))
+            pos += 4
+        pos += marker_len
+    return segments
+
+
 def _kelvin_to_rgb(kelvin: int) -> tuple[int, int, int]:
     """Approximate the black-body RGB tint for a color temperature.
 
@@ -118,6 +192,21 @@ def _kelvin_to_rgb(kelvin: int) -> tuple[int, int, int]:
 
 
 @dataclass
+class GoveeH60A6Segment:
+    """One individually-addressable segment's current state (PROTOCOL.md
+    4.2/5.3). `index` is both the record position in the status response
+    and the bit position in the set_segment_color/brightness bitmask -
+    confirmed identical via live testing (setting bit N always changed
+    record N, checked at N=0,1,5,11 spanning the full range)."""
+
+    index: int
+    brightness_pct: int
+    r: int
+    g: int
+    b: int
+
+
+@dataclass
 class GoveeH60A6Status:
     zone_upper_on: bool | None = None
     zone_lower_on: bool | None = None
@@ -126,6 +215,7 @@ class GoveeH60A6Status:
     hardware_version: str | None = None
     ble_mac: str | None = None
     wifi_mac: str | None = None
+    segments: list[GoveeH60A6Segment] | None = None
 
 
 class GoveeH60A6Client:
@@ -423,7 +513,12 @@ class GoveeH60A6Client:
     async def _query_status_chunks(self) -> dict[int, bytes]:
         assert self._client is not None and self._session_key is not None
         await self._drain_notify_queue()
-        plaintext = _build_plaintext(bytes([0xAC, 0x03, 0x02, 0x41, 0x30]))
+        # `ac 03 03 41 30 a5` - the real app's exact bytes (PROTOCOL.md
+        # 5.3), not the `ac 03 02 41 30` this project used originally.
+        # That difference (3rd byte, one extra trailing byte) is what
+        # unlocks chunks 0x05-0x08 (per-segment status) in addition to the
+        # original 0x00-0x04+0xFF.
+        plaintext = _build_plaintext(bytes([0xAC, 0x03, 0x03, 0x41, 0x30, 0xA5]))
         ciphertext = _encrypt_packet(self._session_key, plaintext)
         _LOGGER.debug("Requesting status from %s", self._ble_device.address)
         await self._client.write_gatt_char(WRITE_CHAR_UUID, ciphertext, response=False)
@@ -436,14 +531,18 @@ class GoveeH60A6Client:
             # exercising color temp/calibration), and counting those toward
             # our target caused us to stop early while still missing one of
             # the chunks we need (corrupting MAC/hw-version parsing).
-            while not set(STATUS_CHUNK_ORDER).issubset(chunks):
+            # Only STATUS_CHUNK_REQUIRED gates completion - 0x05-0x08 are
+            # captured opportunistically (STATUS_CHUNK_ACCEPTED) without
+            # being required, so a device/mode that doesn't return them
+            # doesn't break everything else this query is relied on for.
+            while not set(STATUS_CHUNK_REQUIRED).issubset(chunks):
                 resp = await asyncio.wait_for(
                     self._notify_queue.get(), timeout=STATUS_CHUNK_TIMEOUT
                 )
                 pt = _decrypt_packet(self._session_key, resp)
                 if pt[0] != 0xAC:
                     continue
-                if pt[1] not in STATUS_CHUNK_ORDER:
+                if pt[1] not in STATUS_CHUNK_ACCEPTED:
                     _LOGGER.debug(
                         "Ignoring unrecognized status chunk 0x%02x from %s",
                         pt[1],
@@ -457,6 +556,10 @@ class GoveeH60A6Client:
                 self._ble_device.address,
                 sorted(chunks.keys()),
             )
+        # Note: whether the opportunistic segment-data chunks (0x05-0x08)
+        # came through fully is logged inside _parse_segment_records
+        # itself, once it's clear whether it's a missing-chunk case or a
+        # too-short-reassembled-stream case (both seen live - see there).
         return chunks
 
     async def get_status(self) -> GoveeH60A6Status:
@@ -568,7 +671,18 @@ class GoveeH60A6Client:
         chunk00 = chunks.get(0x00)
         has_chunk00 = chunk00 is not None
 
-        chunk_ff = chunks.get(0xFF)
+        # Regression found and fixed live (2026-07-02): switching
+        # _query_status_chunks() to the fuller trigger (5.3) changed what
+        # ends up tagged chunk 0xFF - with more total data now in the
+        # response, the same underlying bytes that used to be the
+        # terminator chunk in the shorter response are now tagged 0x05
+        # instead (confirmed byte-for-byte: bytes 0-12 identical between
+        # the old chunk_ff and the new chunk_05 across multiple captures).
+        # 0xFF in the fuller response is now the tail end of segment data,
+        # not zone state. Prefer 0x05 (the fuller query's real terminator
+        # equivalent); fall back to 0xFF for safety if a future capture
+        # ever returns the shorter structure again.
+        chunk_ff = chunks.get(0x05) or chunks.get(0xFF)
         if chunk_ff is not None and len(chunk_ff) >= 16:
             shift = 0 if has_chunk00 else 1
             status.zone_lower_on = bool(chunk_ff[13 + shift])
@@ -595,6 +709,8 @@ class GoveeH60A6Client:
                 self._ble_device.address,
                 stream.hex(),
             )
+
+        status.segments = _parse_segment_records(chunks)
 
         return status
 

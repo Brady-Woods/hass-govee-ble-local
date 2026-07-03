@@ -414,26 +414,100 @@ segment's individually-set brightness alone. This is a second, unplanned
 confirmation that the underlying hardware genuinely has independent
 per-segment state, not just independent per-segment *commands*.
 
-**Still not done**:
-- A symmetric check on a second device (set to a different color, e.g.
-  red) for full confirmation - attempted, but the second device wasn't
-  reachable from the test host at the time (a real BLE-visibility gap,
-  not a code issue - confirmed with a 30s scan finding nothing). The
-  single blue-light confirmation is strong on its own, but a second data
-  point would rule out any remaining coincidence.
-- Working out the exact index/marker byte structure precisely (why the
-  first group's marker looks different from the rest) - the *content* of
-  the segment records is now confirmed live and accurate; the exact
-  chunk/group boundary bytes around them are understood by inspection,
-  not fully reverse-engineered.
-- Deciding whether to switch `_query_status_chunks()`/`STATUS_CHUNK_ORDER`
-  to the fuller trigger and actually parse per-segment state into
-  `GoveeH60A6Status` - not done yet. This would be a real, valuable
-  capability (genuine granular readback, useful independent of the
-  zone-state mystery in §5.2), but changes the status query this project
-  already depends on for MAC/hw-version/brightness/scene-id/zone-state,
-  all of which work today with the shorter trigger - worth doing
-  deliberately, not folding in casually.
+### 5.3.1 Bit-to-record mapping confirmed, and now fully implemented
+
+**The mapping between a control bitmask bit and a status record index is
+the identity function** - `record[N]` reports segment/bit `N`'s state,
+confirmed by live-testing bits 0, 1, 5, and 11 (spanning the full 0-11
+range): setting exactly one bit to a unique color (red) via
+`set_segment_color`, then querying the fuller status, showed *only* that
+bit's corresponding record change - no permutation, no offset.
+
+**Exact structure, fully mapped** (byte-for-byte comparison of two real
+captures with different colors set): reassemble chunks `0x05, 0x06, 0x07,
+0x08, 0xFF` in that order. Bytes `0`-`18` are a fixed 19-byte header
+(chunk `0x05` in full, plus the first 2 bytes of chunk `0x06` - identical
+regardless of color). Then 3 groups of `[4 records of 4 bytes each: `
+`brightness_pct, r, g, b`][a fixed 3-byte marker]` - 12 records total,
+covering all confirmed segments. Minimum stream length to safely extract
+all 12: 73 bytes.
+
+**Now implemented end-to-end**:
+- `client.py`: `_query_status_chunks()` sends the fuller trigger (`ac 03
+  03 41 30 a5`) unconditionally. `STATUS_CHUNK_REQUIRED` (unchanged: `0x00,
+  0x01, 0x02, 0x03, 0x04, 0xFF`) still gates when a status query is
+  considered complete, so existing reliability for MAC/hw-version/
+  brightness/scene-id/zone-state isn't put at risk; `STATUS_CHUNK_ACCEPTED`
+  additionally captures `0x05`-`0x08` opportunistically. `GoveeH60A6Segment`
+  (a new dataclass: `index, brightness_pct, r, g, b`) and
+  `GoveeH60A6Status.segments: list[GoveeH60A6Segment] | None` hold the
+  parsed result; `_parse_segment_records()` (a pure function, unit-tested
+  against a real capture) does the extraction, returning `None` rather
+  than a wrong/partial list if the accepted chunks aren't all present or
+  the stream is too short.
+- `light.py`: 12 new `GoveeH60A6SegmentLight` entities ("Segment 0"
+  through "Segment 11", generic index-based names matching the convention
+  `wez/govee2mqtt` uses for the same reason - see below), each a full
+  `ColorMode.RGB` light reflecting real polled state (not optimistic
+  tracking, unlike the main light's RGB/color-temp - segment state is
+  confirmed genuinely readable, unlike those). "Off" is defined as
+  brightness 0 (no separate on/off bit was found for segments); turning
+  on with no explicit brightness restores 100%.
+
+**Still open**: which bit corresponds to which *physical* LED position on
+the fixture has not been confirmed by direct visual observation - only
+that the command bit and status record index agree with each other.
+Entities are named by raw index for this reason (matching the
+`wez/govee2mqtt` precedent for other segmented Govee models, confirmed
+via research before implementing - WLED and govee2mqtt both use
+entity-per-segment with generic index names at this segment count,
+whereas high-zone-count devices like LIFX Z favor a single entity plus a
+custom service instead). Also still open: the exact meaning of the
+non-color-record marker bytes between groups, and whether bits 12-15
+exist and are simply never populated, or don't exist at all.
+
+### 5.3.2 Two problems found only after deploying live - one fixed, one environmental
+
+**Critical regression, found and fixed same-day**: switching
+`_query_status_chunks()` to the fuller trigger unconditionally broke zone
+on/off status - `zone_upper_on`/`zone_lower_on` came back `None` on every
+live poll after deploying. Root cause: chunk `0xFF`'s *content* changes
+between the two trigger variants, not just its presence. With the
+original short trigger, chunk `0xFF` (the terminator, whatever's left
+over) happens to contain the zone-state bytes at offset 13/14 - that's
+what §5.2's whole byte-encoding investigation was built on. With the
+fuller trigger, there's much more total data before the terminator, so
+`0xFF` now contains the *tail of the segment records* instead - the zone
+bytes are still there, just relabeled. Confirmed byte-for-byte: bytes
+0-12 of the old chunk `0xFF` and the new chunk `0x05` are identical
+across multiple captures; only the trailing zone-state bytes differ
+(because the actual zone state differed between those captures, not
+because the structure did). **Fix**: zone-state parsing now reads
+`chunks.get(0x05) or chunks.get(0xFF)`, preferring `0x05` (the fuller
+trigger's real terminator-equivalent) and falling back to `0xFF` for
+safety. This restores exactly the same (already-imperfect, §5.2-unresolved)
+reliability level as before - it does not additionally fix the zone-state
+byte-encoding mystery itself, which remains open.
+
+**Environmental limitation, not a bug**: on `core` (this project's
+two-lights-plus-HA's-own-scanning host, with long-documented BLE adapter
+contention - see the README's operational notes), chunk `0xFF` itself is
+frequently *dropped* entirely - live logs show `got chunks [0, 1, 2, 3,
+4, 5, 6, 7, 8]`, missing `0xFF`, on the majority of polls. This doesn't
+break anything else (thanks to the zone-state fix above landing on `0x05`
+instead), but it does mean `_parse_segment_records()` can't complete
+record 11 (which needs a few bytes from `0xFF`) and correctly falls back
+to `segments = None` for that poll - diagnosable via a debug log
+distinguishing "chunk missing" from "reassembled stream too short"
+(`_LOGGER.debug` inside `_parse_segment_records` itself). This is a real
+BLE reliability difference between hosts, not something introduced by
+this feature - the fuller trigger simply asks for more notifications per
+query (9-10 vs 6), and the last one in a longer burst is more likely to
+be the one dropped on a busier adapter. Confirmed *not* to happen on
+Bazzite (dedicated test host, no contention) across every live test this
+feature was developed and verified against. Segment entities correctly
+report `unavailable` in HA when this happens, rather than showing stale
+or wrong data (see `GoveeH60A6SegmentLight.available` in `light.py`).
 
 ## 6. Scene / effect data upload (`a3` opcode)
 

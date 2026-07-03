@@ -204,6 +204,35 @@ STATUS_CHUNKS_RGB_MODE = {
     0x04: bytes.fromhex("ff640000800f0023100000008000000080"),
 }
 
+# Real capture (device D4:13:68:21:D0:75, solid green set via
+# set_rgb_color(0, 255, 0)) using the app's exact status-query bytes
+# (PROTOCOL.md 5.3) - the first real capture obtained through this
+# project's own updated client.py rather than hand-assembled from a
+# btsnoop log. Includes the full 0x00-0x08+0xFF chunk set, so this is the
+# regression test for per-segment status parsing end to end.
+STATUS_CHUNKS_WITH_SEGMENTS = {
+    0xFF: bytes.fromhex("002900ff00a505043200ff000000000000"),
+    0x00: bytes.fromhex("0a000c0300010101040101050415010000"),
+    0x01: bytes.fromhex("07070675d0216813d407111074d0216813"),
+    0x02: bytes.fromhex("d478040100290104030000070d11d41368"),
+    0x03: bytes.fromhex("21d0740100290104031104001e0f0f1207"),
+    0x04: bytes.fromhex("00640000800f0023100000008000000080"),
+    0x05: bytes.fromhex("00000080000000804102020130020001a5"),
+    0x06: bytes.fromhex("11013200ff003c00ff004600ff005100ff"),
+    0x07: bytes.fromhex("00a511025a00ff006400ff000100ff0005"),
+    0x08: bytes.fromhex("00ff00a511030a00ff001300ff001d00ff"),
+}
+# Expected (brightness_pct, r, g, b) per segment, index = bit position,
+# read directly off the live client.get_status() output for the capture
+# above - all green, with each segment's individually-set brightness (a
+# leftover from an earlier, unrelated per-segment brightness test)
+# undisturbed by the solid-color command.
+STATUS_SEGMENTS_EXPECTED = [
+    (50, 0, 255, 0), (60, 0, 255, 0), (70, 0, 255, 0), (81, 0, 255, 0),
+    (90, 0, 255, 0), (100, 0, 255, 0), (1, 0, 255, 0), (5, 0, 255, 0),
+    (10, 0, 255, 0), (19, 0, 255, 0), (29, 0, 255, 0), (41, 0, 255, 0),
+]
+
 
 # ---------------------------------------------------------------------------
 # Pure crypto/framing primitives
@@ -611,6 +640,81 @@ class TestParseStatus(unittest.TestCase):
         status = self.client._parse_status(chunks)
         self.assertIsNone(status.zone_upper_on)
         self.assertIsNone(status.zone_lower_on)
+
+    def test_segments_none_when_chunks_05_08_absent(self):
+        # Neither fixture includes chunks 0x05-0x08 (both predate this
+        # project ever requesting them - PROTOCOL.md 5.3) - segments must
+        # stay None, not raise or return a bogus partial list.
+        status = self.client._parse_status(STATUS_CHUNKS_SCENE_MODE)
+        self.assertIsNone(status.segments)
+        status = self.client._parse_status(STATUS_CHUNKS_RGB_MODE)
+        self.assertIsNone(status.segments)
+
+    def test_segments_populated_from_real_capture(self):
+        # Full end-to-end real capture (device D4:13:68:21:D0:75, solid
+        # green) - this device's MAC must be used or the unrelated
+        # MAC-anchor search (for ble_mac/wifi_mac/hw_version) would fail,
+        # though that's not what this test is checking.
+        client = make_client("D4:13:68:21:D0:75")
+        status = client._parse_status(STATUS_CHUNKS_WITH_SEGMENTS)
+        self.assertIsNotNone(status.segments)
+        self.assertEqual(len(status.segments), 12)
+        for i, (expected, segment) in enumerate(zip(STATUS_SEGMENTS_EXPECTED, status.segments)):
+            brightness, r, g, b = expected
+            self.assertEqual(segment.index, i)
+            self.assertEqual(segment.brightness_pct, brightness)
+            self.assertEqual((segment.r, segment.g, segment.b), (r, g, b))
+
+    def test_zone_state_still_populated_with_fuller_chunk_set(self):
+        # Regression test for a real bug found live: switching
+        # _query_status_chunks() to the fuller trigger (PROTOCOL.md 5.3)
+        # changed what ends up tagged chunk 0xFF - the bytes that used to
+        # carry zone state there in the shorter response are now tagged
+        # 0x05 instead (0xFF becomes the tail of segment data). Naively
+        # keeping the old "always read zone bits from chunk 0xFF" logic
+        # silently produced zone_upper_on=None/zone_lower_on=None with
+        # this fuller chunk set instead of a wrong-but-present value. This
+        # doesn't assert the *correct* value (that's section 5.2's
+        # separate, still-unresolved mystery) - only that a real,
+        # fuller-response capture doesn't regress to None.
+        client = make_client("D4:13:68:21:D0:75")
+        status = client._parse_status(STATUS_CHUNKS_WITH_SEGMENTS)
+        self.assertIsNotNone(status.zone_upper_on)
+        self.assertIsNotNone(status.zone_lower_on)
+
+
+class TestParseSegmentRecords(unittest.TestCase):
+    """Direct tests of the pure _parse_segment_records helper, isolated
+    from the rest of _parse_status."""
+
+    def test_real_capture_all_12_segments(self):
+        segments = client_mod._parse_segment_records(STATUS_CHUNKS_WITH_SEGMENTS)
+        self.assertIsNotNone(segments)
+        self.assertEqual(len(segments), 12)
+        self.assertEqual(segments[0].brightness_pct, 50)
+        self.assertEqual((segments[0].r, segments[0].g, segments[0].b), (0, 255, 0))
+        # bit/record 11 specifically - confirmed via live testing to be
+        # the one at the far end of the range, spanning the 0xFF chunk.
+        self.assertEqual(segments[11].brightness_pct, 41)
+        self.assertEqual((segments[11].r, segments[11].g, segments[11].b), (0, 255, 0))
+
+    def test_missing_any_of_05_08_gives_none(self):
+        for missing in (0x05, 0x06, 0x07, 0x08):
+            chunks = {k: v for k, v in STATUS_CHUNKS_WITH_SEGMENTS.items() if k != missing}
+            self.assertIsNone(
+                client_mod._parse_segment_records(chunks),
+                f"expected None when chunk 0x{missing:02x} is missing",
+            )
+
+    def test_missing_0xff_gives_none(self):
+        # 0x05-0x08 alone (68 bytes) aren't enough to reach record 11
+        # (needs some of 0xFF too) - must not return a truncated 11-item
+        # list silently.
+        chunks = {k: v for k, v in STATUS_CHUNKS_WITH_SEGMENTS.items() if k != 0xFF}
+        self.assertIsNone(client_mod._parse_segment_records(chunks))
+
+    def test_empty_chunks_gives_none(self):
+        self.assertIsNone(client_mod._parse_segment_records({}))
 
 
 class TestFormatMac(unittest.TestCase):

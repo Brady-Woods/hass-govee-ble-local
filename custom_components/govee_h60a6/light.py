@@ -18,7 +18,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .client import GoveeH60A6Client
+from .client import SEGMENT_COUNT, GoveeH60A6Client
 from .const import (
     BROKEN_SCENE_NAMES,
     DOMAIN,
@@ -39,18 +39,30 @@ async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
     data = hass.data[DOMAIN][entry.entry_id]
-    async_add_entities(
-        [
-            GoveeH60A6Light(
-                data["coordinator"],
-                data["client"],
-                entry.data["address"],
-                entry.title,
-                data.get("scene_library") or {},
-                data.get("serial_number"),
-            )
-        ]
+    address = entry.data["address"]
+    serial_number = data.get("serial_number")
+    entities: list[LightEntity] = [
+        GoveeH60A6Light(
+            data["coordinator"],
+            data["client"],
+            address,
+            entry.title,
+            data.get("scene_library") or {},
+            serial_number,
+        )
+    ]
+    entities.extend(
+        GoveeH60A6SegmentLight(
+            data["coordinator"],
+            data["client"],
+            address,
+            entry.title,
+            index,
+            serial_number,
+        )
+        for index in range(SEGMENT_COUNT)
     )
+    async_add_entities(entities)
 
 
 def _scene_id(scene_code: int) -> tuple[int, int]:
@@ -231,4 +243,103 @@ class GoveeH60A6Light(GoveeH60A6Entity, LightEntity):
     async def async_turn_off(self, **kwargs: Any) -> None:
         await self._run_client_command(self._client.set_zone(ZONE_UPPER, False))
         await self._run_client_command(self._client.set_zone(ZONE_LOWER, False))
+        await self.coordinator.async_request_refresh()
+
+
+class GoveeH60A6SegmentLight(GoveeH60A6Entity, LightEntity):
+    """One individually-addressable segment (PROTOCOL.md 4.2/5.3).
+
+    Unlike the main light entity's RGB/color-temp, segment color and
+    brightness genuinely can be read back from the device (confirmed live
+    - PROTOCOL.md 5.3), so this entity reflects real polled state instead
+    of tracking commands optimistically.
+
+    Named "Segment 0" through "Segment 11" by raw bitmask/record index,
+    not a physical position (e.g. "front-left") - which bit corresponds
+    to which physical LED position on the fixture has not been confirmed
+    by direct observation, only the command format and the fact that the
+    command bit and status record index are the same number (PROTOCOL.md
+    5.3). This matches the naming convention used by
+    wez/govee2mqtt for the same reason, for other Govee segmented models.
+    """
+
+    _attr_supported_color_modes = {ColorMode.RGB}
+    _attr_color_mode = ColorMode.RGB
+
+    def __init__(
+        self,
+        coordinator: GoveeH60A6Coordinator,
+        client: GoveeH60A6Client,
+        address: str,
+        device_name: str,
+        index: int,
+        serial_number: str | None = None,
+    ) -> None:
+        super().__init__(coordinator, address, device_name, serial_number)
+        self._client = client
+        self._index = index
+        self._mask = 1 << index
+        self._attr_unique_id = f"{address}_segment_{index}"
+        self._attr_name = f"Segment {index}"
+
+    def _segment(self):
+        status = self.coordinator.data
+        if status is None or status.segments is None:
+            return None
+        return status.segments[self._index]
+
+    @property
+    def is_on(self) -> bool | None:
+        segment = self._segment()
+        if segment is None:
+            return None
+        return segment.brightness_pct > 0
+
+    @property
+    def brightness(self) -> int | None:
+        segment = self._segment()
+        if segment is None:
+            return None
+        return round(segment.brightness_pct / 100 * 255)
+
+    @property
+    def rgb_color(self) -> tuple[int, int, int] | None:
+        segment = self._segment()
+        if segment is None:
+            return None
+        return (segment.r, segment.g, segment.b)
+
+    @property
+    def available(self) -> bool:
+        # In addition to the usual coordinator-availability check, a
+        # segment entity specifically needs segment data to have parsed
+        # successfully at least once - which isn't guaranteed the same
+        # way the rest of status is (PROTOCOL.md 5.3: chunks 0x05-0x08
+        # are captured opportunistically, not required for the status
+        # query to otherwise succeed).
+        return super().available and self._segment() is not None
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        if ATTR_RGB_COLOR in kwargs:
+            r, g, b = kwargs[ATTR_RGB_COLOR]
+            _LOGGER.debug("Setting segment %d color to (%d, %d, %d)", self._index, r, g, b)
+            await self._run_client_command(self._client.set_segment_color(self._mask, r, g, b))
+
+        if ATTR_BRIGHTNESS in kwargs:
+            pct = round(kwargs[ATTR_BRIGHTNESS] / 255 * 100)
+            _LOGGER.debug("Setting segment %d brightness to %d%%", self._index, pct)
+            await self._run_client_command(self._client.set_segment_brightness(self._mask, pct))
+        elif not self.is_on:
+            # Plain "turn on" with no explicit brightness, and the segment
+            # was previously off (brightness 0, our only concept of "off"
+            # for a segment - PROTOCOL.md 5.3 found no separate on/off bit)
+            # - restore to full brightness rather than silently staying at 0.
+            _LOGGER.debug("Turning on segment %d at full brightness", self._index)
+            await self._run_client_command(self._client.set_segment_brightness(self._mask, 100))
+
+        await self.coordinator.async_request_refresh()
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        _LOGGER.debug("Turning off segment %d (brightness -> 0)", self._index)
+        await self._run_client_command(self._client.set_segment_brightness(self._mask, 0))
         await self.coordinator.async_request_refresh()
