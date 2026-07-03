@@ -14,6 +14,115 @@ still unresolved — see [`PROTOCOL.md`](./PROTOCOL.md). That document is
 the primary technical record of this project; this README is oriented
 around the *code*, not the *wire format*.
 
+## Supported devices
+
+- **Govee H60A6** ("Govee Ceiling Light Pro"), both hardware zones. The
+  integration is model-specific: it only claims BLE devices advertising a
+  local name starting with `GVH60A6`. Other Govee models are not supported.
+
+## Supported functionality
+
+| Entity | Type | Capabilities |
+| --- | --- | --- |
+| Main light | `light` | On/off, brightness, RGB color, color temperature (2700–6500 K), scenes/effects |
+| Upper ring / Lower panel | `switch` ×2 | Independent on/off for each physical zone |
+| Segment 0–11 | `light` ×12 | Per-segment color/brightness (**disabled by default** — enable in the entity settings if you want them) |
+
+A **diagnostics** download is available from the device page (MAC addresses
+and serial number are redacted).
+
+## Installation
+
+1. Copy the `govee_h60a6` folder into `config/custom_components/`
+   (or add this repository as a custom repository in HACS), then restart
+   Home Assistant.
+2. The light is discovered automatically over Bluetooth — a discovery
+   notification appears under **Settings → Devices & Services**. Click
+   **Configure** and confirm.
+3. If it isn't auto-discovered, use **Add Integration → Govee H60A6** to
+   pick it from the list of nearby devices. Setup needs a working Bluetooth
+   adapter (or an ESPHome Bluetooth proxy) within range of the light.
+
+## Removal
+
+Delete the integration entry from **Settings → Devices & Services →
+Govee H60A6 → ⋮ → Delete**. That removes all its entities and the device;
+there is no cloud account or external state to clean up. If you installed
+manually, you can then also delete the `custom_components/govee_h60a6`
+folder.
+
+## Data updates
+
+The integration is **local-polling**: the coordinator queries the light
+over BLE every 30 seconds (`POLL_INTERVAL_SECONDS`) and after each command.
+Zone on/off, brightness, current scene, and per-segment color/brightness
+are read back from the device. RGB color and color temperature have **no
+BLE readback** and are tracked optimistically from the last command sent
+(see the light entity docstring and PROTOCOL.md §5). Multiple lights stagger
+their poll schedules to avoid fighting over the adapter's connection slots.
+
+## Use cases
+
+- Circadian lighting: drive color temperature from an automation across the
+  day, warm at night and cool during the day.
+- Zone ambiance: keep the lower panel off and run only the upper ring (or
+  vice versa) as accent lighting via the two zone switches.
+- Per-segment scenes: enable the segment lights to paint individual
+  segments different colors from a script or scene.
+
+## Automation examples
+
+Warm, dim light at sunset:
+
+```yaml
+automation:
+  - alias: "Ceiling light warm at sunset"
+    trigger:
+      - platform: sun
+        event: sunset
+    action:
+      - service: light.turn_on
+        target:
+          entity_id: light.gvh60a67457
+        data:
+          color_temp_kelvin: 2700
+          brightness_pct: 40
+```
+
+Turn on only the upper ring:
+
+```yaml
+      - service: switch.turn_on
+        target:
+          entity_id: switch.gvh60a67457_upper_ring
+      - service: switch.turn_off
+        target:
+          entity_id: switch.gvh60a67457_lower_panel
+```
+
+## Troubleshooting
+
+- **Entity shows *Unavailable*.** Almost always Bluetooth range/visibility.
+  Confirm the light is powered on and within ~10 m of an adapter or a
+  Bluetooth proxy. HA retries with exponential backoff and recovers on its
+  own once the device is seen again.
+- **The light won't turn on/off, but color/brightness still work.** The
+  device can get into a wedged BLE state that a software fix can't clear —
+  power-cycle it at the mains. See the "stuck device" note under
+  [Known issues](#the-light-wont-turn-onoff-isnt-always-this-bug--check-for-a-stuck-device-first).
+- **Some scenes are missing from the effect list.** A handful of scenes are
+  hidden because they don't render correctly over BLE — see
+  [Broken scenes](#broken-scenes-hidden-from-the-effect-picker).
+- **I want per-segment control.** The 12 `Segment N` light entities are
+  disabled by default; enable them from the device page.
+- **Enable debug logging** to capture the BLE exchange:
+
+  ```yaml
+  logger:
+    logs:
+      custom_components.govee_h60a6: debug
+  ```
+
 ## Architecture / execution flow
 
 ### Startup (`__init__.py`)
@@ -348,21 +457,27 @@ restarting Home Assistant to force a fresh Bluetooth scan pass.
 ## File structure
 
 ```
-__init__.py       Integration setup: creates the shared client/coordinator per
-                   device, fetches the scene library, registers platforms.
-client.py         BLE client: encryption/handshake, connection lifecycle,
+__init__.py        Integration setup: builds the typed runtime_data (client,
+                   coordinator, scene library, serial), registers platforms.
+client.py          BLE client: encryption/handshake, connection lifecycle,
                    all command builders, status query + parsing.
-config_flow.py    Bluetooth-discovery and manual-address config flow.
-const.py          Shared constants: UUIDs, PSK, zone IDs, the static scene
-                   fallback table, and the broken-scenes denylist.
+config_flow.py     Bluetooth-discovery, manual-address, and reconfigure flow.
+const.py           Shared constants: UUIDs, PSK, zone IDs, name prefix, the
+                   static scene fallback table, and the broken-scenes denylist.
 coordinator.py     DataUpdateCoordinator: periodic status polling.
+diagnostics.py     Config-entry diagnostics (with MAC/serial redaction).
 entity.py          Shared base entity: error-wrapping helper, device_info.
-light.py           The light entity: power/brightness/color/scene control.
+light.py           Main light + 12 per-segment light entities.
 scene_library.py   Fetches the live scene library from Govee's public API;
                    builds the a3-chunked scene upload payload.
 switch.py          Per-zone (upper ring / lower panel) switch entities.
 manifest.json      HA integration manifest.
+strings.json       Source strings: config flow, entity names, exceptions.
+icons.json         Entity icon translations (zone switches).
+translations/      Localized copies of strings.json (en.json).
+quality_scale.yaml Per-rule Integration Quality Scale tracking (Platinum).
+py.typed           PEP 561 marker: this package ships inline type hints.
 PROTOCOL.md        The full reverse-engineered BLE protocol reference.
-test_protocol.py   Standalone unit tests built from real captured fixtures
-                   (no Home Assistant install required to run).
+test_protocol.py   Standalone protocol unit tests from real captured fixtures.
+test_config_flow.py Standalone config-flow tests (both need no HA install).
 ```

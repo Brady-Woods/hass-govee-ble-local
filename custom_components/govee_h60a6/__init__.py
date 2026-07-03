@@ -4,10 +4,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import zlib
+from dataclasses import dataclass
 
 from bleak.exc import BleakError
 from homeassistant.components import bluetooth
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import device_registry as dr
@@ -16,15 +18,29 @@ from .client import GoveeH60A6Client
 from .const import DOMAIN
 from .coordinator import GoveeH60A6Coordinator
 from .entity import CONNECTION_BLE
-from .scene_library import async_fetch_scene_library
+from .scene_library import SceneData, async_fetch_scene_library
 
 _LOGGER = logging.getLogger(__name__)
-PLATFORMS = ["light", "switch"]
+PLATFORMS: list[Platform] = [Platform.LIGHT, Platform.SWITCH]
 SCENE_LIBRARY_SKU = "H60A6"
 
 
-async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    address = entry.data["address"]
+@dataclass
+class GoveeH60A6RuntimeData:
+    """Runtime objects shared between the platforms for one config entry."""
+
+    client: GoveeH60A6Client
+    coordinator: GoveeH60A6Coordinator
+    scene_library: dict[str, SceneData]
+    serial_number: str | None
+
+
+type GoveeH60A6ConfigEntry = ConfigEntry[GoveeH60A6RuntimeData]
+
+
+async def async_setup_entry(hass: HomeAssistant, entry: GoveeH60A6ConfigEntry) -> bool:
+    """Set up a Govee H60A6 light from a config entry."""
+    address: str = entry.data["address"]
     ble_device = bluetooth.async_ble_device_from_address(hass, address, connectable=True)
     if ble_device is None:
         raise ConfigEntryNotReady(f"Could not find Govee light with address {address}")
@@ -104,7 +120,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     entry.async_on_unload(coordinator.async_add_listener(_sync_device_registry))
 
     @callback
-    def _async_update_ble(service_info: bluetooth.BluetoothServiceInfoBleak, change) -> None:
+    def _async_update_ble(
+        service_info: bluetooth.BluetoothServiceInfoBleak,
+        change: bluetooth.BluetoothChange,
+    ) -> None:
         client.update_ble_device(service_info.device)
 
     entry.async_on_unload(
@@ -116,21 +135,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
     )
 
-    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = {
-        "client": client,
-        "coordinator": coordinator,
-        "scene_library": scene_library,
-        "serial_number": serial_number,
-    }
+    entry.runtime_data = GoveeH60A6RuntimeData(
+        client=client,
+        coordinator=coordinator,
+        scene_library=scene_library,
+        serial_number=serial_number,
+    )
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 
 
-async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+async def async_unload_entry(hass: HomeAssistant, entry: GoveeH60A6ConfigEntry) -> bool:
+    """Unload a config entry, disconnecting the BLE client."""
     _LOGGER.debug("Unloading entry for %s", entry.data["address"])
-    data = hass.data[DOMAIN][entry.entry_id]
-    await data["client"].disconnect()
-    unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
-    if unload_ok:
-        hass.data[DOMAIN].pop(entry.entry_id)
-    return unload_ok
+    await entry.runtime_data.client.disconnect()
+    return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)

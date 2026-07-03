@@ -5,45 +5,49 @@ import logging
 from typing import Any
 
 from homeassistant.components.switch import SwitchEntity
-from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
+from . import GoveeH60A6ConfigEntry
 from .client import GoveeH60A6Client
-from .const import DOMAIN, ZONE_LOWER, ZONE_UPPER
+from .const import ZONE_LOWER, ZONE_UPPER
 from .coordinator import GoveeH60A6Coordinator
 from .entity import GoveeH60A6Entity
 
 _LOGGER = logging.getLogger(__name__)
 
+# See light.py: all BLE work serializes through one connection; never run
+# entity commands for this integration concurrently.
+PARALLEL_UPDATES = 1
+
 
 async def async_setup_entry(
-    hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
+    hass: HomeAssistant,
+    entry: GoveeH60A6ConfigEntry,
+    async_add_entities: AddEntitiesCallback,
 ) -> None:
-    data = hass.data[DOMAIN][entry.entry_id]
-    address = entry.data["address"]
-    serial_number = data.get("serial_number")
+    """Set up the upper-ring and lower-panel zone switches."""
+    data = entry.runtime_data
+    address: str = entry.data["address"]
     async_add_entities(
         [
             GoveeH60A6ZoneSwitch(
-                data["coordinator"],
-                data["client"],
+                data.coordinator,
+                data.client,
                 address,
                 entry.title,
                 ZONE_UPPER,
-                "Upper Ring",
-                "mdi:wall-sconce-flat-variant",
-                serial_number,
+                "upper_ring",
+                data.serial_number,
             ),
             GoveeH60A6ZoneSwitch(
-                data["coordinator"],
-                data["client"],
+                data.coordinator,
+                data.client,
                 address,
                 entry.title,
                 ZONE_LOWER,
-                "Lower Panel",
-                "mdi:wall-sconce-flat",
-                serial_number,
+                "lower_panel",
+                data.serial_number,
             ),
         ]
     )
@@ -59,16 +63,14 @@ class GoveeH60A6ZoneSwitch(GoveeH60A6Entity, SwitchEntity):
         address: str,
         device_name: str,
         zone: int,
-        zone_name: str,
-        icon: str,
+        translation_key: str,
         serial_number: str | None = None,
     ) -> None:
         super().__init__(coordinator, address, device_name, serial_number)
         self._client = client
         self._zone = zone
         self._attr_unique_id = f"{address}_zone_{zone}"
-        self._attr_name = zone_name
-        self._attr_icon = icon
+        self._attr_translation_key = translation_key
 
     @property
     def is_on(self) -> bool | None:

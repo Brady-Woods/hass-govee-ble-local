@@ -6,6 +6,7 @@ import logging
 import math
 from dataclasses import dataclass
 
+from bleak.backends.characteristic import BleakGATTCharacteristic
 from bleak.backends.device import BLEDevice
 from bleak.exc import BleakError
 from bleak_retry_connector import BleakClientWithServiceCache, establish_connection
@@ -228,11 +229,12 @@ class GoveeH60A6Client:
         self._lock = asyncio.Lock()
         self._notify_queue: asyncio.Queue[bytes] = asyncio.Queue()
         self._disconnect_timer: asyncio.TimerHandle | None = None
+        self._expire_task: asyncio.Task[None] | None = None
 
     def update_ble_device(self, ble_device: BLEDevice) -> None:
         self._ble_device = ble_device
 
-    def _on_notify(self, _characteristic, data: bytearray) -> None:
+    def _on_notify(self, _characteristic: BleakGATTCharacteristic, data: bytearray) -> None:
         self._notify_queue.put_nowait(bytes(data))
 
     async def _connect(self) -> None:
@@ -254,7 +256,7 @@ class GoveeH60A6Client:
             raise
         _LOGGER.debug("Connected and authenticated with %s", self._ble_device.address)
 
-    def _on_disconnect(self, _client) -> None:
+    def _on_disconnect(self, _client: BleakClientWithServiceCache) -> None:
         _LOGGER.debug("Govee H60A6 %s disconnected", self._ble_device.address)
         self._session_key = None
 
@@ -297,9 +299,27 @@ class GoveeH60A6Client:
     def _schedule_disconnect(self) -> None:
         self._cancel_disconnect_timer()
         loop = asyncio.get_running_loop()
-        self._disconnect_timer = loop.call_later(
-            DISCONNECT_DELAY, lambda: asyncio.create_task(self.disconnect())
-        )
+        self._disconnect_timer = loop.call_later(DISCONNECT_DELAY, self._on_disconnect_timer)
+
+    def _on_disconnect_timer(self) -> None:
+        # Timer fired: mark it consumed and kick off the actual disconnect as
+        # a task. The task takes the operation lock, so it can't tear the
+        # connection down in the middle of an in-flight command (the bug this
+        # replaced: the old lambda called disconnect() straight from the timer
+        # with no lock, so it could null self._client while a concurrent
+        # get_status/send_command was still using it, producing a spurious
+        # BleakError and a failed poll).
+        self._disconnect_timer = None
+        self._expire_task = asyncio.create_task(self._async_timed_disconnect())
+
+    async def _async_timed_disconnect(self) -> None:
+        async with self._lock:
+            # If an operation started after the timer fired, it scheduled a
+            # fresh timer while we were waiting for the lock - so the device
+            # isn't actually idle anymore and we must not disconnect.
+            if self._disconnect_timer is not None:
+                return
+            await self._disconnect_locked()
 
     async def send_command(self, prefix: bytes) -> bytes | None:
         """Connect if needed, send one command, return the decrypted ack (or None)."""
@@ -715,9 +735,18 @@ class GoveeH60A6Client:
         return status
 
     async def disconnect(self) -> None:
-        if self._disconnect_timer is not None:
-            self._disconnect_timer.cancel()
-            self._disconnect_timer = None
+        """Cancel any pending idle timer and tear down the connection.
+
+        Takes the operation lock so it waits for any in-flight command to
+        finish rather than pulling the connection out from under it. Called
+        on config-entry unload.
+        """
+        self._cancel_disconnect_timer()
+        async with self._lock:
+            await self._disconnect_locked()
+
+    async def _disconnect_locked(self) -> None:
+        """Actual teardown. Caller must hold self._lock."""
         if self._client is not None and self._client.is_connected:
             _LOGGER.debug("Disconnecting from %s (idle)", self._ble_device.address)
             await self._client.disconnect()

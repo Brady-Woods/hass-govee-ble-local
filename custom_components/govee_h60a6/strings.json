@@ -8,11 +8,39 @@
         "data": {
           "address": "Device"
         }
+      },
+      "reconfigure": {
+        "description": "Re-check that {name} is currently reachable over Bluetooth and reload it. No settings are changed."
       }
     },
     "abort": {
       "no_devices_found": "No unconfigured Govee H60A6 devices found.",
-      "already_configured": "Device is already configured."
+      "already_configured": "Device is already configured.",
+      "not_found": "The light could not be found over Bluetooth right now. Make sure it is powered on and in range, then try again.",
+      "reconfigure_successful": "Device re-verified and reloaded successfully."
+    }
+  },
+  "entity": {
+    "light": {
+      "segment": {
+        "name": "Segment {index}"
+      }
+    },
+    "switch": {
+      "upper_ring": {
+        "name": "Upper ring"
+      },
+      "lower_panel": {
+        "name": "Lower panel"
+      }
+    }
+  },
+  "exceptions": {
+    "scene_broken": {
+      "message": "The scene '{effect}' is known to fail to render correctly on this device and is disabled until that is resolved."
+    },
+    "ble_command_failed": {
+      "message": "Could not communicate with {device_name}: {error}"
     }
   }
 }

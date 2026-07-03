@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from typing import Any
 
 from homeassistant.components.light import (
@@ -13,12 +14,12 @@ from homeassistant.components.light import (
     LightEntity,
     LightEntityFeature,
 )
-from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .client import SEGMENT_COUNT, GoveeH60A6Client
+from . import GoveeH60A6ConfigEntry
+from .client import SEGMENT_COUNT, GoveeH60A6Client, GoveeH60A6Segment
 from .const import (
     BROKEN_SCENE_NAMES,
     DOMAIN,
@@ -34,31 +35,38 @@ from .scene_library import SceneData
 
 _LOGGER = logging.getLogger(__name__)
 
+# All BLE work funnels through the client's single connection/lock, and this
+# whole project's history is about avoiding adapter contention - so never let
+# HA issue entity commands for this integration concurrently.
+PARALLEL_UPDATES = 1
+
 
 async def async_setup_entry(
-    hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
+    hass: HomeAssistant,
+    entry: GoveeH60A6ConfigEntry,
+    async_add_entities: AddEntitiesCallback,
 ) -> None:
-    data = hass.data[DOMAIN][entry.entry_id]
-    address = entry.data["address"]
-    serial_number = data.get("serial_number")
+    """Set up the main light plus one entity per addressable segment."""
+    data = entry.runtime_data
+    address: str = entry.data["address"]
     entities: list[LightEntity] = [
         GoveeH60A6Light(
-            data["coordinator"],
-            data["client"],
+            data.coordinator,
+            data.client,
             address,
             entry.title,
-            data.get("scene_library") or {},
-            serial_number,
+            data.scene_library,
+            data.serial_number,
         )
     ]
     entities.extend(
         GoveeH60A6SegmentLight(
-            data["coordinator"],
-            data["client"],
+            data.coordinator,
+            data.client,
             address,
             entry.title,
             index,
-            serial_number,
+            data.serial_number,
         )
         for index in range(SEGMENT_COUNT)
     )
@@ -69,7 +77,7 @@ def _scene_id(scene_code: int) -> tuple[int, int]:
     return (scene_code & 0xFF, (scene_code >> 8) & 0xFF)
 
 
-def _sorted_selectable_scenes(names) -> list[str]:
+def _sorted_selectable_scenes(names: Iterable[str]) -> list[str]:
     """Alphabetized effect list, with scenes confirmed broken over BLE
     (see const.BROKEN_SCENE_NAMES and PROTOCOL.md 6.3.1/10) left out so
     selecting one doesn't produce a silent no-op or a scene that visibly
@@ -183,8 +191,9 @@ class GoveeH60A6Light(GoveeH60A6Entity, LightEntity):
             # calls light.turn_on with this effect directly (e.g. a service
             # call or automation bypassing the dropdown).
             raise HomeAssistantError(
-                f"'{effect}' is known to fail to render correctly on this device "
-                "(see PROTOCOL.md 6.3.1/10) and is disabled until that's resolved."
+                translation_domain=DOMAIN,
+                translation_key="scene_broken",
+                translation_placeholders={"effect": effect},
             )
 
         scene_data = self._scene_library.get(effect)
@@ -261,10 +270,16 @@ class GoveeH60A6SegmentLight(GoveeH60A6Entity, LightEntity):
     command bit and status record index are the same number (PROTOCOL.md
     5.3). This matches the naming convention used by
     wez/govee2mqtt for the same reason, for other Govee segmented models.
+
+    Disabled by default: 12 extra light entities per device is a lot of
+    noise for most users, who only want the main light and the two zones.
+    Anyone who actually wants per-segment control can enable them.
     """
 
     _attr_supported_color_modes = {ColorMode.RGB}
     _attr_color_mode = ColorMode.RGB
+    _attr_translation_key = "segment"
+    _attr_entity_registry_enabled_default = False
 
     def __init__(
         self,
@@ -280,9 +295,9 @@ class GoveeH60A6SegmentLight(GoveeH60A6Entity, LightEntity):
         self._index = index
         self._mask = 1 << index
         self._attr_unique_id = f"{address}_segment_{index}"
-        self._attr_name = f"Segment {index}"
+        self._attr_translation_placeholders = {"index": str(index)}
 
-    def _segment(self):
+    def _segment(self) -> GoveeH60A6Segment | None:
         status = self.coordinator.data
         if status is None or status.segments is None:
             return None

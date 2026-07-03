@@ -1,0 +1,12 @@
+{
+  "entity": {
+    "switch": {
+      "upper_ring": {
+        "default": "mdi:wall-sconce-flat-variant"
+      },
+      "lower_panel": {
+        "default": "mdi:wall-sconce-flat"
+      }
+    }
+  }
+}

@@ -38,25 +38,35 @@ def _install_stubs() -> None:
     if "bleak" not in sys.modules:
         bleak_pkg = types.ModuleType("bleak")
         backends_pkg = types.ModuleType("bleak.backends")
+        # Mark backends as a package so `bleak.backends.<x>` submodule imports
+        # (e.g. bleak.backends.characteristic) resolve.
+        backends_pkg.__path__ = []  # type: ignore[attr-defined]
         device_mod = types.ModuleType("bleak.backends.device")
+        characteristic_mod = types.ModuleType("bleak.backends.characteristic")
         exc_mod = types.ModuleType("bleak.exc")
 
         class BLEDevice:  # noqa: D101 - test stub
             def __init__(self, address: str = "00:00:00:00:00:00") -> None:
                 self.address = address
 
+        class BleakGATTCharacteristic:  # noqa: D101 - test stub
+            pass
+
         class BleakError(Exception):
             pass
 
         device_mod.BLEDevice = BLEDevice
+        characteristic_mod.BleakGATTCharacteristic = BleakGATTCharacteristic
         exc_mod.BleakError = BleakError
         backends_pkg.device = device_mod
+        backends_pkg.characteristic = characteristic_mod
         bleak_pkg.backends = backends_pkg
         bleak_pkg.exc = exc_mod
 
         sys.modules["bleak"] = bleak_pkg
         sys.modules["bleak.backends"] = backends_pkg
         sys.modules["bleak.backends.device"] = device_mod
+        sys.modules["bleak.backends.characteristic"] = characteristic_mod
         sys.modules["bleak.exc"] = exc_mod
 
     if "bleak_retry_connector" not in sys.modules:

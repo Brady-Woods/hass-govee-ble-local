@@ -2,6 +2,10 @@
 
 DOMAIN = "govee_h60a6"
 
+# BLE local-name prefix these lights advertise (e.g. "GVH60A67457"), used
+# for discovery matching in both the manifest and the manual config flow.
+DEVICE_NAME_PREFIX = "GVH60A6"
+
 WRITE_CHAR_UUID = "00010203-0405-0607-0809-0a0b0c0d2b11"
 NOTIFY_CHAR_UUID = "00010203-0405-0607-0809-0a0b0c0d2b10"
 

@@ -49,7 +49,12 @@ class GoveeH60A6Entity(CoordinatorEntity[GoveeH60A6Coordinator]):
         except BleakError as err:
             _LOGGER.debug("BLE command to %s failed: %s", self._address, err)
             raise HomeAssistantError(
-                f"Could not communicate with {self._device_name}: {err}"
+                translation_domain=DOMAIN,
+                translation_key="ble_command_failed",
+                translation_placeholders={
+                    "device_name": self._device_name,
+                    "error": str(err),
+                },
             ) from err
 
     @property

@@ -1,0 +1,100 @@
+# Home Assistant Integration Quality Scale tracking for govee_h60a6.
+# https://developers.home-assistant.io/docs/core/integration-quality-scale/
+#
+# Note: this is a custom component, so a handful of rules that require being
+# merged into HA core (e.g. `brands`) can never be literally satisfied and are
+# marked exempt. Everything else targets the Platinum technical bar.
+
+rules:
+  # ------------------------------------------------------------------ Bronze
+  action-setup:
+    status: exempt
+    comment: Integration registers no custom service actions.
+  appropriate-polling: done
+  brands:
+    status: exempt
+    comment: Custom component; icons are not published in home-assistant/brands.
+  common-modules: done
+  config-flow: done
+  config-flow-test-coverage: done
+  dependency-transparency: done
+  docs-actions:
+    status: exempt
+    comment: No custom service actions.
+  docs-high-level-description: done
+  docs-installation-instructions: done
+  docs-removal-instructions: done
+  entity-event-setup: done
+  entity-unique-id: done
+  has-entity-name: done
+  runtime-data: done
+  test-before-configure:
+    status: exempt
+    comment: >
+      Setup is from passive BLE discovery (or a picker of already-discovered
+      devices), which already implies the device is advertising and reachable;
+      there is no host/credential to validate before creating the entry.
+  test-before-setup: done
+  unique-config-entry: done
+
+  # ------------------------------------------------------------------ Silver
+  action-exceptions: done
+  config-entry-unloading: done
+  docs-configuration-parameters:
+    status: exempt
+    comment: The integration has no configuration parameters.
+  entity-unavailable: done
+  integration-owner: done
+  log-when-unavailable: done
+  parallel-updates: done
+  reauthentication-flow:
+    status: exempt
+    comment: The device uses a fixed protocol PSK; there is no user auth to renew.
+  test-coverage:
+    status: todo
+    comment: >
+      Protocol layer (encryption, framing, all parsers) and the config flow
+      have thorough tests. Full platform/coordinator entity tests via
+      pytest-homeassistant-custom-component are still to be added to clear the
+      95% bar for the HA-facing layer.
+
+  # -------------------------------------------------------------------- Gold
+  devices: done
+  diagnostics: done
+  discovery: done
+  discovery-update-info: done
+  docs-data-update: done
+  docs-examples: done
+  docs-known-limitations: done
+  docs-supported-devices: done
+  docs-supported-functions: done
+  docs-troubleshooting: done
+  docs-use-cases: done
+  dynamic-devices:
+    status: exempt
+    comment: One physical device per config entry; there is no hub enumerating devices.
+  entity-category:
+    status: exempt
+    comment: All entities are primary controls; none are diagnostic/config entities.
+  entity-device-class:
+    status: exempt
+    comment: No applicable device class for the light or the zone on/off switches.
+  entity-disabled-by-default: done
+  entity-translations: done
+  exception-translations: done
+  icon-translations: done
+  reconfiguration-flow: done
+  repair-issues:
+    status: exempt
+    comment: >
+      Failure modes (device out of range, transient BLE errors) are handled by
+      graceful unavailability and coordinator backoff; there is no distinct,
+      user-actionable repair condition to surface.
+  stale-devices:
+    status: exempt
+    comment: One device per entry; removing the entry removes the device.
+
+  # ---------------------------------------------------------------- Platinum
+  async-dependency: done
+  inject-websession: done
+  strict-typing: done
