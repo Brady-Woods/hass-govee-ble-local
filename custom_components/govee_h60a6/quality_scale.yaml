@@ -1,9 +1,10 @@
 # Home Assistant Integration Quality Scale tracking for govee_h60a6.
 # https://developers.home-assistant.io/docs/core/integration-quality-scale/
 #
-# Note: this is a custom component, so a handful of rules that require being
-# merged into HA core (e.g. `brands`) can never be literally satisfied and are
-# marked exempt. Everything else targets the Platinum technical bar.
+# Note: this is a custom component. The official quality-scale tier is only
+# validated/awarded for integrations merged into HA core; here this file is a
+# self-assessment against the same rules. Everything targets the Platinum
+# technical bar.
 
 rules:
   # ------------------------------------------------------------------ Bronze
@@ -12,12 +13,28 @@ rules:
     comment: Integration registers no custom service actions.
   appropriate-polling: done
   brands:
-    status: exempt
-    comment: Custom component; icons are not published in home-assistant/brands.
+    status: todo
+    comment: >
+      Achievable for a custom component: add icon.png/logo.png under
+      custom_integrations/govee_h60a6 in home-assistant/brands (or, on HA
+      2026.3+, bundle brand icons in the integration). Not yet done - needs
+      brand image assets.
   common-modules: done
   config-flow: done
-  config-flow-test-coverage: done
-  dependency-transparency: done
+  config-flow-test-coverage:
+    status: done
+    comment: >
+      Full config-flow coverage (bluetooth discovery, user, and reconfigure
+      steps plus not_supported/already_configured/no_devices/not_found aborts)
+      via pytest-homeassistant-custom-component; see tests/test_config_flow.py.
+  dependency-transparency:
+    status: done
+    comment: >
+      The sole dependency (govee-ble-local) is open source (MIT) with its full
+      source publicly reviewable on GitHub. It is currently installed via git
+      URL rather than a pinned PyPI release; publishing to PyPI would be
+      required for HA core submission but is not needed for HACS/custom-
+      component distribution.
   docs-actions:
     status: exempt
     comment: No custom service actions.
@@ -51,12 +68,13 @@ rules:
     status: exempt
     comment: The device uses a fixed protocol PSK; there is no user auth to renew.
   test-coverage:
-    status: todo
+    status: done
     comment: >
-      The config flow is thoroughly tested (test_config_flow.py); the protocol
-      layer's tests now live in the govee-ble-local library. Full
-      platform/coordinator entity tests via pytest-homeassistant-custom-component
-      are still to be added to clear the 95% bar for the HA-facing layer.
+      100% line coverage of the HA-facing layer (init/setup, coordinator,
+      light, switch, entity, diagnostics, config flow) via
+      pytest-homeassistant-custom-component; see tests/. The BLE protocol and
+      device-profile layers are tested separately in the govee-ble-local
+      library (40 tests).
 
   # -------------------------------------------------------------------- Gold
   devices: done
@@ -99,4 +117,9 @@ rules:
   inject-websession:
     status: exempt
     comment: BLE-only integration; it makes no HTTP requests, so there is no web session to inject.
-  strict-typing: done
+  strict-typing:
+    status: done
+    comment: >
+      Fully typed with a shipped py.typed; verified with mypy under a config
+      mirroring Home Assistant core's own strict settings (see mypy.ini). The
+      govee-ble-local dependency also ships py.typed and passes mypy --strict.

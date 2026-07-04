@@ -1,0 +1,9 @@
+# Test dependencies for the Home Assistant integration layer.
+# The pinned HA version comes transitively from pytest-homeassistant-custom-component.
+pytest-homeassistant-custom-component
+pytest-cov
+
+# Runtime dependency of the integration (imported by the code under test).
+# Installed from the sibling library checkout during development:
+#   pip install -e ../govee-ble-local
+govee-ble-local

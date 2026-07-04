@@ -18,7 +18,6 @@ from homeassistant.helpers import device_registry as dr
 
 from .const import DOMAIN
 from .coordinator import GoveeH60A6Coordinator
-from .entity import CONNECTION_BLE
 
 _LOGGER = logging.getLogger(__name__)
 PLATFORMS: list[Platform] = [Platform.LIGHT, Platform.SWITCH]
@@ -97,10 +96,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: GoveeH60A6ConfigEntry) -
         # async_get_or_create()'s `connections` only ADDS (merge), never
         # removes, so a bad connection written once stuck around forever.
         # async_update_device's `new_connections` does a full replace instead.
+        # coordinator.data is guaranteed populated here: async_config_entry_
+        # first_refresh() above raises ConfigEntryNotReady on failure, so this
+        # callback is only ever registered/invoked after a successful poll.
         status = coordinator.data
-        if status is None:
-            return
-        connections = {(CONNECTION_BLE, address)}
+        connections = {(dr.CONNECTION_BLUETOOTH, address)}
         if status.wifi_mac:
             connections.add((dr.CONNECTION_NETWORK_MAC, status.wifi_mac))
 

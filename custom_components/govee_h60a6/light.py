@@ -112,8 +112,6 @@ class GoveeH60A6Light(GoveeH60A6Entity, LightEntity):
 
     def _zone_is_on(self, zone_index: int) -> bool | None:
         status = self.coordinator.data
-        if status is None:
-            return None
         return status.zone_upper_on if zone_index == ZONE_UPPER else status.zone_lower_on
 
     @property
@@ -124,21 +122,21 @@ class GoveeH60A6Light(GoveeH60A6Entity, LightEntity):
                 return None
             return any(vals)
         status = self.coordinator.data
-        if status is None or status.brightness_pct is None:
+        if status.brightness_pct is None:
             return None
         return status.brightness_pct > 0
 
     @property
     def brightness(self) -> int | None:
         status = self.coordinator.data
-        if status is None or status.brightness_pct is None:
+        if status.brightness_pct is None:
             return None
         return round(status.brightness_pct / 100 * 255)
 
     @property
     def effect(self) -> str | None:
         status = self.coordinator.data
-        if status is None or status.scene_id is None:
+        if status.scene_id is None:
             return None
         return self._scene_id_to_name.get(status.scene_id)
 

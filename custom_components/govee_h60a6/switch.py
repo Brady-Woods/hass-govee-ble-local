@@ -74,8 +74,6 @@ class GoveeH60A6ZoneSwitch(GoveeH60A6Entity, SwitchEntity):
     @property
     def is_on(self) -> bool | None:
         status = self.coordinator.data
-        if status is None:
-            return None
         return status.zone_upper_on if self._zone == ZONE_UPPER else status.zone_lower_on
 
     async def async_turn_on(self, **kwargs: Any) -> None:

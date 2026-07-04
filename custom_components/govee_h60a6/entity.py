@@ -6,13 +6,12 @@ from typing import Any, Coroutine
 
 from bleak.exc import BleakError
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers.device_registry import CONNECTION_NETWORK_MAC, DeviceInfo
+from homeassistant.helpers.device_registry import (
+    CONNECTION_BLUETOOTH,
+    CONNECTION_NETWORK_MAC,
+    DeviceInfo,
+)
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
-
-try:
-    from homeassistant.helpers.device_registry import CONNECTION_BLUETOOTH_LE as CONNECTION_BLE
-except ImportError:  # older HA core
-    from homeassistant.helpers.device_registry import CONNECTION_BLUETOOTH as CONNECTION_BLE
 
 from .const import DOMAIN
 from .coordinator import GoveeH60A6Coordinator
@@ -62,7 +61,7 @@ class GoveeH60A6Entity(CoordinatorEntity[GoveeH60A6Coordinator]):
     @property
     def device_info(self) -> DeviceInfo:
         status = self.coordinator.data
-        connections = {(CONNECTION_BLE, self._address)}
+        connections = {(CONNECTION_BLUETOOTH, self._address)}
         if status and status.wifi_mac:
             connections.add((CONNECTION_NETWORK_MAC, status.wifi_mac))
 
