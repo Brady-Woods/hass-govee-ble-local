@@ -53,10 +53,10 @@ rules:
   test-coverage:
     status: todo
     comment: >
-      Protocol layer (encryption, framing, all parsers) and the config flow
-      have thorough tests. Full platform/coordinator entity tests via
-      pytest-homeassistant-custom-component are still to be added to clear the
-      95% bar for the HA-facing layer.
+      The config flow is thoroughly tested (test_config_flow.py); the protocol
+      layer's tests now live in the govee-ble-local library. Full
+      platform/coordinator entity tests via pytest-homeassistant-custom-component
+      are still to be added to clear the 95% bar for the HA-facing layer.
 
   # -------------------------------------------------------------------- Gold
   devices: done
@@ -96,5 +96,7 @@ rules:
 
   # ---------------------------------------------------------------- Platinum
   async-dependency: done
-  inject-websession: done
+  inject-websession:
+    status: exempt
+    comment: BLE-only integration; it makes no HTTP requests, so there is no web session to inject.
   strict-typing: done

@@ -23,11 +23,6 @@
     }
   },
   "entity": {
-    "light": {
-      "segment": {
-        "name": "Segment {index}"
-      }
-    },
     "switch": {
       "upper_ring": {
         "name": "Upper ring"

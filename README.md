@@ -26,10 +26,10 @@ the device over BLE to unlock the full feature set locally.
 | --- | --- |
 | **H60A6** (Govee Ceiling Light Pro) | ✅ Supported — power, brightness, RGB, color temperature, scenes, and independent upper-ring / lower-panel zones |
 
-The goal is to grow this list. The BLE protocol logic is being extracted into a
-standalone, device-agnostic library (see **Architecture**) so adding models is
-mostly a matter of describing each device's capabilities, not re-implementing
-the transport.
+The goal is to grow this list. The BLE protocol logic lives in a standalone,
+device-agnostic library (see **Architecture**), so adding a model is mostly a
+matter of describing its capabilities in a profile, not re-implementing the
+transport.
 
 ## Features
 
@@ -57,16 +57,18 @@ of the light.
 ## Architecture
 
 The BLE control protocol (encryption, handshake, command framing, status
-parsing) is being factored out into a standalone Python package,
+parsing) and per-model device profiles live in a standalone Python package,
 [`govee-ble-local`](https://github.com/Brady-Woods/govee-ble-local), which this
 integration depends on. That keeps the reusable device logic independent of
 Home Assistant and testable on its own, with this repo providing the thin HA
-adapter layer (entities, config flow, coordinator).
+adapter layer (entities, config flow, coordinator). Discovery matches any Govee
+device by Bluetooth manufacturer ID; the library's profile system then decides
+which models are supported.
 
 ## Documentation
 
 - [Integration guide](custom_components/govee_h60a6/README.md) — architecture, entities, troubleshooting, known issues
-- [Protocol reference](custom_components/govee_h60a6/PROTOCOL.md) — the full reverse-engineered BLE protocol
+- [Protocol reference](https://github.com/Brady-Woods/govee-ble-local/blob/master/PROTOCOL.md) — the full reverse-engineered BLE protocol (in the `govee-ble-local` library)
 
 ## License
 

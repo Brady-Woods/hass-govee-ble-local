@@ -1,494 +1,164 @@
-# Govee H60A6 Ceiling Light — Home Assistant Integration
+# Govee BLE Local — Home Assistant integration
 
-A native Home Assistant custom component for the Govee H60A6 ceiling light,
-controlling it directly over Bluetooth LE (no cloud, no MQTT bridge, no
-hub). Exposes the light as a `light` entity (power, brightness, RGB, color
-temperature, scenes/effects) plus two `switch` entities for independent
-control of the fixture's two physical zones (the upper ring and lower
-panel).
+A native Home Assistant custom component that controls Govee ceiling lights
+directly over Bluetooth LE — no cloud, no MQTT bridge, no hub. It is a **thin
+Home Assistant adapter** over the standalone
+[`govee-ble-local`](https://github.com/Brady-Woods/govee-ble-local) library,
+which implements the (reverse-engineered) BLE protocol and holds the per-model
+device profiles.
 
-This document covers **how the integration is put together and how it
-runs**. For the BLE protocol itself — every opcode, the encryption scheme,
-and the full history of what's been reverse-engineered, tested, and is
-still unresolved — see [`PROTOCOL.md`](./PROTOCOL.md). That document is
-the primary technical record of this project; this README is oriented
-around the *code*, not the *wire format*.
+Exposes the fixture as a `light` entity (power, brightness, RGB, color
+temperature, scenes/effects) plus one `switch` per physical zone (for the
+H60A6: an upper ring and a lower panel).
 
-## Supported devices
+> The full BLE protocol reference now lives in the library:
+> [`govee-ble-local/PROTOCOL.md`](https://github.com/Brady-Woods/govee-ble-local/blob/master/PROTOCOL.md).
+> This document covers the **Home Assistant integration layer** — how it wires
+> the library into HA.
 
-- **Govee H60A6** ("Govee Ceiling Light Pro"), both hardware zones. The
-  integration is model-specific: it only claims BLE devices advertising a
-  local name starting with `GVH60A6`. Other Govee models are not supported.
+## Supported devices & entities
 
-## Supported functionality
+Discovery matches **any Govee device by Bluetooth manufacturer ID (`0x8843`)**;
+the library's **device-profile system** then decides which models are actually
+supported. Unsupported models abort the config flow with "not supported yet".
+Currently the **H60A6** (Govee Ceiling Light Pro) ships a profile.
 
-| Entity | Type | Capabilities |
+Entities created per device are driven by the profile's capabilities:
+
+| Entity | Type | Notes |
 | --- | --- | --- |
-| Main light | `light` | On/off, brightness, RGB color, color temperature (2700–6500 K), scenes/effects |
-| Upper ring / Lower panel | `switch` ×2 | Independent on/off for each physical zone |
+| Main light | `light` | on/off, brightness, RGB, color temp, scenes/effects |
+| Zone switches | `switch` × *n* | one per `capabilities.zones` (H60A6: "Upper ring", "Lower panel") |
 
-A **diagnostics** download is available from the device page (MAC addresses
-and serial number are redacted).
-
-> **Per-segment control is currently disabled.** The 12 individually
-> addressable segments were briefly exposed as `light` entities, but
-> reading their state requires a much longer BLE status response whose tail
-> (the segment data) is dropped on the large majority of polls under
-> real-world adapter contention (see PROTOCOL.md §5.3.2), leaving the
-> entities unavailable most of the time. The integration now uses the
-> shorter, more reliable status query. The segment protocol is fully
-> reverse-engineered and documented (PROTOCOL.md §4.2/§5.3) and the client
-> retains the command/parse primitives, so the feature can be re-enabled if
-> the reliability problem is solved (e.g. tolerating a dropped tail to
-> parse the segments that don't depend on it).
-
-## Installation
-
-1. Copy the `govee_h60a6` folder into `config/custom_components/`
-   (or add this repository as a custom repository in HACS), then restart
-   Home Assistant.
-2. The light is discovered automatically over Bluetooth — a discovery
-   notification appears under **Settings → Devices & Services**. Click
-   **Configure** and confirm.
-3. If it isn't auto-discovered, use **Add Integration → Govee H60A6** to
-   pick it from the list of nearby devices. Setup needs a working Bluetooth
-   adapter (or an ESPHome Bluetooth proxy) within range of the light.
-
-## Removal
-
-Delete the integration entry from **Settings → Devices & Services →
-Govee H60A6 → ⋮ → Delete**. That removes all its entities and the device;
-there is no cloud account or external state to clean up. If you installed
-manually, you can then also delete the `custom_components/govee_h60a6`
-folder.
-
-## Data updates
-
-The integration is **local-polling**: the coordinator queries the light
-over BLE every 30 seconds (`POLL_INTERVAL_SECONDS`) and after each command.
-Zone on/off, brightness, current scene, and per-segment color/brightness
-are read back from the device. RGB color and color temperature have **no
-BLE readback** and are tracked optimistically from the last command sent
-(see the light entity docstring and PROTOCOL.md §5). Multiple lights stagger
-their poll schedules to avoid fighting over the adapter's connection slots.
-
-## Use cases
-
-- Circadian lighting: drive color temperature from an automation across the
-  day, warm at night and cool during the day.
-- Zone ambiance: keep the lower panel off and run only the upper ring (or
-  vice versa) as accent lighting via the two zone switches.
-- Per-segment scenes: enable the segment lights to paint individual
-  segments different colors from a script or scene.
-
-## Automation examples
-
-Warm, dim light at sunset:
-
-```yaml
-automation:
-  - alias: "Ceiling light warm at sunset"
-    trigger:
-      - platform: sun
-        event: sunset
-    action:
-      - service: light.turn_on
-        target:
-          entity_id: light.gvh60a67457
-        data:
-          color_temp_kelvin: 2700
-          brightness_pct: 40
-```
-
-Turn on only the upper ring:
-
-```yaml
-      - service: switch.turn_on
-        target:
-          entity_id: switch.gvh60a67457_upper_ring
-      - service: switch.turn_off
-        target:
-          entity_id: switch.gvh60a67457_lower_panel
-```
-
-## Troubleshooting
-
-- **Entity shows *Unavailable*.** Almost always Bluetooth range/visibility.
-  Confirm the light is powered on and within ~10 m of an adapter or a
-  Bluetooth proxy. HA retries with exponential backoff and recovers on its
-  own once the device is seen again.
-- **The light won't turn on/off, but color/brightness still work.** The
-  device can get into a wedged BLE state that a software fix can't clear —
-  power-cycle it at the mains. See the "stuck device" note under
-  [Known issues](#the-light-wont-turn-onoff-isnt-always-this-bug--check-for-a-stuck-device-first).
-- **Some scenes are missing from the effect list.** A handful of scenes are
-  hidden because they don't render correctly over BLE — see
-  [Broken scenes](#broken-scenes-hidden-from-the-effect-picker).
-- **I want per-segment control.** The 12 `Segment N` light entities are
-  disabled by default; enable them from the device page.
-- **Enable debug logging** to capture the BLE exchange:
-
-  ```yaml
-  logger:
-    logs:
-      custom_components.govee_h60a6: debug
-  ```
+Per-segment control exists in the library but is **not** exposed as HA entities
+(the fuller status query needed to read segment state back is too drop-prone
+under real adapter contention — see the library's PROTOCOL.md §5.3.2).
 
 ## Architecture / execution flow
 
-### Startup (`__init__.py`)
+The heavy lifting is in the library; this integration is the glue.
 
-1. `async_setup_entry` resolves the config entry's stored BLE address to a
-   live `BLEDevice` via Home Assistant's Bluetooth integration
-   (`bluetooth.async_ble_device_from_address`). If the device isn't
-   currently visible to any Bluetooth adapter HA knows about, setup fails
-   with `ConfigEntryNotReady` (HA will retry automatically).
-2. One `GoveeH60A6Client` and one `GoveeH60A6Coordinator` are created per
-   config entry (per physical light) and stored in
-   `hass.data[DOMAIN][entry.entry_id]`. **Both the `light` and `switch`
-   platforms share the same client instance** for a given device — this
-   matters because the client serializes all BLE operations for that
-   device behind a single `asyncio.Lock`, so a scene upload from the light
-   entity and a zone toggle from a switch entity can never race each other
-   on the wire.
-3. The scene library is fetched once at startup from Govee's public,
-   unauthenticated API (`scene_library.async_fetch_scene_library`) and
-   passed to the light entity. If that fetch fails (no internet, API
-   shape change), the integration falls back to a static, hand-captured
-   scene table (`const.SCENES`) that only supports **bare** activation
-   (see below) rather than full data upload.
-4. Multiple lights' first polls are staggered (`stagger = crc32(address) %
-   8` seconds) so they don't all hit the Bluetooth adapter at the exact
-   same moment on startup.
-5. A coordinator listener re-syncs the HA device registry
-   (`_sync_device_registry`) on every successful poll, not just once at
-   startup — this makes a bad read (e.g. two lights' BLE traffic briefly
-   cross-contaminating right after boot) self-correct on the next good
-   poll instead of leaving stale MAC/hardware-version data stuck in the
-   registry forever.
-
-### Per-device connection lifecycle (`client.py`)
-
-`GoveeH60A6Client` maintains an **on-demand** encrypted BLE session per
-device, not a permanently-open connection:
-
-- Every public method (`get_status`, `send_command`, `set_scene_full`,
-  ...) acquires `self._lock`, calls `_connect()` (a no-op if already
-  connected), does its work, then calls `_schedule_disconnect()` — a
-  2-second idle timer that tears the connection down if nothing else uses
-  it in that window. This keeps the adapter's limited connection slots
-  free for other devices (including HA's own general-purpose BLE scanning)
-  most of the time, at the cost of a ~300-500ms reconnect handshake
-  whenever a new operation starts cold.
-- `_connect()` establishes the GATT connection (via
-  `bleak_retry_connector.establish_connection`, which retries transient
-  failures automatically), subscribes to the notify characteristic, and
-  runs the encryption handshake (`_handshake`) to derive a per-session AES
-  key from the device's own challenge response.
-- Every write path drains any stale queued notification
-  (`_drain_notify_queue`) immediately before writing. This matters: a
-  late-arriving notification from a *previous* operation sitting in the
-  queue would otherwise get misattributed as the ack for an unrelated
-  *next* operation, and vice versa — a real bug found and fixed via live
-  testing (see `PROTOCOL.md` §6.2.1).
-- A missing/late command ack is **not** treated as a hard failure for
-  scene uploads (it used to be, and that was itself a bug — see the same
-  section). The write already went out; an absent ack doesn't prove it
-  failed, and treating it as fatal caused real, measured reliability
-  regressions under repeated use.
+### Setup (`__init__.py`)
+1. Resolve the `BLEDevice` for the entry's address from HA's Bluetooth manager
+   (`ConfigEntryNotReady` if not currently visible).
+2. **Resolve the device profile** from `govee_ble_local.profile`: prefer the SKU
+   stored on the config entry, else match the advertised local name, else fall
+   back to the default SKU. YAML loading runs in the executor.
+3. Create a `GoveeBleClient` (from the library) and a `GoveeH60A6Coordinator`.
+4. Stagger the first poll by `crc32(address) % 8` seconds so multiple lights
+   don't poll in lockstep and fight over the adapter's connection slots.
+5. `async_config_entry_first_refresh()`, then fetch the serial number once
+   (best-effort; a failure is logged, not fatal).
+6. Store `client`, `coordinator`, `profile`, `serial_number` in
+   `entry.runtime_data` and forward the `light` + `switch` platforms.
 
 ### Coordinator polling (`coordinator.py`)
+A `DataUpdateCoordinator` polls `client.get_status()` every
+`POLL_INTERVAL_SECONDS` (60s). `BleakError` (drops, no-response, out-of-slots)
+is converted to `UpdateFailed` so it's treated as an expected transient, not an
+"unexpected error" traceback.
 
-A `DataUpdateCoordinator` subclass polls `client.get_status()` on a fixed
-interval (`const.POLL_INTERVAL_SECONDS`, currently 30s) so Home Assistant
-stays roughly in sync with changes made from the Govee app or a physical
-switch, not just changes made through HA itself. `BleakError` during a
-poll is converted to `UpdateFailed`, which HA treats as an expected,
-recoverable failure mode (brief unavailability) rather than logging a full
-traceback as an "unexpected error."
+### Device registry self-heal (`__init__.py`)
+`device_info` on entities is only applied at first registration, so a bad value
+from one flaky early poll would stick forever. The setup registers a coordinator
+listener that re-syncs the device's `connections` on every successful poll using
+`async_update_device(new_connections=...)` — a **full replace**, not the merge
+semantics of `async_get_or_create` (which only ever *adds* connections and once
+left a stale/garbled MAC alongside the correct one).
 
-### Entities
+### BLE device refresh
+A passive `bluetooth.async_register_callback` keeps the client's `BLEDevice`
+current as new advertisements arrive.
 
-- **`light.py`** (`GoveeH60A6Light`) — the primary entity. Power is
-  derived from `zone_upper_on OR zone_lower_on` (either zone being on
-  counts as "the light is on"). Brightness and scene/effect are read from
-  the polled status. RGB color and color temperature have **no BLE
-  readback path at all** — the device doesn't expose them via status
-  query — so they're tracked optimistically from the last command sent,
-  the same pattern used by most write-only BLE light integrations.
-- **`light.py`** (`GoveeH60A6SegmentLight`, one per segment, 12 total) —
-  independent RGB + brightness control for each individually-addressable
-  segment (PROTOCOL.md 4.2/5.3). Unlike the main light, segment color and
-  brightness genuinely can be read back from the device, so these reflect
-  real polled state, not optimistic tracking. Named "Segment 0" through
-  "Segment 11" by raw bitmask/status-record index — not a physical
-  position — since which bit maps to which physical LED hasn't been
-  confirmed by direct observation, only that the command bit and status
-  record index agree with each other. This naming and the
-  one-entity-per-segment approach matches `wez/govee2mqtt`'s convention
-  for other segmented Govee models (researched before implementing — see
-  PROTOCOL.md 5.3.1).
-- **`switch.py`** (`GoveeH60A6ZoneSwitch`, one per zone) — independent
-  on/off control for the upper ring and lower panel, for cases where the
-  main light entity's combined on/off isn't granular enough (e.g. an
-  automation that only wants the ring, not the panel). Coarser-grained
-  than the per-segment lights above — these two zones are a different,
-  older concept in this project than the 12 individually-addressable
-  segments, and it's not yet confirmed how (or whether) they overlap.
-- **`entity.py`** — shared base class. `_run_client_command` wraps every
-  BLE call so a `BleakError` becomes a clean `HomeAssistantError` toast
-  instead of a raw traceback in the UI. `device_info` is built fresh from
-  the latest polled status each time (MAC, WiFi MAC, hardware version),
-  which is what lets this integration's device correlate with other
-  integrations (e.g. a network-monitoring integration that also knows the
-  device's WiFi MAC) in HA's device registry.
+## Entities
 
-### Device identity: name, MAC addresses, and serial number
+### Main light (`light.py` — `GoveeH60A6Light`)
+- **Color modes / temp range** come from the profile capabilities (RGB and/or
+  color temp; H60A6 = both, 2700–6500 K).
+- **`is_on`** = any of the fixture's zones on (from polled `zone_*_on`).
+- **`brightness`** from the polled `brightness_pct`.
+- **`effect`** maps the polled `scene_id` to a scene name via the profile.
+- **RGB and color temp are tracked optimistically** from the last command sent
+  — the short status query has no color read-back. (The library *can* read RGB
+  back via the fuller segment query, but the integration uses the short, more
+  reliable query.)
+- **Effect list** = the profile's *selectable* scenes (broken ones excluded).
 
-Three things worth understanding clearly, since they look surprising at
-first glance:
+### Zone switches (`switch.py` — `GoveeH60A6ZoneSwitch`)
+One per `profile.capabilities.zones`, mapped to a BLE zone index and translation
+key via `const.ZONE_META`. `is_on` reads the corresponding polled zone flag.
 
-**The HA device name is already the BLE broadcast name, automatically.**
-`config_flow.py` sets the config entry's title from `discovery_info.name`
-(Bluetooth-discovery flow) or the equivalent value collected via
-`bluetooth.async_discovered_service_info` (manual-entry flow) — both are
-the device's actual over-the-air BLE local name, not something typed in
-by hand. Confirmed directly against a live config entry: title
-`GVH60A67457` for address `5C:E7:53:F4:74:57`, i.e. the model prefix plus
-the last two MAC octets. This is **not** the friendly name you set in the
-Govee app (e.g. "Kitchen Light") — that's confirmed cloud-only (§9 in
-`PROTOCOL.md`), never broadcast over BLE or exposed through any `ab`
-metadata field found so far. If you want a friendlier HA name, rename the
-device in HA directly (Settings → Devices), or pull `deviceName` from
-Govee's authenticated Cloud API (`GET /user/devices`, see `PROTOCOL.md`
-§6.5 for how this project has queried that endpoint before) and set it by
-hand — there's no way to get that specific string over BLE.
+## Scenes
 
-**Multiple MAC-like addresses per physical device is expected, not a
-bug.** Each unit actually has (at least) three distinct address-shaped
-identifiers, confirmed directly against the same real device:
-- **BLE MAC** (`5C:E7:53:F4:74:57`) — what this integration connects to.
-- **WiFi MAC** (`5C:E7:53:F4:74:56`) — reported via the device's own
-  status query (`status.wifi_mac`), differs from the BLE MAC by exactly 1
-  in the last octet.
-- **Cloud API device ID** (`2D:DB:5C:E7:53:F4:74:56`) — an 8-byte value
-  Govee's authenticated Cloud API uses to address the device, which
-  itself embeds the WiFi MAC as its last 6 bytes plus a 2-byte prefix.
+Scene data (name → code + base64 `scenceParam`) comes from the **library device
+profile** (`devices/h60a6/scenes.yaml`), not a runtime cloud fetch. Activation:
+- if the scene has upload data (`param`), do a full `set_scene_full()` upload
+  (reliable regardless of the device's cache), else
+- fall back to bare `set_scene()` activation (works only if the device already
+  cached that scene).
 
-This is normal for combo WiFi+BLE chips, which commonly derive separate
-per-radio MAC addresses from one base address with a small fixed offset,
-since WiFi and Bluetooth are logically separate network interfaces even
-on the same physical chip. `entity.py`'s `device_info` deliberately
-registers **both** the BLE and WiFi MACs as `connections` on the same HA
-device entry specifically so other integrations that discover this
-device via a *different* interface (e.g. a network-scanning integration
-that only ever sees the WiFi MAC) get correlated onto the same device in
-HA's registry, rather than showing up as an unrelated duplicate.
+Scenes that don't render correctly over BLE are flagged `working: false` in the
+profile; they're hidden from the effect picker, and directly requesting one
+raises a clear error. See the library's PROTOCOL.md for the two root causes
+(`0xFF`-placeholder headers and oversized payloads).
 
-**A real bug, found and fixed via this question**: if you ever see *more
-than 2* MAC-shaped connections on the device page, that's not a third
-legitimate address - it's stale garbage. `__init__.py`'s
-`_sync_device_registry` re-syncs the registry on every successful poll
-specifically so a bad value from one flaky read self-heals on the next
-good one, but it originally did this via
-`device_registry.async_get_or_create(connections=...)`, whose
-`connections` argument only ever **adds** to the existing set - it never
-removes anything. A bad connection written once (e.g. from an early
-version of the WiFi-MAC parsing logic, or two lights' BLE traffic briefly
-cross-contaminating at startup) therefore stuck around forever sitting
-*alongside* the correct one, silently defeating the self-healing this was
-meant to provide. Confirmed live: real device registry entries were found
-carrying a garbled MAC (the correct WiFi MAC's bytes shifted by one
-position with a stray `10` appended) that had persisted for months
-alongside the correct one, invisible to every previous "self-heals on
-next poll" assumption. Fixed by switching to
-`device_registry.async_update_device(device_id, new_connections=...)`,
-whose `new_connections` does a full replace instead of a merge - verified
-live, the stale connection was gone after the very next successful poll,
-no manual registry editing needed.
+## Device identity: name & MACs
 
-**The device serial number is available over BLE**, despite not being
-somewhere obvious — `client.get_serial_number()` queries `ab` metadata
-field `0x05` (see `PROTOCOL.md` §8) and is wired into `device_info` as
-`serial_number`, fetched once at setup rather than on every poll since
-it's static. Confirmed stable across two independently captured sessions
-(identical value both times).
+- The HA **device name** defaults to the BLE **local name** (e.g.
+  `GVH60A67457`), surfaced during discovery via `flow_title`. The friendly
+  nickname you set in the Govee app ("Hall Ceiling 1") is **cloud-only** and not
+  available over BLE — rename the device in HA after adoption.
+- The device registry records both the **BLE MAC** and the **Wi-Fi MAC** (they
+  differ by one in the last octet), which lets HA correlate this device with
+  other integrations (e.g. your router).
+- The **serial number** is read once over BLE and shown in device info.
 
-### Scene / effect activation
+## Data updates
 
-`light.py`'s `_activate_scene` prefers a **full data upload**
-(`client.set_scene_full`) whenever the selected effect has real
-`scenceParam` data available from the fetched scene library, falling back
-to **bare activation** (`client.set_scene`, just the scene ID, no upload)
-only for the static fallback table, which has no effect data to upload.
-Full upload is slower (a multi-chunk BLE burst) but is guaranteed correct
-regardless of whether the device has ever seen that scene before; bare
-activation is fast but silently does nothing if the device hasn't cached
-that exact scene from prior use. See `PROTOCOL.md` §6.4 for the full
-history of why the default flipped from bare to full upload.
-
-**Known-broken scenes are filtered out of the effect picker entirely**
-(`const.BROKEN_SCENE_NAMES`, applied in `light.py`'s
-`_sorted_selectable_scenes`) rather than left in as traps that silently
-fail or visibly misbehave when selected. See "Known issues" below.
-
-## Methodology
-
-This integration's BLE protocol understanding was built entirely through
-**live, controlled experimentation against real devices** — there was no
-public documentation for the H60A6 specifically to start from (see
-`PROTOCOL.md` §11 for the extensive prior-art search that confirmed this).
-The general approach, repeated for each opcode/behavior:
-
-1. **Capture real traffic.** Put a phone running the Govee app into a
-   Bluetooth HCI snoop capture, perform the action in the app, pull the
-   `btsnoop_hci.log`, and decode it against this project's own
-   already-cracked encryption scheme.
-2. **Form a hypothesis** about what the bytes mean, implement it, and
-   write it up in `PROTOCOL.md` with the supporting evidence.
-3. **Verify live, not just statically.** `test_protocol.py` is a
-   standalone (no Home Assistant install required) unit test suite built
-   from real captured fixtures — useful for regression-testing byte-level
-   framing, but explicitly **not sufficient on its own**: several real
-   bugs were only caught by literally connecting to a device and running
-   every command (`test_live_device.py`, `test_scene_switching.py`, and
-   similar one-off scripts), because status-query success and actual
-   physical rendering are two different things that can disagree (see
-   `PROTOCOL.md` §6.4/§6.5).
-4. **Cross-check against Govee's own official Cloud API** when a live BLE
-   result was ambiguous. With a real Govee Developer API key, several
-   disputed scenes were activated through Govee's authenticated
-   `POST /device/control` endpoint — completely bypassing this project's
-   BLE code — to determine whether a rendering failure was a bug in *this
-   integration* or a real limitation of the scene/device. This is how
-   §6.3.1's two scene-upload failure modes were confirmed to be bugs in
-   this project's BLE implementation, not the scene data (`PROTOCOL.md`
-   §6.5).
-5. **Search for prior art before assuming something is undiscovered.**
-   Several community BLE reverse-engineering projects for *other* Govee
-   devices were read in full to check for overlapping protocol details
-   (chunking/checksum framing, opcode meanings) before concluding a given
-   quirk is genuinely undocumented anywhere. `PROTOCOL.md` §11 records
-   both what corroborated this project's own findings and what turned out
-   to be dead ends, so future work doesn't repeat the same searches.
-
-The standalone diagnostic/test scripts referenced above are not part of
-the installed integration — they live outside `custom_components/` (see
-the paths noted in `PROTOCOL.md` where each is discussed) and are meant to
-be run by hand against a real device, not in CI.
+Local polling every **60 seconds** over BLE (plus an on-demand refresh after
+each command). Read back from the device: zone on/off, brightness, current
+scene, Wi-Fi MAC, and hardware version. RGB and color temperature are **not**
+read back (tracked optimistically).
 
 ## Known issues
 
-See `PROTOCOL.md` §10 for the complete, currently-maintained list. The two
-most relevant to day-to-day use:
+- **Some scenes are hidden** (flagged `working: false` in the profile) because
+  they don't render over BLE — see the library PROTOCOL.md.
+- **Zone on/off read-back** decodes bytes 14 (lower) / 15 (upper) of the status
+  terminator chunk; the encoding was historically tricky (see PROTOCOL.md
+  §5.2) — the current byte mapping is confirmed by a live 4-state truth table.
+- **"Light won't turn on/off" isn't always this integration.** A device can get
+  into a wedged BLE state that only a mains power-cycle clears; it looks similar
+  but is a device fault, not a decode bug.
 
-### Broken scenes (hidden from the effect picker)
+## Configuration
 
-Two independently-confirmed root causes prevent some official scenes from
-rendering correctly over BLE, even though they're genuinely valid,
-currently-supported scenes for this device (confirmed via Govee's own
-Cloud API — see `PROTOCOL.md` §6.5):
-
-- **"`0xFF` placeholder" scenes** — Aurora, Dandelion, Desert, Fall,
-  Green Wheat Field, Volcano. Their raw effect data contains literal
-  `0xFF` bytes in header positions that look like unresolved template
-  placeholders (in the same spirit as the already-solved `0x08`
-  "unconfirmed template" flag bit, but a different field). Size-independent
-  — happens even for the smallest of these scenes. **Additional testing
-  needed:** a real BLE capture of the Govee app freshly uploading one of
-  these scenes (device must not already have it cached) is the most
-  direct path to the fix — everything tried so far without one has been
-  inconclusive. See `PROTOCOL.md` §6.3.1 and §6.6 for the specific,
-  structurally-motivated hypothesis (a per-scene-"type" prefix
-  substitution, analogous to what's documented for *other* Govee device
-  families) that a real capture would let us confirm or rule out.
-- **Oversized scenes** — Ocean and Winter, the two largest scenes in the
-  library. Ocean additionally causes an outright BLE disconnect, not just
-  a silent failure to render. **Additional testing needed:** narrowing
-  the actual size/chunk-count threshold (currently only bounded to
-  "somewhere between ~254 and ~336 bytes") would need several
-  differently-sized real scenes tested live, ideally with a real capture
-  of the app uploading one of them fresh for comparison.
-
-These are disabled in `const.BROKEN_SCENE_NAMES`, filtered out of the
-effect picker in `light.py`, and additionally rejected with a clear error
-if triggered directly (e.g. via a service call bypassing the dropdown).
-Once either root cause is actually fixed and verified against a real
-device, remove the corresponding names from that set.
-
-### Zone on/off status readback is unreliable whenever the two zones differ
-
-`PROTOCOL.md` §5.2/§5.2.1 documents an unresolved bug in how zone on/off
-state is *decoded from a status query* (not a problem with the on/off
-*command*, which is solid) — the byte-level encoding used for that field
-doesn't fit the simple model this integration currently implements. It
-can misreport any time the upper and lower zones simply differ from each
-other, which is essentially any ordinary partial on/off state, not a
-special case.
-
-An optimistic-tracking mitigation was tried and then **reverted** — see
-`PROTOCOL.md` §5.2.1 for the full account. Short version: it broke this
-integration's ability to notice zone changes made outside HA (the Govee
-app, a remote), and it turned out to be the wrong fix for the specific
-report that prompted it anyway (see below). `light.py`/`switch.py` once
-again trust the coordinator's polled zone state directly, with the known
-readback bug intact and unresolved. See `PROTOCOL.md` §10 item 5 for what
-real testing would be needed to actually fix the decode.
-
-### "The light won't turn on/off" isn't always this bug — check for a stuck device first
-
-A device can get wedged at the hardware/firmware level such that it
-stops responding to power/zone commands entirely, while still responding
-normally to brightness and color changes. This looks superficially
-similar to the status-decode bug above but is a completely different,
-unrelated problem — and no software fix in this integration can address
-it, because the device isn't executing the command at all, on *any*
-control path.
-
-**How to tell the difference**: command power off through Govee's
-official Cloud API directly (`POST /device/control` with
-`devices.capabilities.on_off`/`powerSwitch`, requires a Govee Developer
-API key), independent of this integration's BLE code entirely. If it
-reports success but a follow-up `POST /device/state` query still shows
-the device on, the device itself is wedged, not this integration. The fix
-is a physical power cycle (the wall switch, or the breaker for a hardwired
-fixture) — not a code change.
-
-One related, separate gotcha observed after a power cycle: the device can
-take a while to become visible to Home Assistant's Bluetooth stack again,
-independent of whether it's already back online via WiFi/the Govee app.
-Symptom in the log: `bleak_retry_connector.BleakOutOfConnectionSlotsError`
-with `never seen by any scanner`. This was confirmed to be a real
-Bluetooth-visibility gap, not a code bug — checked directly with
-`bluetoothctl devices` / `bluetoothctl scan on` on the HA host, which also
-didn't see the device. If this doesn't clear up within a few minutes on
-its own, try moving the device closer to the host's Bluetooth adapter, or
-restarting Home Assistant to force a fresh Bluetooth scan pass.
+No YAML/options configuration. The device is added via Bluetooth discovery or
+**Add Integration → Govee BLE Local**. A **reconfigure** action re-verifies the
+device is reachable over BLE and reloads it (a quick recovery without deleting
+and re-adding). **Diagnostics** are downloadable per device (MAC/serial
+redacted; includes the resolved profile capabilities).
 
 ## File structure
 
 ```
-__init__.py        Integration setup: builds the typed runtime_data (client,
-                   coordinator, scene library, serial), registers platforms.
-client.py          BLE client: encryption/handshake, connection lifecycle,
-                   all command builders, status query + parsing.
-config_flow.py     Bluetooth-discovery, manual-address, and reconfigure flow.
-const.py           Shared constants: UUIDs, PSK, zone IDs, name prefix, the
-                   static scene fallback table, and the broken-scenes denylist.
-coordinator.py     DataUpdateCoordinator: periodic status polling.
-diagnostics.py     Config-entry diagnostics (with MAC/serial redaction).
-entity.py          Shared base entity: error-wrapping helper, device_info.
-light.py           Main light + 12 per-segment light entities.
-scene_library.py   Fetches the live scene library from Govee's public API;
-                   builds the a3-chunked scene upload payload.
-switch.py          Per-zone (upper ring / lower panel) switch entities.
-manifest.json      HA integration manifest.
-strings.json       Source strings: config flow, entity names, exceptions.
-icons.json         Entity icon translations (zone switches).
-translations/      Localized copies of strings.json (en.json).
-quality_scale.yaml Per-rule Integration Quality Scale tracking (Platinum).
-py.typed           PEP 561 marker: this package ships inline type hints.
-PROTOCOL.md        The full reverse-engineered BLE protocol reference.
-test_protocol.py   Standalone protocol unit tests from real captured fixtures.
-test_config_flow.py Standalone config-flow tests (both need no HA install).
+__init__.py       Setup: resolve profile, build runtime_data, register platforms.
+config_flow.py    Bluetooth (manufacturer-id) + manual + reconfigure flow;
+                  profile-gated (aborts unsupported models).
+const.py          HA-only constants: DOMAIN, POLL_INTERVAL_SECONDS, ZONE_META.
+coordinator.py    DataUpdateCoordinator over the library client.
+diagnostics.py    Config-entry diagnostics (MAC/serial redacted).
+entity.py         Shared base entity: error-wrapping helper, device_info.
+light.py          Main light entity (GoveeH60A6Light).
+switch.py         Per-zone switch entities (GoveeH60A6ZoneSwitch).
+manifest.json     Manifest: manufacturer-id bluetooth matcher, govee-ble-local
+                  requirement, quality_scale.
+strings.json      Config-flow + entity + exception strings (translations/en.json).
+icons.json        Zone-switch icon translations.
+quality_scale.yaml  Per-rule Integration Quality Scale tracking.
+PROTOCOL.md       Pointer to the protocol reference (now in the library).
+test_config_flow.py  Standalone config-flow tests (stdlib-only).
 ```
+
+The BLE protocol implementation and its tests live in the
+[`govee-ble-local`](https://github.com/Brady-Woods/govee-ble-local) library.
