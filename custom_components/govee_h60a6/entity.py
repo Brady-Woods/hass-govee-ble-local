@@ -30,11 +30,13 @@ class GoveeH60A6Entity(CoordinatorEntity[GoveeH60A6Coordinator]):
         coordinator: GoveeH60A6Coordinator,
         address: str,
         device_name: str,
+        model: str,
         serial_number: str | None = None,
     ) -> None:
         super().__init__(coordinator)
         self._address = address
         self._device_name = device_name
+        self._model = model
         self._serial_number = serial_number
 
     async def _run_client_command(self, coro: Coroutine[Any, Any, Any]) -> Any:
@@ -69,7 +71,7 @@ class GoveeH60A6Entity(CoordinatorEntity[GoveeH60A6Coordinator]):
             connections=connections,
             name=self._device_name,
             manufacturer="Govee",
-            model="H60A6",
+            model=self._model,
             hw_version=status.hardware_version if status else None,
             serial_number=self._serial_number,
         )

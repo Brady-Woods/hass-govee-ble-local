@@ -23,6 +23,20 @@ from pathlib import Path
 
 INTEGRATION_DIR = Path(__file__).resolve().parent
 
+# config_flow now imports govee_ble_local; make the sibling library repo's src
+# importable so this stdlib test can load it without a pip install. (The
+# profile layer needs only PyYAML, not bleak.)
+_LIB_SRC = Path(__file__).resolve().parents[3] / "govee-ble-local" / "src"
+if _LIB_SRC.is_dir():
+    sys.path.insert(0, str(_LIB_SRC))
+
+
+class _StubHass:
+    """Minimal hass: runs executor jobs inline."""
+
+    async def async_add_executor_job(self, func, *args):
+        return func(*args)
+
 
 class _AbortFlow(Exception):
     """Stand-in for homeassistant.data_entry_flow.AbortFlow."""
@@ -169,7 +183,7 @@ def run(coro):
 
 def make_flow(configured_ids=None, reconfigure_entry=None):
     flow = GoveeH60A6ConfigFlow()
-    flow.hass = object()
+    flow.hass = _StubHass()
     flow.context = {}
     flow._configured_ids = set(configured_ids or [])
     if reconfigure_entry is not None:
@@ -208,7 +222,8 @@ class TestBluetoothStep(unittest.TestCase):
         result = run(flow.async_step_bluetooth_confirm({}))
         self.assertEqual(result["type"], "create_entry")
         self.assertEqual(result["title"], "GVH60A67457")
-        self.assertEqual(result["data"], {"address": "AA:BB:CC:DD:EE:FF"})
+        # SKU resolved via the profile system and stored on the entry.
+        self.assertEqual(result["data"], {"address": "AA:BB:CC:DD:EE:FF", "sku": "H60A6"})
 
     def test_already_configured_aborts(self) -> None:
         flow = make_flow(configured_ids={"AA:BB:CC:DD:EE:FF"})
@@ -216,6 +231,15 @@ class TestBluetoothStep(unittest.TestCase):
         with self.assertRaises(_AbortFlow) as ctx:
             run(flow.async_step_bluetooth(info))
         self.assertEqual(ctx.exception.reason, "already_configured")
+
+    def test_unsupported_model_aborts(self) -> None:
+        # Manufacturer-id discovery catches any Govee device; the profile
+        # system rejects models it doesn't support.
+        flow = make_flow()
+        info = BluetoothServiceInfoBleak("AA:BB:CC:DD:EE:99", "GVH5179ABCD")
+        result = run(flow.async_step_bluetooth(info))
+        self.assertEqual(result["type"], "abort")
+        self.assertEqual(result["reason"], "not_supported")
 
 
 class TestUserStep(unittest.TestCase):
@@ -252,10 +276,11 @@ class TestUserStep(unittest.TestCase):
     def test_selection_creates_entry(self) -> None:
         flow = make_flow()
         flow._discovered_devices = {"AA:BB:CC:DD:EE:01": "GVH60A67457"}
+        flow._discovered_skus = {"AA:BB:CC:DD:EE:01": "H60A6"}
         result = run(flow.async_step_user({"address": "AA:BB:CC:DD:EE:01"}))
         self.assertEqual(result["type"], "create_entry")
         self.assertEqual(result["title"], "GVH60A67457")
-        self.assertEqual(result["data"], {"address": "AA:BB:CC:DD:EE:01"})
+        self.assertEqual(result["data"], {"address": "AA:BB:CC:DD:EE:01", "sku": "H60A6"})
 
 
 class TestReconfigureStep(unittest.TestCase):

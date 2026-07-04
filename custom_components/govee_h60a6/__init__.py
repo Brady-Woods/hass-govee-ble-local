@@ -1,4 +1,4 @@
-"""The Govee H60A6 integration."""
+"""The Govee BLE Local integration."""
 from __future__ import annotations
 
 import asyncio
@@ -7,6 +7,8 @@ import zlib
 from dataclasses import dataclass
 
 from bleak.exc import BleakError
+from govee_ble_local import GoveeBleClient, profile as govee_profile
+from govee_ble_local.profile import DeviceProfile
 from homeassistant.components import bluetooth
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
@@ -14,24 +16,24 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import device_registry as dr
 
-from .client import GoveeH60A6Client
 from .const import DOMAIN
 from .coordinator import GoveeH60A6Coordinator
 from .entity import CONNECTION_BLE
-from .scene_library import SceneData, async_fetch_scene_library
 
 _LOGGER = logging.getLogger(__name__)
 PLATFORMS: list[Platform] = [Platform.LIGHT, Platform.SWITCH]
-SCENE_LIBRARY_SKU = "H60A6"
+# Fallback profile when the advertised name isn't available to match on. This
+# integration is currently H60A6-scoped by its bluetooth manifest matcher.
+DEFAULT_SKU = "H60A6"
 
 
 @dataclass
 class GoveeH60A6RuntimeData:
     """Runtime objects shared between the platforms for one config entry."""
 
-    client: GoveeH60A6Client
+    client: GoveeBleClient
     coordinator: GoveeH60A6Coordinator
-    scene_library: dict[str, SceneData]
+    profile: DeviceProfile
     serial_number: str | None
 
 
@@ -39,23 +41,33 @@ type GoveeH60A6ConfigEntry = ConfigEntry[GoveeH60A6RuntimeData]
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: GoveeH60A6ConfigEntry) -> bool:
-    """Set up a Govee H60A6 light from a config entry."""
+    """Set up a Govee BLE light from a config entry."""
     address: str = entry.data["address"]
     ble_device = bluetooth.async_ble_device_from_address(hass, address, connectable=True)
     if ble_device is None:
         raise ConfigEntryNotReady(f"Could not find Govee light with address {address}")
 
-    client = GoveeH60A6Client(ble_device)
-    coordinator = GoveeH60A6Coordinator(hass, client, address)
-
-    scene_library = await async_fetch_scene_library(hass, SCENE_LIBRARY_SKU)
-    if scene_library:
-        _LOGGER.debug("Using %d scenes from Govee's online library", len(scene_library))
-    else:
-        _LOGGER.warning(
-            "Could not fetch Govee's online scene library; falling back to bare "
-            "scene activation (may not work for scenes never used via the app)"
+    # Resolve the device profile (capabilities + scene catalog). Prefer the SKU
+    # stored at config time, then fall back to matching the advertised name,
+    # then to the default SKU. Loading YAML is blocking, so use the executor.
+    sku = entry.data.get("sku")
+    profile = None
+    if sku:
+        profile = await hass.async_add_executor_job(govee_profile.load_by_sku, sku)
+    if profile is None:
+        profile = await hass.async_add_executor_job(
+            govee_profile.match_local_name, ble_device.name
         )
+    if profile is None:
+        profile = await hass.async_add_executor_job(govee_profile.load_by_sku, DEFAULT_SKU)
+    if profile is None:
+        raise ConfigEntryNotReady(
+            f"No device profile for {ble_device.name!r} (address {address})"
+        )
+    _LOGGER.debug("Using profile %s (%d scenes) for %s", profile.sku, len(profile.scenes), address)
+
+    client = GoveeBleClient(ble_device)
+    coordinator = GoveeH60A6Coordinator(hass, client, address)
 
     # Stagger multiple lights' poll schedules so they don't stay in lockstep
     # and repeatedly fight over the adapter's limited BLE connection slots.
@@ -67,10 +79,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: GoveeH60A6ConfigEntry) -
     await coordinator.async_config_entry_first_refresh()
 
     # Serial number is static (queried once, not part of the regular poll
-    # cycle - no reason to re-fetch it every 30s). A "nice to have," not
-    # essential to the integration working, so a failure here is logged
-    # and setup continues rather than blocking on it - matches the same
-    # graceful-degradation pattern as the scene library fetch above.
+    # cycle). A "nice to have," not essential - a failure here is logged and
+    # setup continues rather than blocking on it.
     try:
         serial_number = await client.get_serial_number()
     except BleakError as err:
@@ -82,20 +92,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: GoveeH60A6ConfigEntry) -
     @callback
     def _sync_device_registry() -> None:
         # device_info on entities is only applied once, at initial entity
-        # registration. Re-syncing on every successful poll is meant to
-        # let a bad value from one flaky update (e.g. two lights' BLE
-        # traffic briefly cross-contaminating at startup, or an old
-        # parsing bug) get corrected on the next good one - but
-        # async_get_or_create()'s `connections` argument only ever ADDS to
-        # the existing set (merge semantics), it never removes anything.
-        # A bad connection written once therefore stuck around forever
-        # sitting alongside the correct one, silently defeating the
-        # self-healing this was meant to provide (confirmed live: real
-        # device registry entries were found with a stale, garbled MAC
-        # connection alongside the correct one, months after the bad
-        # value was first written). async_update_device's
-        # `new_connections` does a full replace instead of a merge, so use
-        # that for the actual self-healing correction.
+        # registration. Re-syncing on every successful poll lets a bad value
+        # from one flaky update get corrected on the next good one - but
+        # async_get_or_create()'s `connections` only ADDS (merge), never
+        # removes, so a bad connection written once stuck around forever.
+        # async_update_device's `new_connections` does a full replace instead.
         status = coordinator.data
         if status is None:
             return
@@ -109,7 +110,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: GoveeH60A6ConfigEntry) -
             identifiers={(DOMAIN, address)},
             connections=connections,
             manufacturer="Govee",
-            model="H60A6",
+            model=profile.name,
             hw_version=status.hardware_version,
             serial_number=serial_number,
         )
@@ -138,7 +139,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: GoveeH60A6ConfigEntry) -
     entry.runtime_data = GoveeH60A6RuntimeData(
         client=client,
         coordinator=coordinator,
-        scene_library=scene_library,
+        profile=profile,
         serial_number=serial_number,
     )
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)

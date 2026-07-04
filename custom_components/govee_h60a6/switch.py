@@ -1,16 +1,16 @@
-"""Switch platform for the Govee H60A6 zone (upper ring / lower panel) control."""
+"""Switch platform for Govee BLE per-zone control (profile-driven)."""
 from __future__ import annotations
 
 import logging
 from typing import Any
 
+from govee_ble_local import GoveeBleClient, ZONE_UPPER
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import GoveeH60A6ConfigEntry
-from .client import GoveeH60A6Client
-from .const import ZONE_LOWER, ZONE_UPPER
+from .const import ZONE_META
 from .coordinator import GoveeH60A6Coordinator
 from .entity import GoveeH60A6Entity
 
@@ -26,47 +26,46 @@ async def async_setup_entry(
     entry: GoveeH60A6ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up the upper-ring and lower-panel zone switches."""
+    """Set up one switch per physical zone the profile declares."""
     data = entry.runtime_data
     address: str = entry.data["address"]
-    async_add_entities(
-        [
+    entities = []
+    for zone_name in data.profile.capabilities.zones:
+        meta = ZONE_META.get(zone_name)
+        if meta is None:
+            _LOGGER.warning("No mapping for zone %r; skipping", zone_name)
+            continue
+        zone_index, translation_key = meta
+        entities.append(
             GoveeH60A6ZoneSwitch(
                 data.coordinator,
                 data.client,
                 address,
                 entry.title,
-                ZONE_UPPER,
-                "upper_ring",
+                data.profile.name,
+                zone_index,
+                translation_key,
                 data.serial_number,
-            ),
-            GoveeH60A6ZoneSwitch(
-                data.coordinator,
-                data.client,
-                address,
-                entry.title,
-                ZONE_LOWER,
-                "lower_panel",
-                data.serial_number,
-            ),
-        ]
-    )
+            )
+        )
+    async_add_entities(entities)
 
 
 class GoveeH60A6ZoneSwitch(GoveeH60A6Entity, SwitchEntity):
-    """On/off control for a single zone (upper ring or lower panel)."""
+    """On/off control for a single zone (e.g. upper ring or lower panel)."""
 
     def __init__(
         self,
         coordinator: GoveeH60A6Coordinator,
-        client: GoveeH60A6Client,
+        client: GoveeBleClient,
         address: str,
         device_name: str,
+        model: str,
         zone: int,
         translation_key: str,
         serial_number: str | None = None,
     ) -> None:
-        super().__init__(coordinator, address, device_name, serial_number)
+        super().__init__(coordinator, address, device_name, model, serial_number)
         self._client = client
         self._zone = zone
         self._attr_unique_id = f"{address}_zone_{zone}"

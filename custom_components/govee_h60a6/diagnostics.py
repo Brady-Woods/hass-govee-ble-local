@@ -22,6 +22,7 @@ async def async_get_config_entry_diagnostics(
     coordinator = data.coordinator
     status = coordinator.data
 
+    profile = data.profile
     return async_redact_data(
         {
             "entry": {
@@ -32,8 +33,19 @@ async def async_get_config_entry_diagnostics(
                 "last_update_success": coordinator.last_update_success,
                 "update_interval": str(coordinator.update_interval),
             },
+            "profile": {
+                "sku": profile.sku,
+                "capabilities": {
+                    "brightness": profile.capabilities.brightness,
+                    "rgb": profile.capabilities.rgb,
+                    "color_temp": profile.capabilities.color_temp,
+                    "zones": list(profile.capabilities.zones),
+                    "segments": profile.capabilities.segments,
+                    "scenes": profile.capabilities.scenes,
+                },
+                "scene_count": len(profile.scenes),
+            },
             "serial_number": data.serial_number,
-            "scene_library_count": len(data.scene_library),
             "status": asdict(status) if status is not None else None,
         },
         TO_REDACT,

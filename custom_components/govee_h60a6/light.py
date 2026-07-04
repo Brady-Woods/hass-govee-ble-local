@@ -1,10 +1,11 @@
-"""Light platform for the Govee H60A6."""
+"""Light platform for Govee BLE lights (profile-driven)."""
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable
 from typing import Any
 
+from govee_ble_local import GoveeBleClient, ZONE_UPPER
+from govee_ble_local.profile import DeviceProfile
 from homeassistant.components.light import (
     ATTR_BRIGHTNESS,
     ATTR_COLOR_TEMP_KELVIN,
@@ -19,24 +20,13 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import GoveeH60A6ConfigEntry
-from .client import GoveeH60A6Client
-from .const import (
-    BROKEN_SCENE_NAMES,
-    DOMAIN,
-    MAX_COLOR_TEMP_KELVIN,
-    MIN_COLOR_TEMP_KELVIN,
-    SCENES,
-    ZONE_LOWER,
-    ZONE_UPPER,
-)
+from .const import DOMAIN, ZONE_META
 from .coordinator import GoveeH60A6Coordinator
 from .entity import GoveeH60A6Entity
-from .scene_library import SceneData
 
 _LOGGER = logging.getLogger(__name__)
 
-# All BLE work funnels through the client's single connection/lock, and this
-# whole project's history is about avoiding adapter contention - so never let
+# All BLE work funnels through the client's single connection/lock; never let
 # HA issue entity commands for this integration concurrently.
 PARALLEL_UPDATES = 1
 
@@ -48,91 +38,95 @@ async def async_setup_entry(
 ) -> None:
     """Set up the main light entity."""
     data = entry.runtime_data
-    address: str = entry.data["address"]
     async_add_entities(
         [
             GoveeH60A6Light(
                 data.coordinator,
                 data.client,
-                address,
+                entry.data["address"],
                 entry.title,
-                data.scene_library,
+                data.profile,
                 data.serial_number,
             )
         ]
     )
 
 
-def _scene_id(scene_code: int) -> tuple[int, int]:
-    return (scene_code & 0xFF, (scene_code >> 8) & 0xFF)
-
-
-def _sorted_selectable_scenes(names: Iterable[str]) -> list[str]:
-    """Alphabetized effect list, with scenes confirmed broken over BLE
-    (see const.BROKEN_SCENE_NAMES and PROTOCOL.md 6.3.1/10) left out so
-    selecting one doesn't produce a silent no-op or a scene that visibly
-    fails to render. They're only hidden from the picker - if the device
-    ever reports one of these as its current scene, it's still displayed
-    correctly by name (see _scene_id_to_name, built separately and not
-    filtered), not shown as "unknown"."""
-    return sorted(
-        (name for name in names if name.lower() not in BROKEN_SCENE_NAMES),
-        key=str.casefold,
-    )
-
-
 class GoveeH60A6Light(GoveeH60A6Entity, LightEntity):
     """Overall power/brightness/color/scene control for the fixture.
 
-    The device has no way to read back the current RGB color or color
-    temperature over BLE (only zones/brightness/scene are queryable), so
-    those two are tracked optimistically from the last command we sent,
-    same as many write-only BLE light integrations.
+    Capabilities (color modes, temp range, zones, scenes) are taken from the
+    device profile. RGB color and color temperature have no reliable BLE
+    read-back on the short status query used here, so they're tracked
+    optimistically from the last command sent.
     """
 
     _attr_name = None
-    _attr_supported_color_modes = {ColorMode.RGB, ColorMode.COLOR_TEMP}
-    _attr_supported_features = LightEntityFeature.EFFECT
-    _attr_min_color_temp_kelvin = MIN_COLOR_TEMP_KELVIN
-    _attr_max_color_temp_kelvin = MAX_COLOR_TEMP_KELVIN
 
     def __init__(
         self,
         coordinator: GoveeH60A6Coordinator,
-        client: GoveeH60A6Client,
+        client: GoveeBleClient,
         address: str,
         device_name: str,
-        scene_library: dict[str, SceneData],
+        profile: DeviceProfile,
         serial_number: str | None = None,
     ) -> None:
-        super().__init__(coordinator, address, device_name, serial_number)
+        super().__init__(coordinator, address, device_name, profile.name, serial_number)
         self._client = client
+        self._profile = profile
         self._attr_unique_id = f"{address}_light"
-        self._scene_library = scene_library
-        # HA requires color_mode to always be a real value from
-        # supported_color_modes once that's set - it can't be None, or the
-        # entity fails to even register. We have no way to read back the
-        # device's actual current color/temp over BLE, so this is a
-        # placeholder default until the user explicitly sets one.
-        self._optimistic_color_mode: ColorMode = ColorMode.COLOR_TEMP
-        self._optimistic_rgb_color: tuple[int, int, int] | None = None
-        self._optimistic_color_temp_kelvin: int | None = 4000
 
-        if scene_library:
-            self._attr_effect_list = _sorted_selectable_scenes(scene_library.keys())
-            self._scene_id_to_name = {
-                _scene_id(data.scene_code): name for name, data in scene_library.items()
-            }
+        cap = profile.capabilities
+        modes: set[ColorMode] = set()
+        if cap.rgb:
+            modes.add(ColorMode.RGB)
+        if cap.color_temp:
+            modes.add(ColorMode.COLOR_TEMP)
+        if not modes:
+            modes = {ColorMode.BRIGHTNESS if cap.brightness else ColorMode.ONOFF}
+        self._attr_supported_color_modes = modes
+        if cap.color_temp:
+            self._attr_min_color_temp_kelvin, self._attr_max_color_temp_kelvin = cap.color_temp
+        if cap.scenes:
+            self._attr_supported_features = LightEntityFeature.EFFECT
+            self._attr_effect_list = [s.name for s in profile.selectable_scenes()]
+        self._scene_id_to_name = {s.scene_id: s.name for s in profile.scenes}
+
+        # BLE zone indices making up this fixture (for whole-light on/off).
+        self._zone_indices = [
+            ZONE_META[z][0] for z in cap.zones if z in ZONE_META
+        ]
+
+        # Optimistic color state (no BLE read-back on the short query).
+        if ColorMode.COLOR_TEMP in modes:
+            self._optimistic_color_mode = ColorMode.COLOR_TEMP
+        elif ColorMode.RGB in modes:
+            self._optimistic_color_mode = ColorMode.RGB
         else:
-            self._attr_effect_list = _sorted_selectable_scenes(SCENES.keys())
-            self._scene_id_to_name = {v: k for k, v in SCENES.items()}
+            self._optimistic_color_mode = next(iter(modes))
+        self._optimistic_rgb_color: tuple[int, int, int] | None = None
+        self._optimistic_color_temp_kelvin: int | None = (
+            4000 if cap.color_temp else None
+        )
+
+    def _zone_is_on(self, zone_index: int) -> bool | None:
+        status = self.coordinator.data
+        if status is None:
+            return None
+        return status.zone_upper_on if zone_index == ZONE_UPPER else status.zone_lower_on
 
     @property
     def is_on(self) -> bool | None:
+        if self._zone_indices:
+            vals = [self._zone_is_on(z) for z in self._zone_indices]
+            if any(v is None for v in vals):
+                return None
+            return any(vals)
         status = self.coordinator.data
-        if status is None or status.zone_upper_on is None or status.zone_lower_on is None:
+        if status is None or status.brightness_pct is None:
             return None
-        return status.zone_upper_on or status.zone_lower_on
+        return status.brightness_pct > 0
 
     @property
     def brightness(self) -> int | None:
@@ -161,49 +155,24 @@ class GoveeH60A6Light(GoveeH60A6Entity, LightEntity):
         return self._optimistic_color_temp_kelvin
 
     async def _activate_scene(self, effect: str) -> None:
-        # Full upload (set_scene_full) is the default when we have real
-        # scenceParam data for this effect. Bare activation (no upload) was
-        # previously the default on the theory that the device "effectively
-        # already has every scene cached" from prior use - that assumption
-        # was wrong in practice (confirmed by real-world reports of scene
-        # switching failing/no-oping in HA) and bare mode has no way to
-        # recover when the assumption doesn't hold: it silently does
-        # nothing if the device hasn't actually seen that exact scene
-        # before. Full upload is guaranteed correct regardless of cache
-        # state, and live device testing (test_scene_switching.py, see
-        # PROTOCOL.md 6.2.1) found it far more reliable after fixing the
-        # ack-handling bugs there - 100% success across repeated switching
-        # for every tested scene up to 13 chunks. One still-open exception:
-        # very large scenes (~20 chunks, e.g. "Ocean") are not yet reliable
-        # even with full upload - see PROTOCOL.md 6.3/10.
-        if effect.lower() in BROKEN_SCENE_NAMES:
+        scene = self._profile.scene_by_name(effect)
+        if scene is None:
+            _LOGGER.warning("Unknown effect requested: %s", effect)
+            return
+        if not scene.working:
             # Hidden from effect_list, but guard here too in case something
-            # calls light.turn_on with this effect directly (e.g. a service
-            # call or automation bypassing the dropdown).
+            # calls light.turn_on with this effect directly.
             raise HomeAssistantError(
                 translation_domain=DOMAIN,
                 translation_key="scene_broken",
                 translation_placeholders={"effect": effect},
             )
-
-        scene_data = self._scene_library.get(effect)
-        if scene_data is not None:
-            _LOGGER.debug("Activating scene %s via full upload (code %d)", effect, scene_data.scene_code)
-            await self._run_client_command(
-                self._client.set_scene_full(scene_data.scene_code, scene_data.scenceParam)
-            )
-            return
-
-        scene_id = SCENES.get(effect)
-        if scene_id is not None:
-            # Static fallback table only has scene codes, not scenceParam
-            # data - bare activation is the only option here, and only
-            # works if the device already has this scene cached.
-            _LOGGER.debug("Activating scene %s with bare id %s (from static fallback table)", effect, scene_id)
-            await self._run_client_command(self._client.set_scene(scene_id))
-            return
-
-        _LOGGER.warning("Unknown effect requested: %s", effect)
+        if scene.param:
+            _LOGGER.debug("Activating scene %s via full upload (code %d)", effect, scene.code)
+            await self._run_client_command(self._client.set_scene_full(scene.code, scene.param))
+        else:
+            _LOGGER.debug("Activating scene %s via bare id %s", effect, scene.scene_id)
+            await self._run_client_command(self._client.set_scene(scene.scene_id))
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         was_off = self.is_on is not True
@@ -230,16 +199,15 @@ class GoveeH60A6Light(GoveeH60A6Entity, LightEntity):
         if ATTR_EFFECT in kwargs:
             await self._activate_scene(kwargs[ATTR_EFFECT])
 
-        # Only touch zone power when actually turning the fixture on from off.
-        # Otherwise a brightness/effect-only call while already on would
-        # needlessly re-toggle both zones and can interrupt what was just set.
-        if was_off:
-            await self._run_client_command(self._client.set_zone(ZONE_UPPER, True))
-            await self._run_client_command(self._client.set_zone(ZONE_LOWER, True))
+        # Only touch zone power when turning the fixture on from off, so a
+        # brightness/effect-only call while already on doesn't re-toggle zones.
+        if was_off and self._zone_indices:
+            for zone in self._zone_indices:
+                await self._run_client_command(self._client.set_zone(zone, True))
 
         await self.coordinator.async_request_refresh()
 
     async def async_turn_off(self, **kwargs: Any) -> None:
-        await self._run_client_command(self._client.set_zone(ZONE_UPPER, False))
-        await self._run_client_command(self._client.set_zone(ZONE_LOWER, False))
+        for zone in self._zone_indices:
+            await self._run_client_command(self._client.set_zone(zone, False))
         await self.coordinator.async_request_refresh()
