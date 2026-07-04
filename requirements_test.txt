@@ -1,9 +1,20 @@
 # Test dependencies for the Home Assistant integration layer.
-# The pinned HA version comes transitively from pytest-homeassistant-custom-component.
+# The pinned Home Assistant version comes transitively from
+# pytest-homeassistant-custom-component.
 pytest-homeassistant-custom-component
 pytest-cov
+mypy
 
-# Runtime dependency of the integration (imported by the code under test).
-# Installed from the sibling library checkout during development:
-#   pip install -e ../govee-ble-local
-govee-ble-local
+# Optional deps of the bluetooth/usb components this integration depends on.
+# Home Assistant installs these on demand at runtime, but the test harness has
+# to import and set up the bluetooth component itself, so they must be present.
+# (These are NOT runtime requirements of this integration.)
+aiousbwatcher
+pyserial
+serialx
+aioesphomeapi
+dbus-fast
+
+# The integration's runtime dependency (govee-ble-local) is installed
+# separately by scripts/check.sh - from a sibling checkout in dev, or the git
+# URL in CI - since it isn't published to PyPI.

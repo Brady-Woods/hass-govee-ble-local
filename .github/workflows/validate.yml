@@ -3,10 +3,23 @@ name: Validate
 on:
   push:
   pull_request:
+  release:
+    types: [published]
   schedule:
     - cron: "0 0 * * *"   # daily: catch HACS/hassfest rule changes over time
 
 jobs:
+  quality:
+    name: Type-check & tests (coverage gate)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"   # match the production container runtime
+      - name: Run quality gate
+        run: bash scripts/check.sh
+
   hacs:
     name: HACS validation
     runs-on: ubuntu-latest

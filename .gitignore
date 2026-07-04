@@ -9,5 +9,6 @@ dist/
 .coverage.*
 htmlcov/
 .venv/
+.venv-check/
 venv/
 .DS_Store
