@@ -14,7 +14,7 @@ from .const import DOMAIN, POLL_INTERVAL_SECONDS
 _LOGGER = logging.getLogger(__name__)
 
 
-class GoveeH60A6Coordinator(DataUpdateCoordinator[GoveeBleStatus]):
+class GoveeBleLocalCoordinator(DataUpdateCoordinator[GoveeBleStatus]):
     """Periodically polls the light over BLE so HA stays in sync with app changes."""
 
     def __init__(self, hass: HomeAssistant, client: GoveeBleClient, address: str) -> None:

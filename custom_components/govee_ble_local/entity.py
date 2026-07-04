@@ -1,4 +1,4 @@
-"""Shared base entity for the Govee H60A6 integration."""
+"""Shared base entity for the Govee BLE Local integration."""
 from __future__ import annotations
 
 import logging
@@ -14,19 +14,19 @@ from homeassistant.helpers.device_registry import (
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
-from .coordinator import GoveeH60A6Coordinator
+from .coordinator import GoveeBleLocalCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
 
-class GoveeH60A6Entity(CoordinatorEntity[GoveeH60A6Coordinator]):
+class GoveeBleLocalEntity(CoordinatorEntity[GoveeBleLocalCoordinator]):
     """Base entity providing shared device info built from polled status."""
 
     _attr_has_entity_name = True
 
     def __init__(
         self,
-        coordinator: GoveeH60A6Coordinator,
+        coordinator: GoveeBleLocalCoordinator,
         address: str,
         device_name: str,
         model: str,

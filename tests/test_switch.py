@@ -8,10 +8,10 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.govee_h60a6 import GoveeH60A6RuntimeData
-from custom_components.govee_h60a6.const import DOMAIN
-from custom_components.govee_h60a6.coordinator import GoveeH60A6Coordinator
-from custom_components.govee_h60a6.switch import async_setup_entry
+from custom_components.govee_ble_local import GoveeBleLocalRuntimeData
+from custom_components.govee_ble_local.const import DOMAIN
+from custom_components.govee_ble_local.coordinator import GoveeBleLocalCoordinator
+from custom_components.govee_ble_local.switch import async_setup_entry
 
 from .const import ADDRESS, TITLE, make_status
 
@@ -54,10 +54,10 @@ async def test_switch_setup_skips_unmapped_zone(
         sku="Z", name="Z", local_name_prefixes=("Z",),
         capabilities=Capabilities(zones=("upper", "bogus")),
     )
-    coordinator = GoveeH60A6Coordinator(hass, mock_client, ADDRESS)
+    coordinator = GoveeBleLocalCoordinator(hass, mock_client, ADDRESS)
     coordinator.data = make_status()
     entry = MockConfigEntry(domain=DOMAIN, title=TITLE, data={"address": ADDRESS})
-    entry.runtime_data = GoveeH60A6RuntimeData(
+    entry.runtime_data = GoveeBleLocalRuntimeData(
         client=mock_client, coordinator=coordinator, profile=profile, serial_number="SN"
     )
 

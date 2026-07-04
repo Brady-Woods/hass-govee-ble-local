@@ -10,7 +10,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.govee_h60a6.const import DOMAIN
+from custom_components.govee_ble_local.const import DOMAIN
 
 from .const import ADDRESS, WIFI_MAC, make_status
 
@@ -42,7 +42,7 @@ async def test_setup_ble_device_not_found(
     """Setup retries when the device isn't visible over Bluetooth."""
     mock_config_entry.add_to_hass(hass)
     with patch(
-        "custom_components.govee_h60a6.bluetooth.async_ble_device_from_address",
+        "custom_components.govee_ble_local.bluetooth.async_ble_device_from_address",
         return_value=None,
     ):
         assert not await hass.config_entries.async_setup(mock_config_entry.entry_id)
@@ -69,11 +69,11 @@ async def test_setup_profile_default_fallback(
     device = BLEDevice(address=ADDRESS, name="Unknown Device", details={})
     with (
         patch(
-            "custom_components.govee_h60a6.bluetooth.async_ble_device_from_address",
+            "custom_components.govee_ble_local.bluetooth.async_ble_device_from_address",
             return_value=device,
         ),
         patch(
-            "custom_components.govee_h60a6.bluetooth.async_register_callback",
+            "custom_components.govee_ble_local.bluetooth.async_register_callback",
             return_value=MagicMock(),
         ),
     ):
@@ -136,11 +136,11 @@ async def test_setup_no_profile_raises(
     """Setup retries when no device profile can be resolved at all."""
     with (
         patch(
-            "custom_components.govee_h60a6.govee_profile.load_by_sku",
+            "custom_components.govee_ble_local.govee_profile.load_by_sku",
             return_value=None,
         ),
         patch(
-            "custom_components.govee_h60a6.govee_profile.match_local_name",
+            "custom_components.govee_ble_local.govee_profile.match_local_name",
             return_value=None,
         ),
     ):

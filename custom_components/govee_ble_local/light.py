@@ -19,10 +19,10 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from . import GoveeH60A6ConfigEntry
+from . import GoveeBleLocalConfigEntry
 from .const import DOMAIN, ZONE_META
-from .coordinator import GoveeH60A6Coordinator
-from .entity import GoveeH60A6Entity
+from .coordinator import GoveeBleLocalCoordinator
+from .entity import GoveeBleLocalEntity
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -33,14 +33,14 @@ PARALLEL_UPDATES = 1
 
 async def async_setup_entry(
     hass: HomeAssistant,
-    entry: GoveeH60A6ConfigEntry,
+    entry: GoveeBleLocalConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up the main light entity."""
     data = entry.runtime_data
     async_add_entities(
         [
-            GoveeH60A6Light(
+            GoveeBleLocalLight(
                 data.coordinator,
                 data.client,
                 entry.data["address"],
@@ -52,7 +52,7 @@ async def async_setup_entry(
     )
 
 
-class GoveeH60A6Light(GoveeH60A6Entity, LightEntity):
+class GoveeBleLocalLight(GoveeBleLocalEntity, LightEntity):
     """Overall power/brightness/color/scene control for the fixture.
 
     Capabilities (color modes, temp range, zones, scenes) are taken from the
@@ -65,7 +65,7 @@ class GoveeH60A6Light(GoveeH60A6Entity, LightEntity):
 
     def __init__(
         self,
-        coordinator: GoveeH60A6Coordinator,
+        coordinator: GoveeBleLocalCoordinator,
         client: GoveeBleClient,
         address: str,
         device_name: str,

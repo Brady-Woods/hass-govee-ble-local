@@ -17,7 +17,7 @@ from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import device_registry as dr
 
 from .const import DOMAIN
-from .coordinator import GoveeH60A6Coordinator
+from .coordinator import GoveeBleLocalCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 PLATFORMS: list[Platform] = [Platform.LIGHT, Platform.SWITCH]
@@ -27,19 +27,19 @@ DEFAULT_SKU = "H60A6"
 
 
 @dataclass
-class GoveeH60A6RuntimeData:
+class GoveeBleLocalRuntimeData:
     """Runtime objects shared between the platforms for one config entry."""
 
     client: GoveeBleClient
-    coordinator: GoveeH60A6Coordinator
+    coordinator: GoveeBleLocalCoordinator
     profile: DeviceProfile
     serial_number: str | None
 
 
-type GoveeH60A6ConfigEntry = ConfigEntry[GoveeH60A6RuntimeData]
+type GoveeBleLocalConfigEntry = ConfigEntry[GoveeBleLocalRuntimeData]
 
 
-async def async_setup_entry(hass: HomeAssistant, entry: GoveeH60A6ConfigEntry) -> bool:
+async def async_setup_entry(hass: HomeAssistant, entry: GoveeBleLocalConfigEntry) -> bool:
     """Set up a Govee BLE light from a config entry."""
     address: str = entry.data["address"]
     ble_device = bluetooth.async_ble_device_from_address(hass, address, connectable=True)
@@ -66,7 +66,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: GoveeH60A6ConfigEntry) -
     _LOGGER.debug("Using profile %s (%d scenes) for %s", profile.sku, len(profile.scenes), address)
 
     client = GoveeBleClient(ble_device)
-    coordinator = GoveeH60A6Coordinator(hass, client, address)
+    coordinator = GoveeBleLocalCoordinator(hass, client, address)
 
     # Stagger multiple lights' poll schedules so they don't stay in lockstep
     # and repeatedly fight over the adapter's limited BLE connection slots.
@@ -136,7 +136,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: GoveeH60A6ConfigEntry) -
         )
     )
 
-    entry.runtime_data = GoveeH60A6RuntimeData(
+    entry.runtime_data = GoveeBleLocalRuntimeData(
         client=client,
         coordinator=coordinator,
         profile=profile,
@@ -146,7 +146,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: GoveeH60A6ConfigEntry) -
     return True
 
 
-async def async_unload_entry(hass: HomeAssistant, entry: GoveeH60A6ConfigEntry) -> bool:
+async def async_unload_entry(hass: HomeAssistant, entry: GoveeBleLocalConfigEntry) -> bool:
     """Unload a config entry, disconnecting the BLE client."""
     _LOGGER.debug("Unloading entry for %s", entry.data["address"])
     await entry.runtime_data.client.disconnect()

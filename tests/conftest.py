@@ -10,7 +10,7 @@ from bleak.backends.device import BLEDevice
 from homeassistant.core import HomeAssistant
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.govee_h60a6.const import DOMAIN
+from custom_components.govee_ble_local.const import DOMAIN
 
 from .const import ADDRESS, LOCAL_NAME, TITLE, make_status
 
@@ -39,7 +39,7 @@ def mock_client() -> Generator[AsyncMock]:
     client.get_status.return_value = make_status()
     client.get_serial_number.return_value = "SN0001"
     client.update_ble_device = MagicMock()
-    with patch("custom_components.govee_h60a6.GoveeBleClient", return_value=client):
+    with patch("custom_components.govee_ble_local.GoveeBleClient", return_value=client):
         yield client
 
 
@@ -59,11 +59,11 @@ def mock_bluetooth(ble_device: BLEDevice) -> Generator[SimpleNamespace]:
     """Patch the bluetooth lookups __init__ uses during setup."""
     with (
         patch(
-            "custom_components.govee_h60a6.bluetooth.async_ble_device_from_address",
+            "custom_components.govee_ble_local.bluetooth.async_ble_device_from_address",
             return_value=ble_device,
         ) as ble_lookup,
         patch(
-            "custom_components.govee_h60a6.bluetooth.async_register_callback",
+            "custom_components.govee_ble_local.bluetooth.async_register_callback",
             return_value=MagicMock(),
         ) as register,
     ):

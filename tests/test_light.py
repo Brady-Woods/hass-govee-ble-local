@@ -18,15 +18,15 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.govee_h60a6.const import DOMAIN
-from custom_components.govee_h60a6.coordinator import GoveeH60A6Coordinator
-from custom_components.govee_h60a6.light import GoveeH60A6Light
+from custom_components.govee_ble_local.const import DOMAIN
+from custom_components.govee_ble_local.coordinator import GoveeBleLocalCoordinator
+from custom_components.govee_ble_local.light import GoveeBleLocalLight
 
 from .const import ADDRESS, TITLE, make_status
 
 H60A6 = govee_profile.load_by_sku("H60A6")
 
-_CREATED_COORDINATORS: list[GoveeH60A6Coordinator] = []
+_CREATED_COORDINATORS: list[GoveeBleLocalCoordinator] = []
 
 
 @pytest.fixture(autouse=True)
@@ -42,13 +42,13 @@ def _make_light(
     client: AsyncMock,
     status,
     profile: DeviceProfile = H60A6,
-) -> GoveeH60A6Light:
+) -> GoveeBleLocalLight:
     """Construct a light entity backed by a coordinator with fixed data."""
-    coordinator = GoveeH60A6Coordinator(hass, client, ADDRESS)
+    coordinator = GoveeBleLocalCoordinator(hass, client, ADDRESS)
     _CREATED_COORDINATORS.append(coordinator)
     coordinator.data = status
     coordinator.last_update_success = True
-    return GoveeH60A6Light(coordinator, client, ADDRESS, TITLE, profile, "SN0001")
+    return GoveeBleLocalLight(coordinator, client, ADDRESS, TITLE, profile, "SN0001")
 
 
 async def test_light_state_via_setup(

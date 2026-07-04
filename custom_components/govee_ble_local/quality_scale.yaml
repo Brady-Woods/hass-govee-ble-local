@@ -1,4 +1,4 @@
-# Home Assistant Integration Quality Scale tracking for govee_h60a6.
+# Home Assistant Integration Quality Scale tracking for govee_ble_local.
 # https://developers.home-assistant.io/docs/core/integration-quality-scale/
 #
 # Note: this is a custom component. The official quality-scale tier is only
@@ -16,7 +16,7 @@ rules:
     status: todo
     comment: >
       Achievable for a custom component: add icon.png/logo.png under
-      custom_integrations/govee_h60a6 in home-assistant/brands (or, on HA
+      custom_integrations/govee_ble_local in home-assistant/brands (or, on HA
       2026.3+, bundle brand icons in the integration). Not yet done - needs
       brand image assets.
   common-modules: done

@@ -1,4 +1,4 @@
-"""Diagnostics support for the Govee H60A6 integration."""
+"""Diagnostics support for the Govee BLE Local integration."""
 from __future__ import annotations
 
 from dataclasses import asdict
@@ -7,7 +7,7 @@ from typing import Any
 from homeassistant.components.diagnostics import async_redact_data
 from homeassistant.core import HomeAssistant
 
-from . import GoveeH60A6ConfigEntry
+from . import GoveeBleLocalConfigEntry
 
 # BLE/Wi-Fi MACs and the serial number identify a specific physical unit, so
 # keep them out of shared diagnostics dumps.
@@ -15,7 +15,7 @@ TO_REDACT = {"address", "ble_mac", "wifi_mac", "serial_number"}
 
 
 async def async_get_config_entry_diagnostics(
-    hass: HomeAssistant, entry: GoveeH60A6ConfigEntry
+    hass: HomeAssistant, entry: GoveeBleLocalConfigEntry
 ) -> dict[str, Any]:
     """Return diagnostics for a config entry."""
     data = entry.runtime_data

@@ -44,7 +44,7 @@ The heavy lifting is in the library; this integration is the glue.
 2. **Resolve the device profile** from `govee_ble_local.profile`: prefer the SKU
    stored on the config entry, else match the advertised local name, else fall
    back to the default SKU. YAML loading runs in the executor.
-3. Create a `GoveeBleClient` (from the library) and a `GoveeH60A6Coordinator`.
+3. Create a `GoveeBleClient` (from the library) and a `GoveeBleLocalCoordinator`.
 4. Stagger the first poll by `crc32(address) % 8` seconds so multiple lights
    don't poll in lockstep and fight over the adapter's connection slots.
 5. `async_config_entry_first_refresh()`, then fetch the serial number once
@@ -72,7 +72,7 @@ current as new advertisements arrive.
 
 ## Entities
 
-### Main light (`light.py` — `GoveeH60A6Light`)
+### Main light (`light.py` — `GoveeBleLocalLight`)
 - **Color modes / temp range** come from the profile capabilities (RGB and/or
   color temp; H60A6 = both, 2700–6500 K).
 - **`is_on`** = any of the fixture's zones on (from polled `zone_*_on`).
@@ -84,7 +84,7 @@ current as new advertisements arrive.
   reliable query.)
 - **Effect list** = the profile's *selectable* scenes (broken ones excluded).
 
-### Zone switches (`switch.py` — `GoveeH60A6ZoneSwitch`)
+### Zone switches (`switch.py` — `GoveeBleLocalZoneSwitch`)
 One per `profile.capabilities.zones`, mapped to a BLE zone index and translation
 key via `const.ZONE_META`. `is_on` reads the corresponding polled zone flag.
 
@@ -149,8 +149,8 @@ const.py          HA-only constants: DOMAIN, POLL_INTERVAL_SECONDS, ZONE_META.
 coordinator.py    DataUpdateCoordinator over the library client.
 diagnostics.py    Config-entry diagnostics (MAC/serial redacted).
 entity.py         Shared base entity: error-wrapping helper, device_info.
-light.py          Main light entity (GoveeH60A6Light).
-switch.py         Per-zone switch entities (GoveeH60A6ZoneSwitch).
+light.py          Main light entity (GoveeBleLocalLight).
+switch.py         Per-zone switch entities (GoveeBleLocalZoneSwitch).
 manifest.json     Manifest: manufacturer-id bluetooth matcher, govee-ble-local
                   requirement, quality_scale.
 strings.json      Config-flow + entity + exception strings (translations/en.json).

@@ -1,6 +1,6 @@
 {
-  "domain": "govee_h60a6",
-  "name": "Govee H60A6 Ceiling Light",
+  "domain": "govee_ble_local",
+  "name": "Govee BLE Local",
   "bluetooth": [
     {
       "manufacturer_id": 34883

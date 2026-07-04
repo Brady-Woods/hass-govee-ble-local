@@ -42,11 +42,11 @@ else
 fi
 
 echo ">> mypy (Home Assistant strict config, see mypy.ini)"
-mypy custom_components/govee_h60a6
+mypy custom_components/govee_ble_local
 
 echo ">> pytest (coverage gate: >= ${COV_MIN}%)"
 pytest tests/ \
-  --cov=custom_components.govee_h60a6 \
+  --cov=custom_components.govee_ble_local \
   --cov-report=term-missing \
   --cov-fail-under="${COV_MIN}"
 
@@ -55,7 +55,7 @@ python - <<'PY'
 import json
 import pathlib
 
-base = pathlib.Path("custom_components/govee_h60a6")
+base = pathlib.Path("custom_components/govee_ble_local")
 manifest = json.loads((base / "manifest.json").read_text())
 required = {"domain", "name", "version", "codeowners", "requirements", "config_flow"}
 missing = required - manifest.keys()

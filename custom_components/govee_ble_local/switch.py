@@ -9,10 +9,10 @@ from homeassistant.components.switch import SwitchEntity
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from . import GoveeH60A6ConfigEntry
+from . import GoveeBleLocalConfigEntry
 from .const import ZONE_META
-from .coordinator import GoveeH60A6Coordinator
-from .entity import GoveeH60A6Entity
+from .coordinator import GoveeBleLocalCoordinator
+from .entity import GoveeBleLocalEntity
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -23,7 +23,7 @@ PARALLEL_UPDATES = 1
 
 async def async_setup_entry(
     hass: HomeAssistant,
-    entry: GoveeH60A6ConfigEntry,
+    entry: GoveeBleLocalConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up one switch per physical zone the profile declares."""
@@ -37,7 +37,7 @@ async def async_setup_entry(
             continue
         zone_index, translation_key = meta
         entities.append(
-            GoveeH60A6ZoneSwitch(
+            GoveeBleLocalZoneSwitch(
                 data.coordinator,
                 data.client,
                 address,
@@ -51,12 +51,12 @@ async def async_setup_entry(
     async_add_entities(entities)
 
 
-class GoveeH60A6ZoneSwitch(GoveeH60A6Entity, SwitchEntity):
+class GoveeBleLocalZoneSwitch(GoveeBleLocalEntity, SwitchEntity):
     """On/off control for a single zone (e.g. upper ring or lower panel)."""
 
     def __init__(
         self,
-        coordinator: GoveeH60A6Coordinator,
+        coordinator: GoveeBleLocalCoordinator,
         client: GoveeBleClient,
         address: str,
         device_name: str,

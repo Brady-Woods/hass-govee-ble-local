@@ -6,7 +6,7 @@ library and its device profiles. Only Home-Assistant-integration-level
 constants remain here.
 """
 
-DOMAIN = "govee_h60a6"
+DOMAIN = "govee_ble_local"
 
 # 60s: with several lights sharing one adapter, each poll opens a BLE
 # connection that briefly locks the device's single slot; a slower cadence

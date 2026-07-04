@@ -48,7 +48,7 @@ transport.
    **Settings → Devices & Services**.
 
 ### Manual
-Copy `custom_components/govee_h60a6/` into your Home Assistant `config/custom_components/`
+Copy `custom_components/govee_ble_local/` into your Home Assistant `config/custom_components/`
 directory and restart.
 
 Requires a working Bluetooth adapter (or an ESPHome Bluetooth proxy) in range
@@ -67,7 +67,7 @@ which models are supported.
 
 ## Documentation
 
-- [Integration guide](custom_components/govee_h60a6/README.md) — architecture, entities, troubleshooting, known issues
+- [Integration guide](custom_components/govee_ble_local/README.md) — architecture, entities, troubleshooting, known issues
 - [Protocol reference](https://github.com/Brady-Woods/govee-ble-local/blob/master/PROTOCOL.md) — the full reverse-engineered BLE protocol (in the `govee-ble-local` library)
 
 ## License

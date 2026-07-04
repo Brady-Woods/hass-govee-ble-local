@@ -19,7 +19,7 @@ from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
 from .const import DOMAIN
 
 
-class GoveeH60A6ConfigFlow(ConfigFlow, domain=DOMAIN):
+class GoveeBleLocalConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Govee BLE lights."""
 
     VERSION = 1

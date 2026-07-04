@@ -14,7 +14,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.govee_h60a6.const import DOMAIN
+from custom_components.govee_ble_local.const import DOMAIN
 
 from .const import ADDRESS, LOCAL_NAME
 
@@ -35,7 +35,7 @@ pytestmark = [
 @pytest.fixture(autouse=True)
 def _mock_setup_entry() -> Generator[None]:
     """Skip real entry setup so creating an entry makes no BLE connection."""
-    with patch("custom_components.govee_h60a6.async_setup_entry", return_value=True):
+    with patch("custom_components.govee_ble_local.async_setup_entry", return_value=True):
         yield
 
 
@@ -114,7 +114,7 @@ async def test_user_flow_creates_entry(hass: HomeAssistant) -> None:
         SimpleNamespace(address="00:00:00:00:00:99", name="GVH9999ZZZZ"),
     ]
     with patch(
-        "custom_components.govee_h60a6.config_flow.async_discovered_service_info",
+        "custom_components.govee_ble_local.config_flow.async_discovered_service_info",
         return_value=infos,
     ):
         result = await hass.config_entries.flow.async_init(
@@ -134,7 +134,7 @@ async def test_user_flow_creates_entry(hass: HomeAssistant) -> None:
 async def test_user_flow_no_devices(hass: HomeAssistant) -> None:
     """The user flow aborts when nothing supported is around."""
     with patch(
-        "custom_components.govee_h60a6.config_flow.async_discovered_service_info",
+        "custom_components.govee_ble_local.config_flow.async_discovered_service_info",
         return_value=[SimpleNamespace(address="00:00:00:00:00:99", name="GVH9999ZZZZ")],
     ):
         result = await hass.config_entries.flow.async_init(
@@ -154,7 +154,7 @@ async def test_reconfigure_success(
     assert result["step_id"] == "reconfigure"
 
     with patch(
-        "custom_components.govee_h60a6.config_flow.async_ble_device_from_address",
+        "custom_components.govee_ble_local.config_flow.async_ble_device_from_address",
         return_value=BLEDevice(address=ADDRESS, name=LOCAL_NAME, details={}),
     ):
         result = await hass.config_entries.flow.async_configure(
@@ -171,7 +171,7 @@ async def test_reconfigure_not_found(
     mock_config_entry.add_to_hass(hass)
     result = await mock_config_entry.start_reconfigure_flow(hass)
     with patch(
-        "custom_components.govee_h60a6.config_flow.async_ble_device_from_address",
+        "custom_components.govee_ble_local.config_flow.async_ble_device_from_address",
         return_value=None,
     ):
         result = await hass.config_entries.flow.async_configure(

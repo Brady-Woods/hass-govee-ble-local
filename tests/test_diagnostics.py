@@ -4,7 +4,7 @@ from __future__ import annotations
 from homeassistant.core import HomeAssistant
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.govee_h60a6.diagnostics import (
+from custom_components.govee_ble_local.diagnostics import (
     async_get_config_entry_diagnostics,
 )
 
