@@ -11,19 +11,29 @@ stable, device-stored value; obtain it from the Govee cloud account
 """
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import voluptuous as vol
-from govee_ble_local import device_class_for_sku, is_supported_sku
+from bleak.exc import BleakError
+from govee_ble_local import (
+    GoveeBleError,
+    create_device,
+    device_class_for_sku,
+    is_supported_sku,
+)
 from govee_ble_local.identify import identify
 from homeassistant.components.bluetooth import (
     BluetoothServiceInfoBleak,
     async_ble_device_from_address,
     async_discovered_service_info,
+    async_last_service_info,
 )
 from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
 
 from .const import CONF_SECRET, DOMAIN
+
+_LOGGER = logging.getLogger(__name__)
 
 
 def _supported_sku(info: BluetoothServiceInfoBleak) -> str | None:
@@ -87,7 +97,7 @@ class GoveeBleLocalConfigFlow(ConfigFlow, domain=DOMAIN):
         """Confirm setup of a Bluetooth-discovered device."""
         assert self._discovery_info is not None and self._sku is not None
         if user_input is not None:
-            return self._finish(
+            return await self._finish(
                 self._discovery_info.address, self._sku, self._discovery_info.name
             )
         self._set_confirm_only()
@@ -104,7 +114,7 @@ class GoveeBleLocalConfigFlow(ConfigFlow, domain=DOMAIN):
             address = user_input["address"]
             await self.async_set_unique_id(address, raise_on_progress=False)
             self._abort_if_unique_id_configured()
-            return self._finish(
+            return await self._finish(
                 address,
                 self._discovered_skus.get(address, ""),
                 self._discovered_devices[address],
@@ -133,43 +143,69 @@ class GoveeBleLocalConfigFlow(ConfigFlow, domain=DOMAIN):
 
     # -- secret -------------------------------------------------------------
 
-    def _finish(self, address: str, sku: str, title: str) -> ConfigFlowResult:
+    async def _finish(self, address: str, sku: str, title: str) -> ConfigFlowResult:
         """Create the entry, or divert to the secret step first if the device
         gates commands behind a secret key."""
         if sku and _requires_secret(sku):
             self._pending = {"address": address, "sku": sku, "title": title}
-            return self.async_show_form(
-                step_id="secret",
-                data_schema=vol.Schema({vol.Optional(CONF_SECRET, default=""): str}),
-                description_placeholders={"name": title},
-            )
+            return await self.async_step_secret()
         return self.async_create_entry(title=title, data={"address": address, "sku": sku})
+
+    async def _read_secret_from_device(self, address: str, sku: str) -> str | None:
+        """Try to read the 8-byte secret straight off the device over BLE
+        (GoveeDevice.read_secret / `aa b1`). Works only while the device is
+        UNBOUND (factory-reset, not paired to the Govee app); a bound device
+        declines. Returns the secret as hex, or None if it couldn't be read."""
+        ble_device = async_ble_device_from_address(self.hass, address, connectable=True)
+        if ble_device is None:
+            return None
+        info = async_last_service_info(self.hass, address, connectable=True)
+        device = create_device(ble_device, sku, info.advertisement if info else None)
+        try:
+            raw = await device.read_secret()
+        except (BleakError, GoveeBleError, TimeoutError) as err:
+            _LOGGER.debug("read_secret for %s failed: %s", address, err)
+            return None
+        finally:
+            await device.stop()
+        return raw.hex() if raw else None
+
+    def _create_secret_entry(self, secret: str | None) -> ConfigFlowResult:
+        assert self._pending is not None
+        data = {"address": self._pending["address"], "sku": self._pending["sku"]}
+        if secret:
+            data[CONF_SECRET] = secret
+        return self.async_create_entry(title=self._pending["title"], data=data)
 
     async def async_step_secret(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Collect the device's 8-byte secret key (hex)."""
+        """Obtain the device's 8-byte secret key.
+
+        On first entry, tries to read it directly from the device
+        (read_secret); if that succeeds (unbound device) the entry is created
+        automatically. Otherwise the user is asked to enter it as hex.
+        """
         assert self._pending is not None
+        errors: dict[str, str] = {}
         if user_input is not None:
             try:
                 secret = _parse_secret(user_input.get(CONF_SECRET, ""))
             except ValueError:
-                return self.async_show_form(
-                    step_id="secret",
-                    data_schema=vol.Schema(
-                        {vol.Optional(CONF_SECRET, default=""): str}
-                    ),
-                    errors={CONF_SECRET: "invalid_secret"},
-                    description_placeholders={"name": self._pending["title"]},
-                )
-            data = {"address": self._pending["address"], "sku": self._pending["sku"]}
-            if secret:
-                data[CONF_SECRET] = secret
-            return self.async_create_entry(title=self._pending["title"], data=data)
+                errors[CONF_SECRET] = "invalid_secret"
+            else:
+                return self._create_secret_entry(secret)
+        else:
+            read = await self._read_secret_from_device(
+                self._pending["address"], self._pending["sku"]
+            )
+            if read is not None:
+                return self._create_secret_entry(read)
 
         return self.async_show_form(
             step_id="secret",
             data_schema=vol.Schema({vol.Optional(CONF_SECRET, default=""): str}),
+            errors=errors or None,
             description_placeholders={"name": self._pending["title"]},
         )
 

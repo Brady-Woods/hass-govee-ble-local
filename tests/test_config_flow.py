@@ -3,20 +3,24 @@ from __future__ import annotations
 
 from collections.abc import Generator
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from bleak.backends.device import BLEDevice
 from bleak.backends.scanner import AdvertisementData
+from bleak.exc import BleakError
 from homeassistant.components.bluetooth import BluetoothServiceInfoBleak
 from homeassistant.config_entries import SOURCE_BLUETOOTH, SOURCE_USER
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from custom_components.govee_ble_local.config_flow import GoveeBleLocalConfigFlow
 from custom_components.govee_ble_local.const import DOMAIN
 
 from .const import ADDRESS, LOCAL_NAME
+
+_CF = "custom_components.govee_ble_local.config_flow"
 
 MANUFACTURER_ID = 34883
 
@@ -85,14 +89,22 @@ async def test_bluetooth_discovery_supported(hass: HomeAssistant) -> None:
 
 
 async def test_bluetooth_discovery_plug_secret_step(hass: HomeAssistant) -> None:
-    """A secret-gated device (H5083 plug) prompts for the secret and stores it."""
-    result = await hass.config_entries.flow.async_init(
-        DOMAIN,
-        context={"source": SOURCE_BLUETOOTH},
-        data=_service_info(name="ihoment_H5083_A2D1"),
-    )
-    assert result["step_id"] == "bluetooth_confirm"
-    result = await hass.config_entries.flow.async_configure(result["flow_id"], user_input={})
+    """A secret-gated device (H5083 plug) prompts for the secret and stores it
+    when it can't be read directly from the device (bound)."""
+    with patch(
+        "custom_components.govee_ble_local.config_flow."
+        "GoveeBleLocalConfigFlow._read_secret_from_device",
+        return_value=None,
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN,
+            context={"source": SOURCE_BLUETOOTH},
+            data=_service_info(name="ihoment_H5083_A2D1"),
+        )
+        assert result["step_id"] == "bluetooth_confirm"
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input={}
+        )
     assert result["type"] is FlowResultType.FORM
     assert result["step_id"] == "secret"
 
@@ -115,17 +127,48 @@ async def test_bluetooth_discovery_plug_secret_step(hass: HomeAssistant) -> None
     }
 
 
+async def test_bluetooth_discovery_plug_secret_auto_read(hass: HomeAssistant) -> None:
+    """When the device is unbound, read_secret() succeeds and the entry is
+    created automatically with no manual secret step."""
+    with patch(
+        "custom_components.govee_ble_local.config_flow."
+        "GoveeBleLocalConfigFlow._read_secret_from_device",
+        return_value="a1b2c3d4e5f60718",
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN,
+            context={"source": SOURCE_BLUETOOTH},
+            data=_service_info(name="ihoment_H5083_A2D1"),
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input={}
+        )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["data"] == {
+        "address": ADDRESS,
+        "sku": "H5083",
+        "secret": "a1b2c3d4e5f60718",
+    }
+
+
 async def test_bluetooth_discovery_plug_blank_secret(hass: HomeAssistant) -> None:
     """A blank secret adds the device without one (settable later)."""
-    result = await hass.config_entries.flow.async_init(
-        DOMAIN,
-        context={"source": SOURCE_BLUETOOTH},
-        data=_service_info(name="ihoment_H5083_A2D1"),
-    )
-    result = await hass.config_entries.flow.async_configure(result["flow_id"], user_input={})
-    result = await hass.config_entries.flow.async_configure(
-        result["flow_id"], user_input={"secret": ""}
-    )
+    with patch(
+        "custom_components.govee_ble_local.config_flow."
+        "GoveeBleLocalConfigFlow._read_secret_from_device",
+        return_value=None,
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN,
+            context={"source": SOURCE_BLUETOOTH},
+            data=_service_info(name="ihoment_H5083_A2D1"),
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input={}
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input={"secret": ""}
+        )
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["data"] == {"address": ADDRESS, "sku": "H5083"}
 
@@ -215,6 +258,47 @@ async def test_reconfigure_success(
         )
     assert result["type"] is FlowResultType.ABORT
     assert result["reason"] == "reconfigure_successful"
+
+
+async def test_read_secret_from_device_success(hass: HomeAssistant) -> None:
+    """_read_secret_from_device returns the hex secret when read_secret works."""
+    flow = GoveeBleLocalConfigFlow()
+    flow.hass = hass
+    device = AsyncMock()
+    device.read_secret.return_value = bytes.fromhex("a1b2c3d4e5f60718")
+    with (
+        patch(f"{_CF}.async_ble_device_from_address",
+              return_value=BLEDevice(address=ADDRESS, name="p", details={})),
+        patch(f"{_CF}.async_last_service_info", return_value=None),
+        patch(f"{_CF}.create_device", return_value=device),
+    ):
+        result = await flow._read_secret_from_device(ADDRESS, "H5083")
+    assert result == "a1b2c3d4e5f60718"
+    device.stop.assert_awaited()
+
+
+async def test_read_secret_from_device_no_ble_device(hass: HomeAssistant) -> None:
+    """No reachable BLE device -> None (falls back to manual entry)."""
+    flow = GoveeBleLocalConfigFlow()
+    flow.hass = hass
+    with patch(f"{_CF}.async_ble_device_from_address", return_value=None):
+        assert await flow._read_secret_from_device(ADDRESS, "H5083") is None
+
+
+async def test_read_secret_from_device_bound_returns_none(hass: HomeAssistant) -> None:
+    """A bound device declines read_secret (returns None / errors) -> None."""
+    flow = GoveeBleLocalConfigFlow()
+    flow.hass = hass
+    device = AsyncMock()
+    device.read_secret.side_effect = BleakError("bound / no response")
+    with (
+        patch(f"{_CF}.async_ble_device_from_address",
+              return_value=BLEDevice(address=ADDRESS, name="p", details={})),
+        patch(f"{_CF}.async_last_service_info", return_value=None),
+        patch(f"{_CF}.create_device", return_value=device),
+    ):
+        assert await flow._read_secret_from_device(ADDRESS, "H5083") is None
+    device.stop.assert_awaited()
 
 
 async def test_reconfigure_plug_updates_secret(hass: HomeAssistant) -> None:

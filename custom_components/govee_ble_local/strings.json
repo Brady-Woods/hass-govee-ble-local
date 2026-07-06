@@ -11,7 +11,7 @@
         }
       },
       "secret": {
-        "description": "{name} requires an 8-byte secret key before it will accept commands. Enter it as 16 hex characters (e.g. a1b2c3d4e5f60718). Leave blank to add the device now and set the key later. The key is a stable, device-specific value you can obtain from the Govee cloud account, a btsnoop capture, or an unbound (factory-reset) device.",
+        "description": "{name} requires an 8-byte secret key before it will accept commands. Home Assistant tried to read it directly from the device but couldn't — this only works while the device is unbound (factory-reset and not paired in the Govee app). Enter it as 16 hex characters (e.g. a1b2c3d4e5f60718), or leave blank to add the device now and set the key later. You can also obtain it from the Govee cloud account or a btsnoop capture.",
         "data": {
           "secret": "Secret key (hex)"
         }
