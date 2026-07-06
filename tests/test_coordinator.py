@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import pytest
 from bleak.exc import BleakError
+from govee_ble_local import GoveeBleConnectionError
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import UpdateFailed
 
@@ -27,12 +28,20 @@ async def test_update_calls_device_update(hass: HomeAssistant) -> None:
     await coordinator.async_shutdown()
 
 
-@pytest.mark.parametrize("exc", [BleakError("boom"), TimeoutError("stalled")])
+@pytest.mark.parametrize(
+    "exc",
+    [
+        BleakError("boom"),
+        GoveeBleConnectionError("no slot"),
+        TimeoutError("stalled"),
+    ],
+)
 async def test_update_errors_become_update_failed(
     hass: HomeAssistant, exc: Exception
 ) -> None:
-    """BleakError and a bare TimeoutError (stalled handshake) both surface as
-    UpdateFailed rather than propagating raw and being logged as an
+    """BleakError, the library's own GoveeBleError (e.g. connection failure —
+    NOT a BleakError subclass), and a bare TimeoutError (stalled handshake) all
+    surface as UpdateFailed rather than propagating raw and being logged as an
     "unexpected error" by HA's coordinator."""
     device = make_device()
     device.update.side_effect = exc

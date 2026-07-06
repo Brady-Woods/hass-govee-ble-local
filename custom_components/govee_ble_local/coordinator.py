@@ -12,7 +12,7 @@ import logging
 from datetime import timedelta
 
 from bleak.exc import BleakError
-from govee_ble_local import DeviceState, GoveeDevice
+from govee_ble_local import DeviceState, GoveeBleError, GoveeDevice
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
@@ -43,10 +43,12 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         # expected/recoverable failure mode for a BLE device, not a bug. HA's
         # DataUpdateCoordinator only treats UpdateFailed as "expected" - other
         # exceptions get logged as a full "Unexpected error" traceback.
-        # TimeoutError is caught alongside it: a stalled handshake response
-        # times out via asyncio.wait_for with a bare TimeoutError, which is not
-        # a BleakError subclass.
+        # The library wraps connect/handshake failures in GoveeBleError
+        # (GoveeBleConnectionError etc.), which is NOT a BleakError subclass, so
+        # it must be caught explicitly or HA logs it as an "unexpected error".
+        # TimeoutError is caught too: a stalled handshake response times out via
+        # asyncio.wait_for with a bare TimeoutError.
         try:
             return await self._device.update()
-        except (BleakError, TimeoutError) as err:
+        except (BleakError, GoveeBleError, TimeoutError) as err:
             raise UpdateFailed(f"Error communicating with device: {err}") from err

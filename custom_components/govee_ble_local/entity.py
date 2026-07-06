@@ -5,6 +5,7 @@ import logging
 from typing import Any, Coroutine
 
 from bleak.exc import BleakError
+from govee_ble_local import GoveeBleError
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.device_registry import CONNECTION_BLUETOOTH, DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -33,13 +34,14 @@ class GoveeBleLocalEntity(CoordinatorEntity[GoveeBleLocalCoordinator]):
         self._model = model
 
     async def _run_client_command(self, coro: Coroutine[Any, Any, Any]) -> Any:
-        """Run a device BLE call, turning a BleakError (or a stalled
-        handshake's bare TimeoutError - not a BleakError subclass) into a clean
-        UI error instead of a raw Python traceback in the service-call toast.
+        """Run a device BLE call, turning a BleakError, the library's own
+        GoveeBleError (connect/handshake/not-supported failures - not BleakError
+        subclasses), or a stalled handshake's bare TimeoutError into a clean UI
+        error instead of a raw Python traceback in the service-call toast.
         """
         try:
             return await coro
-        except (BleakError, TimeoutError) as err:
+        except (BleakError, GoveeBleError, TimeoutError) as err:
             _LOGGER.debug("BLE command to %s failed: %s", self._address, err)
             raise HomeAssistantError(
                 translation_domain=DOMAIN,
