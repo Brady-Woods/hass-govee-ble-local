@@ -69,5 +69,6 @@ class GoveeBleLocalEntity(CoordinatorEntity[GoveeBleLocalCoordinator]):
             manufacturer="Govee",
             model=self._model,
             hw_version=state.hardware_version if state is not None else None,
+            sw_version=state.firmware_version if state is not None else None,
             serial_number=state.serial_number if state is not None else None,
         )

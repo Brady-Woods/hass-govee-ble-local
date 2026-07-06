@@ -96,6 +96,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: GoveeBleLocalConfigEntry
             manufacturer="Govee",
             model=device.model,
             hw_version=device.hardware_version,
+            sw_version=device.firmware_version,
             serial_number=device.serial_number,
         )
 

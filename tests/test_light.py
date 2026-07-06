@@ -92,11 +92,13 @@ def test_device_info_surfaces_wifi_hw_serial(hass: HomeAssistant) -> None:
         DeviceState(
             wifi_mac="11:22:33:44:55:66",
             hardware_version="1.02.30",
+            firmware_version="1.04.03",
             serial_number="SN12345",
         ),
     )
     info: DeviceInfo = light.device_info
     assert info["hw_version"] == "1.02.30"
+    assert info["sw_version"] == "1.04.03"
     assert info["serial_number"] == "SN12345"
     assert (CONNECTION_NETWORK_MAC, "11:22:33:44:55:66") in info["connections"]
 
