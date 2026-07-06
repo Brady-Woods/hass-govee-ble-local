@@ -99,3 +99,43 @@ async def test_backoff_resets_on_success(hass: HomeAssistant) -> None:
     assert result.is_on is True
     assert coordinator.update_interval == BASE
     await coordinator.async_shutdown()
+
+
+async def test_rssi_sampling_survives_missing_bluetooth(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If the bluetooth manager isn't set up, RSSI sampling is skipped and the
+    poll still succeeds (rssi stays None)."""
+
+    def _raise(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("BluetoothManager has not been set")
+
+    monkeypatch.setattr(
+        "custom_components.govee_ble_local.coordinator.bluetooth.async_last_service_info",
+        _raise,
+    )
+    device = make_device()
+    device.update.return_value = DeviceState(optimistic=False)
+    coordinator = GoveeBleLocalCoordinator(hass, device, ADDRESS)
+    await coordinator._async_update_data()
+    assert coordinator.rssi is None
+    await coordinator.async_shutdown()
+
+
+async def test_total_failures_is_cumulative(hass: HomeAssistant) -> None:
+    """total_failures counts every failed poll and does NOT reset on success
+    (unlike the consecutive counter that drives backoff)."""
+    device = make_device()
+    coordinator = GoveeBleLocalCoordinator(hass, device, ADDRESS)
+    assert coordinator.total_failures == 0
+
+    device.update.side_effect = BleakError("boom")
+    for _ in range(3):
+        await _fail(coordinator)
+    assert coordinator.total_failures == 3
+
+    device.update.side_effect = None
+    device.update.return_value = DeviceState(optimistic=False)
+    await coordinator._async_update_data()
+    assert coordinator.total_failures == 3  # unchanged by success
+    await coordinator.async_shutdown()

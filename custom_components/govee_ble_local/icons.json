@@ -7,6 +7,14 @@
       "lower_panel": {
         "default": "mdi:wall-sconce-flat"
       }
+    },
+    "sensor": {
+      "connection_failures": {
+        "default": "mdi:bluetooth-off"
+      },
+      "poll_interval": {
+        "default": "mdi:timer-outline"
+      }
     }
   }
 }

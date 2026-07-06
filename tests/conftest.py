@@ -101,6 +101,7 @@ def mock_bluetooth(ble_device: BLEDevice) -> Generator[SimpleNamespace]:
     service_info.name = LOCAL_NAME
     service_info.manufacturer_data = {34883: bytes([0xEC, 0, 0, 0, 0])}
     service_info.advertisement = MagicMock()
+    service_info.rssi = -60
     with (
         patch(
             "custom_components.govee_ble_local.bluetooth.async_ble_device_from_address",

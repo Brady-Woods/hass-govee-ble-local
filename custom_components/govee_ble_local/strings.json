@@ -58,6 +58,14 @@
       "background_light": {
         "name": "Background light"
       }
+    },
+    "sensor": {
+      "connection_failures": {
+        "name": "Connection failures"
+      },
+      "poll_interval": {
+        "name": "Poll interval"
+      }
     }
   },
   "exceptions": {
