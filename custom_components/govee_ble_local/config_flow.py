@@ -196,6 +196,7 @@ class GoveeBleLocalConfigFlow(ConfigFlow, domain=DOMAIN):
         return self.async_show_menu(
             step_id="secret",
             menu_options=["secret_cloud", "secret_manual"],
+            description_placeholders={"name": self._pending["title"]},
         )
 
     async def async_step_secret_manual(
