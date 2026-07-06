@@ -1,11 +1,10 @@
-"""Light platform for Govee BLE lights (profile-driven)."""
+"""Light platform for Govee BLE lights (capability-driven)."""
 from __future__ import annotations
 
 import logging
 from typing import Any
 
-from govee_ble_local import GoveeBleClient, ZONE_UPPER
-from govee_ble_local.profile import DeviceProfile
+from govee_ble_local import Capability, GoveeDevice
 from homeassistant.components.light import (
     ATTR_BRIGHTNESS,
     ATTR_COLOR_TEMP_KELVIN,
@@ -16,17 +15,15 @@ from homeassistant.components.light import (
     LightEntityFeature,
 )
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import GoveeBleLocalConfigEntry
-from .const import DOMAIN, ZONE_META
 from .coordinator import GoveeBleLocalCoordinator
 from .entity import GoveeBleLocalEntity
 
 _LOGGER = logging.getLogger(__name__)
 
-# All BLE work funnels through the client's single connection/lock; never let
+# All BLE work funnels through the device's single connection/lock; never let
 # HA issue entity commands for this integration concurrently.
 PARALLEL_UPDATES = 1
 
@@ -36,29 +33,23 @@ async def async_setup_entry(
     entry: GoveeBleLocalConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up the main light entity."""
-    data = entry.runtime_data
+    """Set up the main light entity - skipped for a device with no
+    light-relevant capability (e.g. a smart plug; see switch.py)."""
+    device = entry.runtime_data.device
+    caps = device.capabilities
+    if not (caps & {Capability.BRIGHTNESS, Capability.RGB, Capability.COLOR_TEMP}):
+        return
     async_add_entities(
-        [
-            GoveeBleLocalLight(
-                data.coordinator,
-                data.client,
-                entry.data["address"],
-                entry.title,
-                data.profile,
-                data.serial_number,
-            )
-        ]
+        [GoveeBleLocalLight(entry.runtime_data.coordinator, device, entry.data["address"], entry.title)]
     )
 
 
 class GoveeBleLocalLight(GoveeBleLocalEntity, LightEntity):
     """Overall power/brightness/color/scene control for the fixture.
 
-    Capabilities (color modes, temp range, zones, scenes) are taken from the
-    device profile. RGB color and color temperature have no reliable BLE
-    read-back on the short status query used here, so they're tracked
-    optimistically from the last command sent.
+    The v2 library has no reliable BLE state read-back, so all state is tracked
+    optimistically from the last command sent (the same pattern the library
+    itself uses internally).
     """
 
     _attr_name = None
@@ -66,146 +57,95 @@ class GoveeBleLocalLight(GoveeBleLocalEntity, LightEntity):
     def __init__(
         self,
         coordinator: GoveeBleLocalCoordinator,
-        client: GoveeBleClient,
+        device: GoveeDevice,
         address: str,
         device_name: str,
-        profile: DeviceProfile,
-        serial_number: str | None = None,
     ) -> None:
-        super().__init__(coordinator, address, device_name, profile.name, serial_number)
-        self._client = client
-        self._profile = profile
+        super().__init__(coordinator, address, device_name, device.model)
+        self._device = device
         self._attr_unique_id = f"{address}_light"
 
-        cap = profile.capabilities
+        caps = device.capabilities
         modes: set[ColorMode] = set()
-        if cap.rgb:
+        if Capability.RGB in caps:
             modes.add(ColorMode.RGB)
-        if cap.color_temp:
+        if Capability.COLOR_TEMP in caps:
             modes.add(ColorMode.COLOR_TEMP)
         if not modes:
-            modes = {ColorMode.BRIGHTNESS if cap.brightness else ColorMode.ONOFF}
+            modes = {ColorMode.BRIGHTNESS if Capability.BRIGHTNESS in caps else ColorMode.ONOFF}
         self._attr_supported_color_modes = modes
-        if cap.color_temp:
-            self._attr_min_color_temp_kelvin, self._attr_max_color_temp_kelvin = cap.color_temp
-        if cap.scenes:
+
+        if Capability.COLOR_TEMP in caps:
+            self._attr_min_color_temp_kelvin = getattr(device, "min_kelvin", 2700)
+            self._attr_max_color_temp_kelvin = getattr(device, "max_kelvin", 6500)
+        if Capability.SCENES in caps:
             self._attr_supported_features = LightEntityFeature.EFFECT
-            self._attr_effect_list = [s.name for s in profile.selectable_scenes()]
-        self._scene_id_to_name = {s.scene_id: s.name for s in profile.scenes}
+            self._attr_effect_list = device.scene_names
 
-        # BLE zone indices making up this fixture (for whole-light on/off).
-        self._zone_indices = [
-            ZONE_META[z][0] for z in cap.zones if z in ZONE_META
-        ]
+        # Whole-fixture power: use the named zones when present (H60A6), else
+        # the global power command.
+        self._zone_names = [z.name for z in device.zones]
 
-        # Optimistic color state (no BLE read-back on the short query).
+        # Optimistic state (no BLE read-back).
         if ColorMode.COLOR_TEMP in modes:
-            self._optimistic_color_mode = ColorMode.COLOR_TEMP
+            self._attr_color_mode = ColorMode.COLOR_TEMP
         elif ColorMode.RGB in modes:
-            self._optimistic_color_mode = ColorMode.RGB
+            self._attr_color_mode = ColorMode.RGB
         else:
-            self._optimistic_color_mode = next(iter(modes))
-        self._optimistic_rgb_color: tuple[int, int, int] | None = None
-        self._optimistic_color_temp_kelvin: int | None = (
-            4000 if cap.color_temp else None
-        )
-
-    def _zone_is_on(self, zone_index: int) -> bool | None:
-        status = self.coordinator.data
-        return status.zone_upper_on if zone_index == ZONE_UPPER else status.zone_lower_on
-
-    @property
-    def is_on(self) -> bool | None:
-        if self._zone_indices:
-            vals = [self._zone_is_on(z) for z in self._zone_indices]
-            if any(v is None for v in vals):
-                return None
-            return any(vals)
-        status = self.coordinator.data
-        if status.brightness_pct is None:
-            return None
-        return status.brightness_pct > 0
-
-    @property
-    def brightness(self) -> int | None:
-        status = self.coordinator.data
-        if status.brightness_pct is None:
-            return None
-        return round(status.brightness_pct / 100 * 255)
-
-    @property
-    def effect(self) -> str | None:
-        status = self.coordinator.data
-        if status.scene_id is None:
-            return None
-        return self._scene_id_to_name.get(status.scene_id)
-
-    @property
-    def color_mode(self) -> ColorMode:
-        return self._optimistic_color_mode
-
-    @property
-    def rgb_color(self) -> tuple[int, int, int] | None:
-        return self._optimistic_rgb_color
-
-    @property
-    def color_temp_kelvin(self) -> int | None:
-        return self._optimistic_color_temp_kelvin
-
-    async def _activate_scene(self, effect: str) -> None:
-        scene = self._profile.scene_by_name(effect)
-        if scene is None:
-            _LOGGER.warning("Unknown effect requested: %s", effect)
-            return
-        if not scene.working:
-            # Hidden from effect_list, but guard here too in case something
-            # calls light.turn_on with this effect directly.
-            raise HomeAssistantError(
-                translation_domain=DOMAIN,
-                translation_key="scene_broken",
-                translation_placeholders={"effect": effect},
-            )
-        if scene.param:
-            _LOGGER.debug("Activating scene %s via full upload (code %d)", effect, scene.code)
-            await self._run_client_command(self._client.set_scene_full(scene.code, scene.param))
-        else:
-            _LOGGER.debug("Activating scene %s via bare id %s", effect, scene.scene_id)
-            await self._run_client_command(self._client.set_scene(scene.scene_id))
+            self._attr_color_mode = next(iter(modes))
+        self._attr_is_on = None
+        self._attr_brightness = None
+        self._attr_rgb_color = None
+        self._attr_color_temp_kelvin = 4000 if ColorMode.COLOR_TEMP in modes else None
+        self._attr_effect = None
 
     async def async_turn_on(self, **kwargs: Any) -> None:
-        was_off = self.is_on is not True
+        was_off = self._attr_is_on is not True
 
         if ATTR_BRIGHTNESS in kwargs:
             pct = round(kwargs[ATTR_BRIGHTNESS] / 255 * 100)
             _LOGGER.debug("Setting brightness to %d%%", pct)
-            await self._run_client_command(self._client.set_brightness_pct(pct))
+            await self._run_client_command(self._device.set_brightness(pct))
+            self._attr_brightness = kwargs[ATTR_BRIGHTNESS]
 
         if ATTR_RGB_COLOR in kwargs:
-            r, g, b = kwargs[ATTR_RGB_COLOR]
-            _LOGGER.debug("Setting RGB color to (%d, %d, %d)", r, g, b)
-            await self._run_client_command(self._client.set_rgb_color(r, g, b))
-            self._optimistic_color_mode = ColorMode.RGB
-            self._optimistic_rgb_color = (r, g, b)
+            rgb = kwargs[ATTR_RGB_COLOR]
+            _LOGGER.debug("Setting RGB color to %s", rgb)
+            await self._run_client_command(self._device.set_rgb(rgb))
+            self._attr_color_mode = ColorMode.RGB
+            self._attr_rgb_color = rgb
+            self._attr_effect = None
 
         if ATTR_COLOR_TEMP_KELVIN in kwargs:
             kelvin = kwargs[ATTR_COLOR_TEMP_KELVIN]
             _LOGGER.debug("Setting color temperature to %dK", kelvin)
-            await self._run_client_command(self._client.set_color_temp_kelvin(kelvin))
-            self._optimistic_color_mode = ColorMode.COLOR_TEMP
-            self._optimistic_color_temp_kelvin = kelvin
+            await self._run_client_command(self._device.set_color_temp(kelvin))
+            self._attr_color_mode = ColorMode.COLOR_TEMP
+            self._attr_color_temp_kelvin = kelvin
+            self._attr_effect = None
 
         if ATTR_EFFECT in kwargs:
-            await self._activate_scene(kwargs[ATTR_EFFECT])
+            effect = kwargs[ATTR_EFFECT]
+            _LOGGER.debug("Activating scene %s", effect)
+            await self._run_client_command(self._device.set_scene_by_name(effect))
+            self._attr_effect = effect
 
-        # Only touch zone power when turning the fixture on from off, so a
-        # brightness/effect-only call while already on doesn't re-toggle zones.
-        if was_off and self._zone_indices:
-            for zone in self._zone_indices:
-                await self._run_client_command(self._client.set_zone(zone, True))
-
-        await self.coordinator.async_request_refresh()
+        # Only touch power when turning the fixture on from off, so a
+        # brightness/effect-only call while already on doesn't re-toggle.
+        if was_off:
+            if self._zone_names:
+                for name in self._zone_names:
+                    await self._run_client_command(self._device.set_zone_power(name, True))
+            else:
+                await self._run_client_command(self._device.set_power(True))
+        self._attr_is_on = True
+        self.async_write_ha_state()
 
     async def async_turn_off(self, **kwargs: Any) -> None:
-        for zone in self._zone_indices:
-            await self._run_client_command(self._client.set_zone(zone, False))
-        await self.coordinator.async_request_refresh()
+        if self._zone_names:
+            for name in self._zone_names:
+                await self._run_client_command(self._device.set_zone_power(name, False))
+        else:
+            await self._run_client_command(self._device.set_power(False))
+        self._attr_is_on = False
+        self.async_write_ha_state()

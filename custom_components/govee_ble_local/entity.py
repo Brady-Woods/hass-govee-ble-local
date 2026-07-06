@@ -6,11 +6,7 @@ from typing import Any, Coroutine
 
 from bleak.exc import BleakError
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers.device_registry import (
-    CONNECTION_BLUETOOTH,
-    CONNECTION_NETWORK_MAC,
-    DeviceInfo,
-)
+from homeassistant.helpers.device_registry import CONNECTION_BLUETOOTH, DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
@@ -20,7 +16,7 @@ _LOGGER = logging.getLogger(__name__)
 
 
 class GoveeBleLocalEntity(CoordinatorEntity[GoveeBleLocalCoordinator]):
-    """Base entity providing shared device info built from polled status."""
+    """Base entity providing shared device info + BLE-error handling."""
 
     _attr_has_entity_name = True
 
@@ -30,24 +26,20 @@ class GoveeBleLocalEntity(CoordinatorEntity[GoveeBleLocalCoordinator]):
         address: str,
         device_name: str,
         model: str,
-        serial_number: str | None = None,
     ) -> None:
         super().__init__(coordinator)
         self._address = address
         self._device_name = device_name
         self._model = model
-        self._serial_number = serial_number
 
     async def _run_client_command(self, coro: Coroutine[Any, Any, Any]) -> Any:
-        """Run a client BLE call, turning a BleakError into a clean UI error.
-
-        Without this, a connection failure would surface to the user as a
-        raw Python traceback in the service-call error toast instead of a
-        readable message.
+        """Run a device BLE call, turning a BleakError (or a stalled
+        handshake's bare TimeoutError - not a BleakError subclass) into a clean
+        UI error instead of a raw Python traceback in the service-call toast.
         """
         try:
             return await coro
-        except BleakError as err:
+        except (BleakError, TimeoutError) as err:
             _LOGGER.debug("BLE command to %s failed: %s", self._address, err)
             raise HomeAssistantError(
                 translation_domain=DOMAIN,
@@ -60,17 +52,10 @@ class GoveeBleLocalEntity(CoordinatorEntity[GoveeBleLocalCoordinator]):
 
     @property
     def device_info(self) -> DeviceInfo:
-        status = self.coordinator.data
-        connections = {(CONNECTION_BLUETOOTH, self._address)}
-        if status and status.wifi_mac:
-            connections.add((CONNECTION_NETWORK_MAC, status.wifi_mac))
-
         return DeviceInfo(
             identifiers={(DOMAIN, self._address)},
-            connections=connections,
+            connections={(CONNECTION_BLUETOOTH, self._address)},
             name=self._device_name,
             manufacturer="Govee",
             model=self._model,
-            hw_version=status.hardware_version if status else None,
-            serial_number=self._serial_number,
         )

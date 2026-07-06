@@ -25,6 +25,9 @@ the device over BLE to unlock the full feature set locally.
 | Model | Status |
 | --- | --- |
 | **H60A6** (Govee Ceiling Light Pro) | ✅ Supported — power, brightness, RGB, color temperature, scenes, and independent upper-ring / lower-panel zones |
+| **H61A8** (LED rope/strip) | ✅ Supported — power, brightness, RGB, 20 individually-addressable segments (with real per-segment read-back), scenes |
+| **H6006**, **H6052**, **H6008** (RGBWW bulbs) | ✅ Supported — power, brightness, RGB, color temperature, scenes (no live status read-back on these; RGB/color-temp/scene state is tracked optimistically from the last command sent) |
+| **H5083** (smart plug) | ✅ Supported — on/off only, exposed as a switch rather than a light |
 
 The goal is to grow this list. The BLE protocol logic lives in a standalone,
 device-agnostic library (see **Architecture**), so adding a model is mostly a

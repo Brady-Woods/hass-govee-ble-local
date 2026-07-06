@@ -14,14 +14,13 @@ REDACTED = "**REDACTED**"
 async def test_diagnostics_redacts_identifiers(
     hass: HomeAssistant, setup_integration: MockConfigEntry
 ) -> None:
-    """Diagnostics expose profile/status but redact identifying fields."""
+    """Diagnostics expose device capabilities but redact identifying fields."""
     diagnostics = await async_get_config_entry_diagnostics(hass, setup_integration)
 
     assert diagnostics["entry"]["data"]["address"] == REDACTED
-    assert diagnostics["serial_number"] == REDACTED
-    assert diagnostics["status"]["wifi_mac"] == REDACTED
 
-    assert diagnostics["profile"]["sku"] == "H60A6"
-    assert diagnostics["profile"]["capabilities"]["rgb"] is True
+    assert diagnostics["device"]["sku"] == "H60A6"
+    assert diagnostics["device"]["model"] == "H60A6"
+    assert "rgb" in diagnostics["device"]["capabilities"]
+    assert diagnostics["device"]["zones"] == ["main", "background"]
     assert diagnostics["coordinator"]["last_update_success"] is True
-    assert diagnostics["status"]["brightness_pct"] == 40

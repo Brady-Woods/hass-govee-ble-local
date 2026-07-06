@@ -1,9 +1,8 @@
 """Constants for the Govee BLE Local integration.
 
-Protocol constants (UUIDs, PSK, opcodes), the scene catalog, per-model
-capabilities, and the broken-scene flags now live in the ``govee_ble_local``
-library and its device profiles. Only Home-Assistant-integration-level
-constants remain here.
+Protocol constants, the scene catalog, per-model capabilities, encryption and
+segment/zone layout all live in the ``govee_ble_local`` library and its device
+classes now. Only Home-Assistant-integration-level constants remain here.
 """
 
 DOMAIN = "govee_ble_local"
@@ -13,11 +12,10 @@ DOMAIN = "govee_ble_local"
 # reduces contention. These are near-static ceiling lights, so 60s is plenty.
 POLL_INTERVAL_SECONDS = 60
 
-# Maps a profile zone name to its (BLE zone index, entity translation key).
-# Indices match govee_ble_local.const (ZONE_LOWER=0, ZONE_UPPER=1); kept as
-# literals so this module stays import-light (the config-flow tests load it
-# without the library installed).
-ZONE_META: dict[str, tuple[int, str]] = {
-    "upper": (1, "upper_ring"),
-    "lower": (0, "lower_panel"),
+# Maps a library zone name (GoveeDevice.zones[i].name) to an entity
+# translation key. The v2 library names H60A6's zones "main" (upper ring) and
+# "background" (lower panel); unknown zone names fall back to their raw name.
+ZONE_TRANSLATION_KEYS: dict[str, str] = {
+    "main": "upper_ring",
+    "background": "lower_panel",
 }

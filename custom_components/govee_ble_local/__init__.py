@@ -6,9 +6,8 @@ import logging
 import zlib
 from dataclasses import dataclass
 
-from bleak.exc import BleakError
-from govee_ble_local import GoveeBleClient, profile as govee_profile
-from govee_ble_local.profile import DeviceProfile
+from govee_ble_local import Capability, GoveeBleNotSupported, GoveeDevice, create_device
+from govee_ble_local.identify import identify
 from homeassistant.components import bluetooth
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
@@ -21,111 +20,80 @@ from .coordinator import GoveeBleLocalCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 PLATFORMS: list[Platform] = [Platform.LIGHT, Platform.SWITCH]
-# Fallback profile when the advertised name isn't available to match on. This
-# integration is currently H60A6-scoped by its bluetooth manifest matcher.
-DEFAULT_SKU = "H60A6"
 
 
 @dataclass
 class GoveeBleLocalRuntimeData:
     """Runtime objects shared between the platforms for one config entry."""
 
-    client: GoveeBleClient
+    device: GoveeDevice
     coordinator: GoveeBleLocalCoordinator
-    profile: DeviceProfile
-    serial_number: str | None
 
 
 type GoveeBleLocalConfigEntry = ConfigEntry[GoveeBleLocalRuntimeData]
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: GoveeBleLocalConfigEntry) -> bool:
-    """Set up a Govee BLE light from a config entry."""
+    """Set up a Govee BLE device from a config entry."""
     address: str = entry.data["address"]
     ble_device = bluetooth.async_ble_device_from_address(hass, address, connectable=True)
     if ble_device is None:
-        raise ConfigEntryNotReady(f"Could not find Govee light with address {address}")
+        raise ConfigEntryNotReady(f"Could not find Govee device with address {address}")
 
-    # Resolve the device profile (capabilities + scene catalog). Prefer the SKU
-    # stored at config time, then fall back to matching the advertised name,
-    # then to the default SKU. Loading YAML is blocking, so use the executor.
+    # The raw advertisement drives the library's encryption decision (the app's
+    # `encrypt` flag), so pass it through when we have it.
+    service_info = bluetooth.async_last_service_info(hass, address, connectable=True)
+    advertisement = service_info.advertisement if service_info else None
+
+    # SKU: prefer the value stored at config time; otherwise identify it from
+    # the current advertisement.
     sku = entry.data.get("sku")
-    profile = None
-    if sku:
-        profile = await hass.async_add_executor_job(govee_profile.load_by_sku, sku)
-    if profile is None:
-        profile = await hass.async_add_executor_job(
-            govee_profile.match_local_name, ble_device.name
-        )
-    if profile is None:
-        profile = await hass.async_add_executor_job(govee_profile.load_by_sku, DEFAULT_SKU)
-    if profile is None:
-        raise ConfigEntryNotReady(
-            f"No device profile for {ble_device.name!r} (address {address})"
-        )
-    _LOGGER.debug("Using profile %s (%d scenes) for %s", profile.sku, len(profile.scenes), address)
+    if not sku and service_info is not None:
+        adv = identify(service_info.name, service_info.manufacturer_data)
+        sku = adv.sku if adv is not None else None
+    if not sku:
+        raise ConfigEntryNotReady(f"Could not determine SKU for {address}")
 
-    client = GoveeBleClient(ble_device)
-    coordinator = GoveeBleLocalCoordinator(hass, client, address)
+    try:
+        device = create_device(ble_device, sku, advertisement)
+    except GoveeBleNotSupported as err:
+        raise ConfigEntryNotReady(str(err)) from err
 
-    # Stagger multiple lights' poll schedules so they don't stay in lockstep
+    # Warm the (blocking) scene-catalog read off the event loop so the light
+    # platform's effect_list access doesn't do file IO in the loop.
+    if Capability.SCENES in device.capabilities:
+        await hass.async_add_executor_job(lambda: device.scene_names)
+
+    coordinator = GoveeBleLocalCoordinator(hass, device, address)
+
+    # Stagger multiple devices' poll schedules so they don't stay in lockstep
     # and repeatedly fight over the adapter's limited BLE connection slots.
     stagger = zlib.crc32(address.encode()) % 8
     _LOGGER.debug("Waiting %ds stagger before first poll of %s", stagger, address)
     await asyncio.sleep(stagger)
 
-    _LOGGER.debug("Fetching initial status for %s", address)
+    _LOGGER.debug("Establishing initial connection for %s", address)
     await coordinator.async_config_entry_first_refresh()
-
-    # Serial number is static (queried once, not part of the regular poll
-    # cycle). A "nice to have," not essential - a failure here is logged and
-    # setup continues rather than blocking on it.
-    try:
-        serial_number = await client.get_serial_number()
-    except BleakError as err:
-        _LOGGER.debug("Could not fetch serial number for %s: %s", address, err)
-        serial_number = None
-    if serial_number:
-        _LOGGER.debug("Serial number for %s: %s", address, serial_number)
 
     @callback
     def _sync_device_registry() -> None:
-        # device_info on entities is only applied once, at initial entity
-        # registration. Re-syncing on every successful poll lets a bad value
-        # from one flaky update get corrected on the next good one - but
-        # async_get_or_create()'s `connections` only ADDS (merge), never
-        # removes, so a bad connection written once stuck around forever.
-        # async_update_device's `new_connections` does a full replace instead.
-        # coordinator.data is guaranteed populated here: async_config_entry_
-        # first_refresh() above raises ConfigEntryNotReady on failure, so this
-        # callback is only ever registered/invoked after a successful poll.
-        status = coordinator.data
-        connections = {(dr.CONNECTION_BLUETOOTH, address)}
-        if status.wifi_mac:
-            connections.add((dr.CONNECTION_NETWORK_MAC, status.wifi_mac))
-
         registry = dr.async_get(hass)
-        device_entry = registry.async_get_or_create(
+        registry.async_get_or_create(
             config_entry_id=entry.entry_id,
             identifiers={(DOMAIN, address)},
-            connections=connections,
+            connections={(dr.CONNECTION_BLUETOOTH, address)},
             manufacturer="Govee",
-            model=profile.name,
-            hw_version=status.hardware_version,
-            serial_number=serial_number,
+            model=device.model,
         )
-        if device_entry.connections != connections:
-            registry.async_update_device(device_entry.id, new_connections=connections)
 
     _sync_device_registry()
-    entry.async_on_unload(coordinator.async_add_listener(_sync_device_registry))
 
     @callback
     def _async_update_ble(
         service_info: bluetooth.BluetoothServiceInfoBleak,
         change: bluetooth.BluetoothChange,
     ) -> None:
-        client.update_ble_device(service_info.device)
+        device.update_ble_device(service_info.device, service_info.advertisement)
 
     entry.async_on_unload(
         bluetooth.async_register_callback(
@@ -136,18 +104,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: GoveeBleLocalConfigEntry
         )
     )
 
-    entry.runtime_data = GoveeBleLocalRuntimeData(
-        client=client,
-        coordinator=coordinator,
-        profile=profile,
-        serial_number=serial_number,
-    )
+    entry.runtime_data = GoveeBleLocalRuntimeData(device=device, coordinator=coordinator)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: GoveeBleLocalConfigEntry) -> bool:
-    """Unload a config entry, disconnecting the BLE client."""
+    """Unload a config entry, disconnecting the BLE device."""
     _LOGGER.debug("Unloading entry for %s", entry.data["address"])
-    await entry.runtime_data.client.disconnect()
+    await entry.runtime_data.device.stop()
     return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)

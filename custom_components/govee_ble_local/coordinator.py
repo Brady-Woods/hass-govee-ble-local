@@ -1,11 +1,18 @@
-"""Polling coordinator for a Govee BLE light, shared by all entities."""
+"""Connection coordinator for a Govee BLE device, shared by all entities.
+
+The v2 library has no aggregate status read-back: ``GoveeDevice.update()``
+ensures the connection is alive and returns the device's best-known
+(optimistic) :class:`DeviceState`. This coordinator therefore exists mainly for
+connection management + availability tracking on a slow cadence; entities track
+their own optimistic state from the commands they issue.
+"""
 from __future__ import annotations
 
 import logging
 from datetime import timedelta
 
 from bleak.exc import BleakError
-from govee_ble_local import GoveeBleClient, GoveeBleStatus
+from govee_ble_local import DeviceState, GoveeDevice
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
@@ -14,25 +21,32 @@ from .const import DOMAIN, POLL_INTERVAL_SECONDS
 _LOGGER = logging.getLogger(__name__)
 
 
-class GoveeBleLocalCoordinator(DataUpdateCoordinator[GoveeBleStatus]):
-    """Periodically polls the light over BLE so HA stays in sync with app changes."""
+class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
+    """Keeps the BLE connection warm and tracks availability."""
 
-    def __init__(self, hass: HomeAssistant, client: GoveeBleClient, address: str) -> None:
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        device: GoveeDevice,
+        address: str,
+    ) -> None:
         super().__init__(
             hass,
             _LOGGER,
             name=f"{DOMAIN}_{address}",
             update_interval=timedelta(seconds=POLL_INTERVAL_SECONDS),
         )
-        self._client = client
+        self._device = device
 
-    async def _async_update_data(self) -> GoveeBleStatus:
+    async def _async_update_data(self) -> DeviceState:
         # BleakError (connection drops, no response, out-of-slots, etc.) is an
         # expected/recoverable failure mode for a BLE device, not a bug. HA's
-        # DataUpdateCoordinator only treats UpdateFailed as "expected" -
-        # anything else gets logged as a full traceback under "Unexpected
-        # error", which is exactly the noisy failure mode we want to avoid.
+        # DataUpdateCoordinator only treats UpdateFailed as "expected" - other
+        # exceptions get logged as a full "Unexpected error" traceback.
+        # TimeoutError is caught alongside it: a stalled handshake response
+        # times out via asyncio.wait_for with a bare TimeoutError, which is not
+        # a BleakError subclass.
         try:
-            return await self._client.get_status()
-        except BleakError as err:
+            return await self._device.update()
+        except (BleakError, TimeoutError) as err:
             raise UpdateFailed(f"Error communicating with device: {err}") from err

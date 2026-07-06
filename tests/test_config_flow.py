@@ -109,9 +109,10 @@ async def test_bluetooth_discovery_already_configured(
 
 async def test_user_flow_creates_entry(hass: HomeAssistant) -> None:
     """The user flow lists supported discovered devices and creates an entry."""
+    mfg = {MANUFACTURER_ID: b"\x01"}
     infos = [
-        SimpleNamespace(address=ADDRESS, name=LOCAL_NAME),
-        SimpleNamespace(address="00:00:00:00:00:99", name="GVH9999ZZZZ"),
+        SimpleNamespace(address=ADDRESS, name=LOCAL_NAME, manufacturer_data=mfg),
+        SimpleNamespace(address="00:00:00:00:00:99", name="GVH9999ZZZZ", manufacturer_data=mfg),
     ]
     with patch(
         "custom_components.govee_ble_local.config_flow.async_discovered_service_info",
@@ -135,7 +136,13 @@ async def test_user_flow_no_devices(hass: HomeAssistant) -> None:
     """The user flow aborts when nothing supported is around."""
     with patch(
         "custom_components.govee_ble_local.config_flow.async_discovered_service_info",
-        return_value=[SimpleNamespace(address="00:00:00:00:00:99", name="GVH9999ZZZZ")],
+        return_value=[
+            SimpleNamespace(
+                address="00:00:00:00:00:99",
+                name="GVH9999ZZZZ",
+                manufacturer_data={MANUFACTURER_ID: b"\x01"},
+            )
+        ],
     ):
         result = await hass.config_entries.flow.async_init(
             DOMAIN, context={"source": SOURCE_USER}

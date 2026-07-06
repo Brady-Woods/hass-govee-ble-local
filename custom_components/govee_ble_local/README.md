@@ -1,15 +1,17 @@
 # Govee BLE Local — Home Assistant integration
 
-A native Home Assistant custom component that controls Govee ceiling lights
-directly over Bluetooth LE — no cloud, no MQTT bridge, no hub. It is a **thin
-Home Assistant adapter** over the standalone
+A native Home Assistant custom component that controls Govee lights and
+plugs directly over Bluetooth LE — no cloud, no MQTT bridge, no hub. It is a
+**thin Home Assistant adapter** over the standalone
 [`govee-ble-local`](https://github.com/Brady-Woods/govee-ble-local) library,
 which implements the (reverse-engineered) BLE protocol and holds the per-model
 device profiles.
 
-Exposes the fixture as a `light` entity (power, brightness, RGB, color
-temperature, scenes/effects) plus one `switch` per physical zone (for the
-H60A6: an upper ring and a lower panel).
+Exposes each device as either a `light` entity (power, brightness, RGB, color
+temperature, scenes/effects) plus one `switch` per physical zone (H60A6: an
+upper ring and a lower panel) - or, for a profile with no light-relevant
+capability at all (H5083, a smart plug), a single whole-device `switch`
+instead.
 
 > The full BLE protocol reference now lives in the library:
 > [`govee-ble-local/PROTOCOL.md`](https://github.com/Brady-Woods/govee-ble-local/blob/master/PROTOCOL.md).
@@ -21,18 +23,30 @@ H60A6: an upper ring and a lower panel).
 Discovery matches **any Govee device by Bluetooth manufacturer ID (`0x8843`)**;
 the library's **device-profile system** then decides which models are actually
 supported. Unsupported models abort the config flow with "not supported yet".
-Currently the **H60A6** (Govee Ceiling Light Pro) ships a profile.
+Six models currently ship a profile: **H60A6** (ceiling light, zones),
+**H61A8** (LED rope/strip, 20 segments with real read-back), **H6006**/
+**H6052**/**H6008** (RGBWW bulbs), and **H5083** (smart plug, on/off only).
+Not every device has a working live status read-back - see each SKU's
+`NOTES.md` in the library for what's confirmed; where it's missing, RGB/
+color-temp/scene state is tracked optimistically from the last command sent
+rather than polled.
 
 Entities created per device are driven by the profile's capabilities:
 
 | Entity | Type | Notes |
 | --- | --- | --- |
-| Main light | `light` | on/off, brightness, RGB, color temp, scenes/effects |
+| Main light | `light` | on/off, brightness, RGB, color temp, scenes/effects - skipped entirely for a profile with none of these |
 | Zone switches | `switch` × *n* | one per `capabilities.zones` (H60A6: "Upper ring", "Lower panel") |
+| Whole-device power switch | `switch` | only for a profile with no light capability *and* no zones (H5083) - on/off is otherwise handled by the light entity or zone switches above |
 
-Per-segment control exists in the library but is **not** exposed as HA entities
-(the fuller status query needed to read segment state back is too drop-prone
-under real adapter contention — see the library's PROTOCOL.md §5.3.2).
+Per-segment control exists in the library but is **not** exposed as its own
+set of HA entities (individual per-segment set commands aren't wired to
+entities on any device) - though H61A8's confirmed, real per-segment status
+read-back (`get_segment_status()`) does feed the main light entity's on/off
+and brightness state, since H61A8 has no other working status mechanism. On
+H60A6, the fuller status query needed for the same per-segment data is too
+drop-prone under real adapter contention to build on for the whole light
+entity's core on/off state - see the library's PROTOCOL.md §5.3.2.
 
 ## Architecture / execution flow
 

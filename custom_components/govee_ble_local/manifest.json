@@ -13,6 +13,6 @@
   "iot_class": "local_polling",
   "loggers": ["bleak", "bleak_retry_connector", "govee_ble_local"],
   "quality_scale": "platinum",
-  "requirements": ["govee-ble-local @ git+https://github.com/Brady-Woods/govee-ble-local"],
-  "version": "0.9.1"
+  "requirements": ["govee-ble-local @ git+https://github.com/Brady-Woods/govee-ble-local@v2-rewrite"],
+  "version": "0.11.0"
 }

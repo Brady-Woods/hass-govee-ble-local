@@ -9,8 +9,8 @@ from homeassistant.core import HomeAssistant
 
 from . import GoveeBleLocalConfigEntry
 
-# BLE/Wi-Fi MACs and the serial number identify a specific physical unit, so
-# keep them out of shared diagnostics dumps.
+# The BLE address identifies a specific physical unit, so keep it out of shared
+# diagnostics dumps.
 TO_REDACT = {"address", "ble_mac", "wifi_mac", "serial_number"}
 
 
@@ -20,9 +20,9 @@ async def async_get_config_entry_diagnostics(
     """Return diagnostics for a config entry."""
     data = entry.runtime_data
     coordinator = data.coordinator
-    status = coordinator.data
+    device = data.device
+    state = coordinator.data
 
-    profile = data.profile
     return async_redact_data(
         {
             "entry": {
@@ -33,20 +33,16 @@ async def async_get_config_entry_diagnostics(
                 "last_update_success": coordinator.last_update_success,
                 "update_interval": str(coordinator.update_interval),
             },
-            "profile": {
-                "sku": profile.sku,
-                "capabilities": {
-                    "brightness": profile.capabilities.brightness,
-                    "rgb": profile.capabilities.rgb,
-                    "color_temp": profile.capabilities.color_temp,
-                    "zones": list(profile.capabilities.zones),
-                    "segments": profile.capabilities.segments,
-                    "scenes": profile.capabilities.scenes,
-                },
-                "scene_count": len(profile.scenes),
+            "device": {
+                "sku": device.sku,
+                "model": device.model,
+                "capabilities": sorted(c.value for c in device.capabilities),
+                "zones": [z.name for z in device.zones],
+                "scene_count": len(device.scene_names)
+                if hasattr(device, "scene_names")
+                else 0,
             },
-            "serial_number": data.serial_number,
-            "status": asdict(status) if status is not None else None,
+            "state": asdict(state) if state is not None else None,
         },
         TO_REDACT,
     )
