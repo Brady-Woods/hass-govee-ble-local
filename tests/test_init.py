@@ -109,6 +109,26 @@ async def test_ble_advertisement_updates_device(
     )
 
 
+async def test_setup_removes_legacy_zone_entities(
+    hass: HomeAssistant, setup_integration: MockConfigEntry
+) -> None:
+    """Orphaned old integer-indexed zone switches are removed on setup."""
+    registry = er.async_get(hass)
+    # Simulate a pre-v0.11 orphaned zone switch.
+    registry.async_get_or_create(
+        "switch", DOMAIN, f"{ADDRESS}_zone_1",
+        config_entry=setup_integration, suggested_object_id="legacy_ring",
+    )
+    assert registry.async_get_entity_id("switch", DOMAIN, f"{ADDRESS}_zone_1") is not None
+
+    await hass.config_entries.async_reload(setup_integration.entry_id)
+    await hass.async_block_till_done()
+
+    assert registry.async_get_entity_id("switch", DOMAIN, f"{ADDRESS}_zone_1") is None
+    # current, name-keyed switches still present
+    assert registry.async_get_entity_id("switch", DOMAIN, f"{ADDRESS}_zone_main") is not None
+
+
 async def test_setup_passes_secret_to_library(
     hass: HomeAssistant, mock_bluetooth: SimpleNamespace
 ) -> None:

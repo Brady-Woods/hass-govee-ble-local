@@ -14,6 +14,7 @@ from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
 
 from .const import CONF_SECRET, DOMAIN
 from .coordinator import GoveeBleLocalCoordinator
@@ -69,6 +70,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: GoveeBleLocalConfigEntry
     if Capability.SCENES in device.capabilities:
         await hass.async_add_executor_job(lambda: device.scene_names)
 
+    _remove_legacy_zone_entities(hass, address)
+
     coordinator = GoveeBleLocalCoordinator(hass, device, address)
 
     # Stagger multiple devices' poll schedules so they don't stay in lockstep
@@ -112,6 +115,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: GoveeBleLocalConfigEntry
     entry.runtime_data = GoveeBleLocalRuntimeData(device=device, coordinator=coordinator)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
+
+
+@callback
+def _remove_legacy_zone_entities(hass: HomeAssistant, address: str) -> None:
+    """Remove orphaned zone-switch entities from before v0.11.
+
+    Zone switches used to be keyed by integer index ({address}_zone_0 /
+    _zone_1); they are now keyed by zone name (_zone_main / _zone_background).
+    The scheme change left the old entities behind as duplicate "unavailable"
+    switches. Drop them so only the current, correctly-named switches remain."""
+    registry = er.async_get(hass)
+    for legacy_index in ("0", "1"):
+        entity_id = registry.async_get_entity_id(
+            "switch", DOMAIN, f"{address}_zone_{legacy_index}"
+        )
+        if entity_id is not None:
+            _LOGGER.debug("Removing legacy zone entity %s", entity_id)
+            registry.async_remove(entity_id)
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: GoveeBleLocalConfigEntry) -> bool:
