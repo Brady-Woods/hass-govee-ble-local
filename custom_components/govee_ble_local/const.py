@@ -33,4 +33,6 @@ MAX_POLL_INTERVAL_SECONDS = 1800
 ZONE_TRANSLATION_KEYS: dict[str, str] = {
     "main": "main_light",
     "background": "background_light",
+    "left": "left_bar",
+    "right": "right_bar",
 }

@@ -57,6 +57,12 @@
       },
       "background_light": {
         "name": "Background light"
+      },
+      "left_bar": {
+        "name": "Left bar"
+      },
+      "right_bar": {
+        "name": "Right bar"
       }
     },
     "sensor": {

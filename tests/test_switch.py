@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock
 
-from govee_ble_local import Capability
+from govee_ble_local import Capability, Zone
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 from pytest_homeassistant_custom_component.common import MockConfigEntry
@@ -68,6 +68,26 @@ async def test_zoned_device_gets_no_power_switch(hass: HomeAssistant) -> None:
     await async_setup_entry(hass, entry, added.extend)
     assert all(isinstance(e, GoveeBleLocalZoneSwitch) for e in added)
     assert not any(isinstance(e, GoveeBleLocalPowerSwitch) for e in added)
+    await entry.runtime_data.coordinator.async_shutdown()
+
+
+async def test_h6047_left_right_bar_switches(hass: HomeAssistant) -> None:
+    """The H6047 (left/right bar zones) gets one switch per bar, named via the
+    left_bar/right_bar translation keys."""
+    device = make_device(
+        zones=(
+            Zone("left", power_index=0, segments=tuple(range(0, 5))),
+            Zone("right", power_index=1, segments=tuple(range(5, 10))),
+        ),
+        sku="H6047",
+    )
+    entry = _entry_with(hass, device)
+    added: list[GoveeBleLocalZoneSwitch] = []
+    await async_setup_entry(hass, entry, added.extend)
+
+    assert all(isinstance(e, GoveeBleLocalZoneSwitch) for e in added)
+    assert {e.unique_id for e in added} == {f"{ADDRESS}_zone_left", f"{ADDRESS}_zone_right"}
+    assert {e.translation_key for e in added} == {"left_bar", "right_bar"}
     await entry.runtime_data.coordinator.async_shutdown()
 
 

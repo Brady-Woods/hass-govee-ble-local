@@ -6,6 +6,12 @@
       },
       "lower_panel": {
         "default": "mdi:wall-sconce-flat"
+      },
+      "left_bar": {
+        "default": "mdi:wall-sconce-flat-variant"
+      },
+      "right_bar": {
+        "default": "mdi:wall-sconce-flat-variant"
       }
     },
     "sensor": {
