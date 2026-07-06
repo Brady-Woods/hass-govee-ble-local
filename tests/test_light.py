@@ -123,7 +123,11 @@ async def test_light_turn_on_effect(hass: HomeAssistant) -> None:
     light = _make_light(hass, device)
     await light.async_turn_on(**{ATTR_EFFECT: "Aurora"})
     device.set_scene_by_name.assert_awaited_once_with("Aurora")
-    assert light.effect == "Aurora"
+    assert light.effect == "Aurora"  # optimistic (device reports no active scene)
+
+    # once the device reports an active scene back, that wins
+    device.active_scene = "Forest"
+    assert light.effect == "Forest"
 
 
 async def test_light_turn_off_powers_zones(hass: HomeAssistant) -> None:

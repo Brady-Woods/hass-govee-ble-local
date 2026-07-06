@@ -125,6 +125,13 @@ class GoveeBleLocalLight(GoveeBleLocalEntity, LightEntity):
         return data.color_temp_kelvin if data else None
 
     @property
+    def effect(self) -> str | None:
+        # Prefer the scene the device reports as active (read back over BLE);
+        # fall back to the optimistic value before the first poll / when the
+        # device doesn't report its mode.
+        return self._device.active_scene or self._attr_effect
+
+    @property
     def color_mode(self) -> ColorMode:
         data = self._data
         if data is not None:

@@ -35,6 +35,7 @@ def make_device(
     device.capabilities = capabilities
     device.zones = zones
     device.scene_names = SCENE_NAMES if scene_names is None else scene_names
+    device.active_scene = None
     device.min_kelvin = min_kelvin
     device.max_kelvin = max_kelvin
     device.wifi_mac = None
