@@ -11,7 +11,21 @@
         }
       },
       "secret": {
-        "description": "{name} requires an 8-byte secret key before it will accept commands. Home Assistant tried to read it directly from the device but couldn't — this only works while the device is unbound (factory-reset and not paired in the Govee app). Enter it as 16 hex characters (e.g. a1b2c3d4e5f60718), or leave blank to add the device now and set the key later. You can also obtain it from the Govee cloud account or a btsnoop capture.",
+        "description": "{name} needs an 8-byte secret key before it will accept commands, and it couldn't be read directly from the device (that only works while the device is unbound / factory-reset). How do you want to provide it?",
+        "menu_options": {
+          "secret_cloud": "Fetch it from my Govee account",
+          "secret_manual": "Enter it manually (hex)"
+        }
+      },
+      "secret_cloud": {
+        "description": "Log in with your Govee account to fetch {name}'s secret key automatically. Your credentials are used once to retrieve the key and are not stored — only the key is saved.",
+        "data": {
+          "email": "Govee email",
+          "password": "Govee password"
+        }
+      },
+      "secret_manual": {
+        "description": "Enter {name}'s 8-byte secret key as 16 hex characters (e.g. a1b2c3d4e5f60718), or leave blank to add the device now and set the key later. You can obtain it from the Govee cloud account or a btsnoop capture.",
         "data": {
           "secret": "Secret key (hex)"
         }
@@ -24,7 +38,9 @@
       }
     },
     "error": {
-      "invalid_secret": "The secret key must be 16 hex characters (8 bytes), e.g. a1b2c3d4e5f60718."
+      "invalid_secret": "The secret key must be 16 hex characters (8 bytes), e.g. a1b2c3d4e5f60718.",
+      "cannot_connect": "Could not log in to the Govee account. Check your email and password and try again.",
+      "secret_not_found": "Logged in, but no secret key was found for this device on the account. Make sure the device is added to this Govee account."
     },
     "abort": {
       "no_devices_found": "No unconfigured supported Govee devices found.",

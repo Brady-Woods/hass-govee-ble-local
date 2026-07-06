@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from bleak.exc import BleakError
-from govee_ble_local import Capability
+from govee_ble_local import Capability, DeviceState
 from homeassistant.components.light import (
     ATTR_BRIGHTNESS,
     ATTR_COLOR_TEMP_KELVIN,
@@ -36,14 +36,29 @@ async def _shutdown_created() -> None:
         await _CREATED.pop().async_shutdown()
 
 
-def _make_light(hass: HomeAssistant, device: AsyncMock) -> GoveeBleLocalLight:
+def _make_light(
+    hass: HomeAssistant, device: AsyncMock, data: DeviceState | None = None
+) -> GoveeBleLocalLight:
     coordinator = GoveeBleLocalCoordinator(hass, device, ADDRESS)
     coordinator.last_update_success = True
+    coordinator.data = data if data is not None else DeviceState()
     _CREATED.append(coordinator)
     light = GoveeBleLocalLight(coordinator, device, ADDRESS, TITLE)
     light.hass = hass
     light.entity_id = "light.test"
     return light
+
+
+def test_light_reflects_polled_state(hass: HomeAssistant) -> None:
+    """State properties read from the coordinator's DeviceState (polled truth)."""
+    device = make_device()
+    light = _make_light(
+        hass, device, DeviceState(is_on=True, brightness=50, rgb_color=(10, 20, 30))
+    )
+    assert light.is_on is True
+    assert light.brightness == round(50 / 100 * 255)   # 128
+    assert light.rgb_color == (10, 20, 30)
+    assert light.color_mode is ColorMode.RGB
 
 
 async def test_light_state_via_setup(
@@ -73,10 +88,7 @@ async def test_light_turn_on_all_attributes(hass: HomeAssistant) -> None:
     device.set_rgb.assert_awaited_once_with((10, 20, 30))
     device.set_color_temp.assert_awaited_once_with(3000)
     assert device.set_zone_power.await_count == 2  # both zones powered on
-    assert light.is_on is True
-    assert light.color_mode is ColorMode.COLOR_TEMP
-    assert light.rgb_color == (10, 20, 30)
-    assert light.color_temp_kelvin == 3000
+    assert light.is_on is True  # zone power nudged onto the DeviceState
 
 
 async def test_light_turn_on_effect(hass: HomeAssistant) -> None:

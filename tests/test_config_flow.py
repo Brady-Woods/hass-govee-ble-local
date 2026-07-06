@@ -88,13 +88,11 @@ async def test_bluetooth_discovery_supported(hass: HomeAssistant) -> None:
     assert result["data"] == {"address": ADDRESS, "sku": "H60A6"}
 
 
-async def test_bluetooth_discovery_plug_secret_step(hass: HomeAssistant) -> None:
-    """A secret-gated device (H5083 plug) prompts for the secret and stores it
-    when it can't be read directly from the device (bound)."""
+async def _plug_to_secret_menu(hass: HomeAssistant) -> str:
+    """Drive an H5083 discovery to the secret menu (auto-read patched to fail);
+    return the flow_id."""
     with patch(
-        "custom_components.govee_ble_local.config_flow."
-        "GoveeBleLocalConfigFlow._read_secret_from_device",
-        return_value=None,
+        f"{_CF}.GoveeBleLocalConfigFlow._read_secret_from_device", return_value=None
     ):
         result = await hass.config_entries.flow.async_init(
             DOMAIN,
@@ -105,19 +103,27 @@ async def test_bluetooth_discovery_plug_secret_step(hass: HomeAssistant) -> None
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"], user_input={}
         )
-    assert result["type"] is FlowResultType.FORM
+    assert result["type"] is FlowResultType.MENU
     assert result["step_id"] == "secret"
+    return result["flow_id"]
 
-    # invalid hex -> error, stay on the form
+
+async def test_bluetooth_discovery_plug_secret_manual(hass: HomeAssistant) -> None:
+    """The manual menu branch validates + stores the hex secret."""
+    flow_id = await _plug_to_secret_menu(hass)
     result = await hass.config_entries.flow.async_configure(
-        result["flow_id"], user_input={"secret": "nothex!!"}
+        flow_id, user_input={"next_step_id": "secret_manual"}
     )
     assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "secret_manual"
+
+    result = await hass.config_entries.flow.async_configure(
+        flow_id, user_input={"secret": "nothex!!"}
+    )
     assert result["errors"] == {"secret": "invalid_secret"}
 
-    # valid 8-byte hex -> entry created with the secret
     result = await hass.config_entries.flow.async_configure(
-        result["flow_id"], user_input={"secret": "a1:b2:c3:d4:e5:f6:07:18"}
+        flow_id, user_input={"secret": "a1:b2:c3:d4:e5:f6:07:18"}
     )
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["data"] == {
@@ -125,6 +131,41 @@ async def test_bluetooth_discovery_plug_secret_step(hass: HomeAssistant) -> None
         "sku": "H5083",
         "secret": "a1b2c3d4e5f60718",
     }
+
+
+async def test_secret_cloud_fetch_success(hass: HomeAssistant) -> None:
+    """The cloud branch logs in, fetches the secret, and stores it."""
+    flow_id = await _plug_to_secret_menu(hass)
+    result = await hass.config_entries.flow.async_configure(
+        flow_id, user_input={"next_step_id": "secret_cloud"}
+    )
+    assert result["step_id"] == "secret_cloud"
+    with patch(
+        f"{_CF}.GoveeBleLocalConfigFlow._fetch_cloud_secret",
+        return_value=("a1b2c3d4e5f60718", None),
+    ):
+        result = await hass.config_entries.flow.async_configure(
+            flow_id, user_input={"email": "u@example.com", "password": "pw"}
+        )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["data"]["secret"] == "a1b2c3d4e5f60718"
+
+
+async def test_secret_cloud_fetch_error(hass: HomeAssistant) -> None:
+    """A cloud login failure shows the error and stays on the form."""
+    flow_id = await _plug_to_secret_menu(hass)
+    await hass.config_entries.flow.async_configure(
+        flow_id, user_input={"next_step_id": "secret_cloud"}
+    )
+    with patch(
+        f"{_CF}.GoveeBleLocalConfigFlow._fetch_cloud_secret",
+        return_value=(None, "cannot_connect"),
+    ):
+        result = await hass.config_entries.flow.async_configure(
+            flow_id, user_input={"email": "u@example.com", "password": "bad"}
+        )
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {"base": "cannot_connect"}
 
 
 async def test_bluetooth_discovery_plug_secret_auto_read(hass: HomeAssistant) -> None:
@@ -152,23 +193,14 @@ async def test_bluetooth_discovery_plug_secret_auto_read(hass: HomeAssistant) ->
 
 
 async def test_bluetooth_discovery_plug_blank_secret(hass: HomeAssistant) -> None:
-    """A blank secret adds the device without one (settable later)."""
-    with patch(
-        "custom_components.govee_ble_local.config_flow."
-        "GoveeBleLocalConfigFlow._read_secret_from_device",
-        return_value=None,
-    ):
-        result = await hass.config_entries.flow.async_init(
-            DOMAIN,
-            context={"source": SOURCE_BLUETOOTH},
-            data=_service_info(name="ihoment_H5083_A2D1"),
-        )
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input={}
-        )
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], user_input={"secret": ""}
-        )
+    """A blank manual secret adds the device without one (settable later)."""
+    flow_id = await _plug_to_secret_menu(hass)
+    await hass.config_entries.flow.async_configure(
+        flow_id, user_input={"next_step_id": "secret_manual"}
+    )
+    result = await hass.config_entries.flow.async_configure(
+        flow_id, user_input={"secret": ""}
+    )
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["data"] == {"address": ADDRESS, "sku": "H5083"}
 
@@ -299,6 +331,55 @@ async def test_read_secret_from_device_bound_returns_none(hass: HomeAssistant) -
     ):
         assert await flow._read_secret_from_device(ADDRESS, "H5083") is None
     device.stop.assert_awaited()
+
+
+def _cloud_flow(hass: HomeAssistant) -> GoveeBleLocalConfigFlow:
+    flow = GoveeBleLocalConfigFlow()
+    flow.hass = hass
+    flow._pending = {"address": ADDRESS, "sku": "H5083", "title": "Plug"}
+    return flow
+
+
+async def test_fetch_cloud_secret_matches_device(hass: HomeAssistant) -> None:
+    """_fetch_cloud_secret returns the hex secret of the account device whose
+    BLE MAC matches the config entry's address."""
+    from govee_ble_local.cloud import CloudDevice
+
+    dev = CloudDevice(
+        sku="H5083", device=f"AB:CD:{ADDRESS}", name="Plug",
+        secret=bytes.fromhex("a1b2c3d4e5f60718"),
+        pact_type=None, pact_code=None, goods_type=None,
+    )
+    account = AsyncMock()
+    account.get_devices.return_value = [dev]
+    with patch("govee_ble_local.cloud.GoveeCloudAccount", return_value=account):
+        secret, error = await _cloud_flow(hass)._fetch_cloud_secret("u@e.com", "pw")
+    assert secret == "a1b2c3d4e5f60718"
+    assert error is None
+    account.close.assert_awaited()
+
+
+async def test_fetch_cloud_secret_not_found(hass: HomeAssistant) -> None:
+    """No matching device on the account -> secret_not_found."""
+    account = AsyncMock()
+    account.get_devices.return_value = []
+    with patch("govee_ble_local.cloud.GoveeCloudAccount", return_value=account):
+        secret, error = await _cloud_flow(hass)._fetch_cloud_secret("u@e.com", "pw")
+    assert secret is None
+    assert error == "secret_not_found"
+
+
+async def test_fetch_cloud_secret_login_error(hass: HomeAssistant) -> None:
+    """A GoveeCloudError (bad creds / network) -> cannot_connect."""
+    from govee_ble_local.cloud import GoveeCloudError
+
+    account = AsyncMock()
+    account.get_devices.side_effect = GoveeCloudError("bad login")
+    with patch("govee_ble_local.cloud.GoveeCloudAccount", return_value=account):
+        secret, error = await _cloud_flow(hass)._fetch_cloud_secret("u@e.com", "pw")
+    assert secret is None
+    assert error == "cannot_connect"
+    account.close.assert_awaited()
 
 
 async def test_reconfigure_plug_updates_secret(hass: HomeAssistant) -> None:

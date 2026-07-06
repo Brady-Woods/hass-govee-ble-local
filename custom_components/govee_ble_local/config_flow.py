@@ -30,6 +30,7 @@ from homeassistant.components.bluetooth import (
     async_last_service_info,
 )
 from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
+from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
 
 from .const import CONF_SECRET, DOMAIN
 
@@ -182,10 +183,25 @@ class GoveeBleLocalConfigFlow(ConfigFlow, domain=DOMAIN):
     ) -> ConfigFlowResult:
         """Obtain the device's 8-byte secret key.
 
-        On first entry, tries to read it directly from the device
-        (read_secret); if that succeeds (unbound device) the entry is created
-        automatically. Otherwise the user is asked to enter it as hex.
+        First tries to read it directly from the device (read_secret); that
+        works only for an unbound device. If it can't, offers a menu: fetch it
+        from the Govee cloud account, or enter it manually.
         """
+        assert self._pending is not None
+        read = await self._read_secret_from_device(
+            self._pending["address"], self._pending["sku"]
+        )
+        if read is not None:
+            return self._create_secret_entry(read)
+        return self.async_show_menu(
+            step_id="secret",
+            menu_options=["secret_cloud", "secret_manual"],
+        )
+
+    async def async_step_secret_manual(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Enter the secret key as hex (or blank to set it later)."""
         assert self._pending is not None
         errors: dict[str, str] = {}
         if user_input is not None:
@@ -195,19 +211,60 @@ class GoveeBleLocalConfigFlow(ConfigFlow, domain=DOMAIN):
                 errors[CONF_SECRET] = "invalid_secret"
             else:
                 return self._create_secret_entry(secret)
-        else:
-            read = await self._read_secret_from_device(
-                self._pending["address"], self._pending["sku"]
-            )
-            if read is not None:
-                return self._create_secret_entry(read)
-
         return self.async_show_form(
-            step_id="secret",
+            step_id="secret_manual",
             data_schema=vol.Schema({vol.Optional(CONF_SECRET, default=""): str}),
             errors=errors or None,
             description_placeholders={"name": self._pending["title"]},
         )
+
+    async def async_step_secret_cloud(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Log into the Govee account and fetch this device's secret key.
+
+        Credentials are used once to obtain the secret and are NOT stored - only
+        the resulting key is saved in the config entry."""
+        assert self._pending is not None
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            secret, error = await self._fetch_cloud_secret(
+                user_input[CONF_EMAIL], user_input[CONF_PASSWORD]
+            )
+            if secret is not None:
+                return self._create_secret_entry(secret)
+            errors["base"] = error or "secret_not_found"
+        return self.async_show_form(
+            step_id="secret_cloud",
+            data_schema=vol.Schema(
+                {vol.Required(CONF_EMAIL): str, vol.Required(CONF_PASSWORD): str}
+            ),
+            errors=errors or None,
+            description_placeholders={"name": self._pending["title"]},
+        )
+
+    async def _fetch_cloud_secret(
+        self, email: str, password: str
+    ) -> tuple[str | None, str | None]:
+        """Return (secret_hex, error_key). Matches the config device's BLE
+        address against the account's device list."""
+        assert self._pending is not None
+        from govee_ble_local.cloud import GoveeCloudAccount, GoveeCloudError
+
+        want = self._pending["address"].replace(":", "").lower()
+        account = GoveeCloudAccount(email, password)
+        try:
+            devices = await account.get_devices()
+        except GoveeCloudError as err:
+            _LOGGER.debug("Govee cloud login/list failed: %s", err)
+            return None, "cannot_connect"
+        finally:
+            await account.close()
+        for dev in devices:
+            mac = (dev.ble_mac or dev.device).replace(":", "").lower()
+            if mac.endswith(want) and dev.secret:
+                return dev.secret.hex(), None
+        return None, "secret_not_found"
 
     # -- reconfigure --------------------------------------------------------
 
