@@ -63,18 +63,21 @@ class GoveeBleLocalZoneSwitch(GoveeBleLocalEntity, SwitchEntity):
         self._zone_name = zone_name
         self._attr_unique_id = f"{address}_zone_{zone_name}"
         self._attr_translation_key = ZONE_TRANSLATION_KEYS.get(zone_name, zone_name)
-        self._attr_is_on: bool | None = None
+
+    @property
+    def is_on(self) -> bool | None:
+        # Read the zone's actual power state back from the device (polled);
+        # set_zone_power updates it optimistically for instant feedback.
+        return self._device.zone_is_on(self._zone_name)
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         _LOGGER.debug("Turning zone %s on for %s", self._zone_name, self._address)
         await self._run_client_command(self._device.set_zone_power(self._zone_name, True))
-        self._attr_is_on = True
         self.async_write_ha_state()
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         _LOGGER.debug("Turning zone %s off for %s", self._zone_name, self._address)
         await self._run_client_command(self._device.set_zone_power(self._zone_name, False))
-        self._attr_is_on = False
         self.async_write_ha_state()
 
 

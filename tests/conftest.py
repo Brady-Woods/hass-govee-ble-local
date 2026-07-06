@@ -44,6 +44,15 @@ def make_device(
     device.serial_number = None
     device.update.return_value = DeviceState(optimistic=True)
     device.update_ble_device = MagicMock()
+    # Zone power: mock zone_is_on off a dict that set_zone_power updates, so the
+    # switch entities behave like the real device.
+    zones_on: dict[str, bool] = {}
+    device.zone_is_on = lambda name: zones_on.get(name)
+
+    async def _set_zone_power(name: str, on: bool) -> None:
+        zones_on[name] = on
+
+    device.set_zone_power = AsyncMock(side_effect=_set_zone_power)
     return device
 
 
