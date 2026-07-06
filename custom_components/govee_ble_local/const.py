@@ -16,10 +16,11 @@ CONF_SECRET = "secret"
 # reduces contention. These are near-static ceiling lights, so 60s is plenty.
 POLL_INTERVAL_SECONDS = 60
 
-# Maps a library zone name (GoveeDevice.zones[i].name) to an entity
-# translation key. The v2 library names H60A6's zones "main" (upper ring) and
-# "background" (lower panel); unknown zone names fall back to their raw name.
+# Maps a library zone name (GoveeDevice.zones[i].name) to an entity translation
+# key. The library uses the device's own zone names (from the Govee app/cloud:
+# mainLightToggle / backgroundLightToggle); unknown names fall back to the raw
+# name via the switch's translation-key lookup.
 ZONE_TRANSLATION_KEYS: dict[str, str] = {
-    "main": "upper_ring",
-    "background": "lower_panel",
+    "main": "main_light",
+    "background": "background_light",
 }

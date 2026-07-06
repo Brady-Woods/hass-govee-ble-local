@@ -52,11 +52,11 @@
   },
   "entity": {
     "switch": {
-      "upper_ring": {
-        "name": "Upper ring"
+      "main_light": {
+        "name": "Main light"
       },
-      "lower_panel": {
-        "name": "Lower panel"
+      "background_light": {
+        "name": "Background light"
       }
     }
   },

@@ -2,9 +2,16 @@
   "domain": "govee_ble_local",
   "name": "Govee BLE Local",
   "bluetooth": [
-    {
-      "manufacturer_id": 34883
-    }
+    { "manufacturer_id": 34817 },
+    { "manufacturer_id": 34818 },
+    { "manufacturer_id": 34819 },
+    { "manufacturer_id": 34883 },
+    { "local_name": "ihoment_*" },
+    { "local_name": "Govee_*" },
+    { "local_name": "Minger_*" },
+    { "local_name": "GVH*" },
+    { "local_name": "GVR*" },
+    { "local_name": "GBK_*" }
   ],
   "codeowners": ["@Brady-Woods"],
   "config_flow": true,
