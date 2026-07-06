@@ -44,6 +44,8 @@ def make_device(
     device.serial_number = None
     device.update.return_value = DeviceState(optimistic=True)
     device.update_ble_device = MagicMock()
+    device.ingest_advertisement = MagicMock(return_value=False)
+    device.state = DeviceState(optimistic=True)
     # Zone power: mock zone_is_on off a dict that set_zone_power updates, so the
     # switch entities behave like the real device.
     zones_on: dict[str, bool] = {}

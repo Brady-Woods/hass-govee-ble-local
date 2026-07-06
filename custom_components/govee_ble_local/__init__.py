@@ -110,7 +110,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: GoveeBleLocalConfigEntry
         service_info: bluetooth.BluetoothServiceInfoBleak,
         change: bluetooth.BluetoothChange,
     ) -> None:
-        device.update_ble_device(service_info.device, service_info.advertisement)
+        # Refresh the BLEDevice handle for future connections, and update on/off
+        # PASSIVELY from the advertisement (no connection/slot). Push the change
+        # straight to the entities so on/off is live between polls.
+        device.update_ble_device(service_info.device)
+        if device.ingest_advertisement(service_info):
+            coordinator.async_set_updated_data(device.state)
 
     entry.async_on_unload(
         bluetooth.async_register_callback(

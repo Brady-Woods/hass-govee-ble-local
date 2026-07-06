@@ -104,9 +104,24 @@ async def test_ble_advertisement_updates_device(
     callback = register.call_args.args[1]  # (hass, callback, matcher, mode)
     service_info = MagicMock()
     callback(service_info, MagicMock())
-    mock_device.update_ble_device.assert_called_once_with(
-        service_info.device, service_info.advertisement
-    )
+    mock_device.update_ble_device.assert_called_once_with(service_info.device)
+    mock_device.ingest_advertisement.assert_called_once_with(service_info)
+
+
+async def test_passive_advert_pushes_state(
+    hass: HomeAssistant,
+    setup_integration: MockConfigEntry,
+    mock_device: AsyncMock,
+    mock_bluetooth: SimpleNamespace,
+) -> None:
+    """A passive advertisement that changes on/off is pushed to the coordinator
+    (no connection) so entities update between polls."""
+    coordinator = setup_integration.runtime_data.coordinator
+    callback = mock_bluetooth.register.call_args.args[1]
+    mock_device.ingest_advertisement.return_value = True
+    with patch.object(coordinator, "async_set_updated_data") as push:
+        callback(MagicMock(), MagicMock())
+    push.assert_called_once()
 
 
 async def test_setup_removes_legacy_zone_entities(

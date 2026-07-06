@@ -11,10 +11,12 @@ DOMAIN = "govee_ble_local"
 # family) require before they accept commands.
 CONF_SECRET = "secret"
 
-# 60s: with several lights sharing one adapter, each poll opens a BLE
-# connection that briefly locks the device's single slot; a slower cadence
-# reduces contention. These are near-static ceiling lights, so 60s is plenty.
-POLL_INTERVAL_SECONDS = 60
+# Rich state (brightness, colour, scene, segments, zones) needs a connection, so
+# each poll briefly locks one of the adapter/proxy's scarce connection slots.
+# on/off is now tracked PASSIVELY from advertisements (no slot), so this poll can
+# be slow — it only reconciles the richer fields. Devices the advert reports as
+# off aren't connected to at all.
+POLL_INTERVAL_SECONDS = 120
 
 # Maps a library zone name (GoveeDevice.zones[i].name) to an entity translation
 # key. The library uses the device's own zone names (from the Govee app/cloud:
