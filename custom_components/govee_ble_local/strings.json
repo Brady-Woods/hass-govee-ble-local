@@ -10,15 +10,27 @@
           "address": "Device"
         }
       },
+      "secret": {
+        "description": "{name} requires an 8-byte secret key before it will accept commands. Enter it as 16 hex characters (e.g. a1b2c3d4e5f60718). Leave blank to add the device now and set the key later. The key is a stable, device-specific value you can obtain from the Govee cloud account, a btsnoop capture, or an unbound (factory-reset) device.",
+        "data": {
+          "secret": "Secret key (hex)"
+        }
+      },
       "reconfigure": {
-        "description": "Re-check that {name} is currently reachable over Bluetooth and reload it. No settings are changed."
+        "description": "Re-check that {name} is currently reachable over Bluetooth and reload it. For devices that need a secret key, you can set or update it below.",
+        "data": {
+          "secret": "Secret key (hex)"
+        }
       }
+    },
+    "error": {
+      "invalid_secret": "The secret key must be 16 hex characters (8 bytes), e.g. a1b2c3d4e5f60718."
     },
     "abort": {
       "no_devices_found": "No unconfigured supported Govee devices found.",
       "already_configured": "Device is already configured.",
       "not_supported": "This Govee model isn't supported by this integration yet.",
-      "not_found": "The light could not be found over Bluetooth right now. Make sure it is powered on and in range, then try again.",
+      "not_found": "The device could not be found over Bluetooth right now. Make sure it is powered on and in range, then try again.",
       "reconfigure_successful": "Device re-verified and reloaded successfully."
     }
   },

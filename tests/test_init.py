@@ -109,6 +109,27 @@ async def test_ble_advertisement_updates_device(
     )
 
 
+async def test_setup_passes_secret_to_library(
+    hass: HomeAssistant, mock_bluetooth: SimpleNamespace
+) -> None:
+    """A stored secret is decoded from hex and handed to create_device."""
+    device = make_device(
+        capabilities=frozenset({Capability.POWER}), zones=(), scene_names=[], sku="H5083"
+    )
+    entry = MockConfigEntry(
+        domain=DOMAIN, title="Plug", unique_id=ADDRESS,
+        data={"address": ADDRESS, "sku": "H5083", "secret": "a1b2c3d4e5f60718"},
+    )
+    entry.add_to_hass(hass)
+    with patch(
+        "custom_components.govee_ble_local.create_device", return_value=device
+    ) as create:
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+    assert create.call_args.kwargs["secret"] == bytes.fromhex("a1b2c3d4e5f60718")
+    assert await hass.config_entries.async_unload(entry.entry_id)
+
+
 async def test_setup_plug_gets_switch_not_light(
     hass: HomeAssistant, mock_bluetooth: SimpleNamespace
 ) -> None:

@@ -7,6 +7,10 @@ classes now. Only Home-Assistant-integration-level constants remain here.
 
 DOMAIN = "govee_ble_local"
 
+# Config-entry key for the 8-byte secret key (hex) some devices (the smart-plug
+# family) require before they accept commands.
+CONF_SECRET = "secret"
+
 # 60s: with several lights sharing one adapter, each poll opens a BLE
 # connection that briefly locks the device's single slot; a slower cadence
 # reduces contention. These are near-static ceiling lights, so 60s is plenty.

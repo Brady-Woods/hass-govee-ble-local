@@ -15,7 +15,7 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import device_registry as dr
 
-from .const import DOMAIN
+from .const import CONF_SECRET, DOMAIN
 from .coordinator import GoveeBleLocalCoordinator
 
 _LOGGER = logging.getLogger(__name__)
@@ -54,8 +54,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: GoveeBleLocalConfigEntry
     if not sku:
         raise ConfigEntryNotReady(f"Could not determine SKU for {address}")
 
+    # Some devices (smart plugs) gate commands behind an 8-byte secret key,
+    # stored as hex in the config entry (see config_flow's secret step).
+    secret_hex = entry.data.get(CONF_SECRET)
+    secret = bytes.fromhex(secret_hex) if secret_hex else None
+
     try:
-        device = create_device(ble_device, sku, advertisement)
+        device = create_device(ble_device, sku, advertisement, secret=secret)
     except GoveeBleNotSupported as err:
         raise ConfigEntryNotReady(str(err)) from err
 

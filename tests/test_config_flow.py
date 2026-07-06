@@ -84,6 +84,52 @@ async def test_bluetooth_discovery_supported(hass: HomeAssistant) -> None:
     assert result["data"] == {"address": ADDRESS, "sku": "H60A6"}
 
 
+async def test_bluetooth_discovery_plug_secret_step(hass: HomeAssistant) -> None:
+    """A secret-gated device (H5083 plug) prompts for the secret and stores it."""
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": SOURCE_BLUETOOTH},
+        data=_service_info(name="ihoment_H5083_A2D1"),
+    )
+    assert result["step_id"] == "bluetooth_confirm"
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], user_input={})
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "secret"
+
+    # invalid hex -> error, stay on the form
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], user_input={"secret": "nothex!!"}
+    )
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {"secret": "invalid_secret"}
+
+    # valid 8-byte hex -> entry created with the secret
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], user_input={"secret": "a1:b2:c3:d4:e5:f6:07:18"}
+    )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["data"] == {
+        "address": ADDRESS,
+        "sku": "H5083",
+        "secret": "a1b2c3d4e5f60718",
+    }
+
+
+async def test_bluetooth_discovery_plug_blank_secret(hass: HomeAssistant) -> None:
+    """A blank secret adds the device without one (settable later)."""
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": SOURCE_BLUETOOTH},
+        data=_service_info(name="ihoment_H5083_A2D1"),
+    )
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], user_input={})
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], user_input={"secret": ""}
+    )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["data"] == {"address": ADDRESS, "sku": "H5083"}
+
+
 async def test_bluetooth_discovery_not_supported(hass: HomeAssistant) -> None:
     """A Govee device with no matching profile is rejected."""
     result = await hass.config_entries.flow.async_init(
@@ -169,6 +215,28 @@ async def test_reconfigure_success(
         )
     assert result["type"] is FlowResultType.ABORT
     assert result["reason"] == "reconfigure_successful"
+
+
+async def test_reconfigure_plug_updates_secret(hass: HomeAssistant) -> None:
+    """Reconfiguring a secret-gated device offers a secret field and stores it."""
+    entry = MockConfigEntry(
+        domain=DOMAIN, title="Plug", unique_id=ADDRESS,
+        data={"address": ADDRESS, "sku": "H5083"},
+    )
+    entry.add_to_hass(hass)
+    result = await entry.start_reconfigure_flow(hass)
+    assert result["step_id"] == "reconfigure"
+
+    with patch(
+        "custom_components.govee_ble_local.config_flow.async_ble_device_from_address",
+        return_value=BLEDevice(address=ADDRESS, name="ihoment_H5083_A2D1", details={}),
+    ):
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input={"secret": "a1b2c3d4e5f60718"}
+        )
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "reconfigure_successful"
+    assert entry.data["secret"] == "a1b2c3d4e5f60718"
 
 
 async def test_reconfigure_not_found(
