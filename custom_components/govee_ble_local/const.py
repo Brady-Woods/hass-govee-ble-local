@@ -18,6 +18,14 @@ CONF_SECRET = "secret"
 # off aren't connected to at all.
 POLL_INTERVAL_SECONDS = 120
 
+# Ceiling for the coordinator's adaptive backoff. A device that repeatedly fails
+# to connect (out of range / no free slot) launches a ~30-40s connection-retry
+# storm on every poll; on a single adapter shared by ~18 devices that steals
+# radio time from the healthy ones. After consecutive failures the coordinator
+# doubles that device's poll interval up to this cap, resetting on the first
+# success. on/off still updates live from advertisements regardless.
+MAX_POLL_INTERVAL_SECONDS = 1800
+
 # Maps a library zone name (GoveeDevice.zones[i].name) to an entity translation
 # key. The library uses the device's own zone names (from the Govee app/cloud:
 # mainLightToggle / backgroundLightToggle); unknown names fall back to the raw
