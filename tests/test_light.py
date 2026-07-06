@@ -77,6 +77,30 @@ async def test_light_state_via_setup(
     assert state.attributes["max_color_temp_kelvin"] == 6500
 
 
+def test_device_info_surfaces_wifi_hw_serial(hass: HomeAssistant) -> None:
+    """device_info exposes wifi MAC (connection), hardware version, and serial
+    from the polled DeviceState."""
+    from homeassistant.helpers.device_registry import (
+        CONNECTION_NETWORK_MAC,
+        DeviceInfo,
+    )
+
+    device = make_device()
+    light = _make_light(
+        hass,
+        device,
+        DeviceState(
+            wifi_mac="11:22:33:44:55:66",
+            hardware_version="1.02.30",
+            serial_number="SN12345",
+        ),
+    )
+    info: DeviceInfo = light.device_info
+    assert info["hw_version"] == "1.02.30"
+    assert info["serial_number"] == "SN12345"
+    assert (CONNECTION_NETWORK_MAC, "11:22:33:44:55:66") in info["connections"]
+
+
 async def test_light_turn_on_all_attributes(hass: HomeAssistant) -> None:
     """turn_on applies brightness/rgb/color-temp and powers zones from off."""
     device = make_device()

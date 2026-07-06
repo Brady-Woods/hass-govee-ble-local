@@ -37,6 +37,9 @@ def make_device(
     device.scene_names = SCENE_NAMES if scene_names is None else scene_names
     device.min_kelvin = min_kelvin
     device.max_kelvin = max_kelvin
+    device.wifi_mac = None
+    device.hardware_version = None
+    device.serial_number = None
     device.update.return_value = DeviceState(optimistic=True)
     device.update_ble_device = MagicMock()
     return device

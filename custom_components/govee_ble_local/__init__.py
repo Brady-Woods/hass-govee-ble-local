@@ -85,16 +85,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: GoveeBleLocalConfigEntry
 
     @callback
     def _sync_device_registry() -> None:
+        connections = {(dr.CONNECTION_BLUETOOTH, address)}
+        if device.wifi_mac:
+            connections.add((dr.CONNECTION_NETWORK_MAC, device.wifi_mac))
         registry = dr.async_get(hass)
         registry.async_get_or_create(
             config_entry_id=entry.entry_id,
             identifiers={(DOMAIN, address)},
-            connections={(dr.CONNECTION_BLUETOOTH, address)},
+            connections=connections,
             manufacturer="Govee",
             model=device.model,
+            hw_version=device.hardware_version,
+            serial_number=device.serial_number,
         )
 
     _sync_device_registry()
+    # Device-info (wifi MAC, hardware version, serial) is read back on the first
+    # poll(s); re-sync when it arrives so the registry entry gets enriched.
+    entry.async_on_unload(coordinator.async_add_listener(_sync_device_registry))
 
     @callback
     def _async_update_ble(

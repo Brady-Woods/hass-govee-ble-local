@@ -7,7 +7,11 @@ from typing import Any, Coroutine
 from bleak.exc import BleakError
 from govee_ble_local import GoveeBleError
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers.device_registry import CONNECTION_BLUETOOTH, DeviceInfo
+from homeassistant.helpers.device_registry import (
+    CONNECTION_BLUETOOTH,
+    CONNECTION_NETWORK_MAC,
+    DeviceInfo,
+)
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
@@ -54,10 +58,16 @@ class GoveeBleLocalEntity(CoordinatorEntity[GoveeBleLocalCoordinator]):
 
     @property
     def device_info(self) -> DeviceInfo:
+        state = self.coordinator.data
+        connections = {(CONNECTION_BLUETOOTH, self._address)}
+        if state is not None and state.wifi_mac:
+            connections.add((CONNECTION_NETWORK_MAC, state.wifi_mac))
         return DeviceInfo(
             identifiers={(DOMAIN, self._address)},
-            connections={(CONNECTION_BLUETOOTH, self._address)},
+            connections=connections,
             name=self._device_name,
             manufacturer="Govee",
             model=self._model,
+            hw_version=state.hardware_version if state is not None else None,
+            serial_number=state.serial_number if state is not None else None,
         )
