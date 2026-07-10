@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from govee_ble_local import Capability, GoveeDevice
+from govee_ble_local import Capability, Device
 from homeassistant.components.switch import SwitchDeviceClass, SwitchEntity
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -27,7 +27,8 @@ async def async_setup_entry(
     entry: GoveeBleLocalConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up one switch per physical zone the device declares, or - for a
+    """Set up an on/off switch per on/off-only zone (a zone with no segments;
+    colour-controllable zones are lights instead - see light.py), or - for a
     device with no light capability and no zones (e.g. a smart plug) - a single
     whole-device power switch."""
     device = entry.runtime_data.device
@@ -38,6 +39,7 @@ async def async_setup_entry(
     entities: list[GoveeBleLocalZoneSwitch | GoveeBleLocalPowerSwitch] = [
         GoveeBleLocalZoneSwitch(coordinator, device, address, entry.title, zone.name)
         for zone in device.zones
+        if not zone.segments
     ]
 
     is_light = bool(caps & {Capability.BRIGHTNESS, Capability.RGB, Capability.COLOR_TEMP})
@@ -53,12 +55,12 @@ class GoveeBleLocalZoneSwitch(GoveeBleLocalEntity, SwitchEntity):
     def __init__(
         self,
         coordinator: GoveeBleLocalCoordinator,
-        device: GoveeDevice,
+        device: Device,
         address: str,
         device_name: str,
         zone_name: str,
     ) -> None:
-        super().__init__(coordinator, address, device_name, device.model)
+        super().__init__(coordinator, address, device_name, device.sku)
         self._device = device
         self._zone_name = zone_name
         self._attr_unique_id = f"{address}_zone_{zone_name}"
@@ -83,8 +85,8 @@ class GoveeBleLocalZoneSwitch(GoveeBleLocalEntity, SwitchEntity):
 
 class GoveeBleLocalPowerSwitch(GoveeBleLocalEntity, SwitchEntity):
     """Whole-device on/off for a device that is fundamentally just a switch
-    (e.g. Govee's smart-plug family). No BLE read-back exists for global power,
-    so state is tracked optimistically from the last command sent."""
+    (e.g. Govee's smart-plug family). State is read back over BLE (the plug
+    profile polls its relay state) and updated optimistically on each command."""
 
     _attr_name = None  # the only entity for this device - use the device's own name
     _attr_device_class = SwitchDeviceClass.OUTLET
@@ -92,23 +94,27 @@ class GoveeBleLocalPowerSwitch(GoveeBleLocalEntity, SwitchEntity):
     def __init__(
         self,
         coordinator: GoveeBleLocalCoordinator,
-        device: GoveeDevice,
+        device: Device,
         address: str,
         device_name: str,
     ) -> None:
-        super().__init__(coordinator, address, device_name, device.model)
+        super().__init__(coordinator, address, device_name, device.sku)
         self._device = device
         self._attr_unique_id = f"{address}_power"
-        self._attr_is_on = None
+
+    @property
+    def is_on(self) -> bool | None:
+        # The plug polls its relay state back into DeviceState (coordinator.data);
+        # set_power also updates it optimistically for instant feedback.
+        data = self.coordinator.data
+        return data.is_on if data else None
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         _LOGGER.debug("Turning power on for %s", self._address)
         await self._run_client_command(self._device.set_power(True))
-        self._attr_is_on = True
         self.async_write_ha_state()
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         _LOGGER.debug("Turning power off for %s", self._address)
         await self._run_client_command(self._device.set_power(False))
-        self._attr_is_on = False
         self.async_write_ha_state()

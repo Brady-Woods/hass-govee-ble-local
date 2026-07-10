@@ -11,6 +11,7 @@ from homeassistant.helpers.device_registry import (
     CONNECTION_BLUETOOTH,
     CONNECTION_NETWORK_MAC,
     DeviceInfo,
+    format_mac,
 )
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
@@ -60,8 +61,10 @@ class GoveeBleLocalEntity(CoordinatorEntity[GoveeBleLocalCoordinator]):
     def device_info(self) -> DeviceInfo:
         state = self.coordinator.data
         connections = {(CONNECTION_BLUETOOTH, self._address)}
+        if state is not None and state.ble_mac:
+            connections.add((CONNECTION_BLUETOOTH, format_mac(state.ble_mac)))
         if state is not None and state.wifi_mac:
-            connections.add((CONNECTION_NETWORK_MAC, state.wifi_mac))
+            connections.add((CONNECTION_NETWORK_MAC, format_mac(state.wifi_mac)))
         return DeviceInfo(
             identifiers={(DOMAIN, self._address)},
             connections=connections,

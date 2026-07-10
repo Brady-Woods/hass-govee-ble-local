@@ -5,12 +5,13 @@ from unittest.mock import AsyncMock
 
 import pytest
 from bleak.exc import BleakError
-from govee_ble_local import Capability, DeviceState
+from govee_ble_local import Capability, DeviceState, Segment
 from homeassistant.components.light import (
     ATTR_BRIGHTNESS,
     ATTR_COLOR_TEMP_KELVIN,
     ATTR_EFFECT,
     ATTR_RGB_COLOR,
+    EFFECT_OFF,
     ColorMode,
 )
 from homeassistant.core import HomeAssistant
@@ -19,9 +20,15 @@ from homeassistant.helpers import entity_registry as er
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.govee_ble_local import GoveeBleLocalRuntimeData
+from custom_components.govee_ble_local.capture import LogCapture
 from custom_components.govee_ble_local.const import DOMAIN
 from custom_components.govee_ble_local.coordinator import GoveeBleLocalCoordinator
-from custom_components.govee_ble_local.light import GoveeBleLocalLight, async_setup_entry
+from custom_components.govee_ble_local.light import (
+    GoveeBleLocalLight,
+    GoveeBleLocalSegmentLight,
+    GoveeBleLocalZoneLight,
+    async_setup_entry,
+)
 
 from .conftest import make_device
 from .const import ADDRESS, TITLE
@@ -195,7 +202,158 @@ async def test_no_light_entity_for_plug(hass: HomeAssistant) -> None:
     coordinator = GoveeBleLocalCoordinator(hass, device, ADDRESS)
     _CREATED.append(coordinator)
     entry = MockConfigEntry(domain=DOMAIN, title=TITLE, data={"address": ADDRESS})
-    entry.runtime_data = GoveeBleLocalRuntimeData(device=device, coordinator=coordinator)
+    entry.runtime_data = GoveeBleLocalRuntimeData(
+        device=device, coordinator=coordinator, log_capture=LogCapture(ADDRESS)
+    )
     added: list[object] = []
     await async_setup_entry(hass, entry, added.extend)
     assert added == []
+
+
+def _make_segment(
+    hass: HomeAssistant, device: AsyncMock, index: int, data: DeviceState | None = None
+) -> GoveeBleLocalSegmentLight:
+    coordinator = GoveeBleLocalCoordinator(hass, device, ADDRESS)
+    coordinator.last_update_success = True
+    coordinator.data = data if data is not None else DeviceState()
+    _CREATED.append(coordinator)
+    seg = GoveeBleLocalSegmentLight(coordinator, device, ADDRESS, TITLE, index)
+    seg.hass = hass
+    seg.entity_id = f"light.segment_{index}"
+    return seg
+
+
+async def test_segment_entities_created(hass: HomeAssistant) -> None:
+    """A SEGMENTS-capable device gets one light per segment, plus the main light."""
+    device = make_device(segments=3)
+    coordinator = GoveeBleLocalCoordinator(hass, device, ADDRESS)
+    coordinator.data = DeviceState()
+    _CREATED.append(coordinator)
+    entry = MockConfigEntry(domain=DOMAIN, title=TITLE, data={"address": ADDRESS})
+    entry.runtime_data = GoveeBleLocalRuntimeData(
+        device=device, coordinator=coordinator, log_capture=LogCapture(ADDRESS)
+    )
+    added: list[object] = []
+    await async_setup_entry(hass, entry, added.extend)
+
+    segments = [e for e in added if isinstance(e, GoveeBleLocalSegmentLight)]
+    assert len(segments) == 3
+    assert {e.unique_id for e in segments} == {f"{ADDRESS}_segment_{i}" for i in range(3)}
+    assert any(isinstance(e, GoveeBleLocalLight) for e in added)  # main light too
+
+
+async def test_segment_turn_on_off_via_service(
+    hass: HomeAssistant, setup_integration: MockConfigEntry, mock_device: AsyncMock
+) -> None:
+    """A segment maps plain-on/RGB/brightness to set_segment_* and off to black."""
+    registry = er.async_get(hass)
+    eid = registry.async_get_entity_id("light", DOMAIN, f"{ADDRESS}_segment_1")
+    assert eid is not None
+    # Segments are disabled by default; enable this one and reload so it's live.
+    registry.async_update_entity(eid, disabled_by=None)
+    await hass.config_entries.async_reload(setup_integration.entry_id)
+    await hass.async_block_till_done()
+
+    # Plain on with no prior colour -> white so the segment lights.
+    await hass.services.async_call("light", "turn_on", {"entity_id": eid}, blocking=True)
+    mock_device.set_segment_rgb.assert_awaited_with([1], (255, 255, 255))
+    assert hass.states.get(eid).state == "on"
+
+    await hass.services.async_call(
+        "light", "turn_on", {"entity_id": eid, "rgb_color": [10, 20, 30]}, blocking=True
+    )
+    mock_device.set_segment_rgb.assert_awaited_with([1], (10, 20, 30))
+
+    await hass.services.async_call(
+        "light", "turn_on", {"entity_id": eid, "brightness": 128}, blocking=True
+    )
+    mock_device.set_segment_brightness.assert_awaited_with([1], 50)
+
+    await hass.services.async_call("light", "turn_off", {"entity_id": eid}, blocking=True)
+    mock_device.set_segment_rgb.assert_awaited_with([1], (0, 0, 0))
+    assert hass.states.get(eid).state == "off"
+
+
+async def test_segment_reads_back_state(hass: HomeAssistant) -> None:
+    """Segment colour/brightness come from the device's read-back state.segments."""
+    data = DeviceState(
+        segments=[
+            Segment(index=0, rgb=(9, 9, 9), brightness=None),  # on via colour only
+            Segment(index=1, rgb=(1, 2, 3), brightness=40),
+            Segment(index=2, rgb=(0, 0, 0), brightness=0),
+        ]
+    )
+    device = make_device(segments=3)
+
+    rgb_only = _make_segment(hass, device, 0, data)
+    assert rgb_only.is_on is True
+    assert rgb_only.brightness is None
+
+    lit = _make_segment(hass, device, 1, data)
+    assert lit.rgb_color == (1, 2, 3)
+    assert lit.brightness == round(40 / 100 * 255)
+    assert lit.is_on is True
+
+    dark = _make_segment(hass, device, 2, data)
+    assert dark.is_on is False
+
+
+async def test_effect_is_effect_off_when_idle(hass: HomeAssistant) -> None:
+    """A scene-capable light reports EFFECT_OFF (not None) when idle, and lists it."""
+    device = make_device()  # H60A6 caps include SCENES
+    device.active_scene = None
+    light = _make_light(hass, device, DeviceState())
+    assert EFFECT_OFF in (light.effect_list or [])
+    assert light.effect == EFFECT_OFF
+
+
+async def test_segment_lights_disabled_by_default(
+    hass: HomeAssistant, setup_integration: MockConfigEntry
+) -> None:
+    """Segment lights are registered but disabled by default (opt-in)."""
+    registry = er.async_get(hass)
+    entity_id = registry.async_get_entity_id("light", DOMAIN, f"{ADDRESS}_segment_0")
+    assert entity_id is not None
+    entry = registry.async_get(entity_id)
+    assert entry is not None
+    assert entry.disabled_by is not None
+
+
+async def test_zone_light_controls(
+    hass: HomeAssistant, setup_integration: MockConfigEntry, mock_device: AsyncMock
+) -> None:
+    """A colour zone (fixture `main`, which has segments) is a light: on/off via
+    set_zone_power, colour via set_zone_rgb, brightness via the segment mask."""
+    registry = er.async_get(hass)
+    eid = registry.async_get_entity_id("light", DOMAIN, f"{ADDRESS}_zone_main_light")
+    assert eid is not None
+
+    await hass.services.async_call(
+        "light", "turn_on", {"entity_id": eid, "rgb_color": [5, 6, 7]}, blocking=True
+    )
+    mock_device.set_zone_rgb.assert_awaited_with("main", (5, 6, 7))
+    mock_device.set_zone_power.assert_awaited_with("main", True)
+    assert hass.states.get(eid).state == "on"
+
+    await hass.services.async_call(
+        "light", "turn_on", {"entity_id": eid, "brightness": 128}, blocking=True
+    )
+    mock_device.set_segment_brightness.assert_awaited_with(list(range(13)), 50)
+
+    await hass.services.async_call("light", "turn_off", {"entity_id": eid}, blocking=True)
+    mock_device.set_zone_power.assert_awaited_with("main", False)
+    assert hass.states.get(eid).state == "off"
+
+
+async def test_zone_light_is_on_tracks_zone_power(hass: HomeAssistant) -> None:
+    """The zone light's on/off reads the device's per-zone power state."""
+    device = make_device()
+    coordinator = GoveeBleLocalCoordinator(hass, device, ADDRESS)
+    coordinator.data = DeviceState()
+    _CREATED.append(coordinator)
+    zone = GoveeBleLocalZoneLight(coordinator, device, ADDRESS, TITLE, "main")
+    assert zone.is_on is None  # unknown until a zone-power command / poll
+    await device.set_zone_power("main", True)
+    assert zone.is_on is True
+    await device.set_zone_power("main", False)
+    assert zone.is_on is False

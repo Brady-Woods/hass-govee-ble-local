@@ -7,6 +7,9 @@ classes now. Only Home-Assistant-integration-level constants remain here.
 
 DOMAIN = "govee_ble_local"
 
+# Service that runs the in-HA device self-test and returns the captured session.
+SERVICE_CAPTURE_SESSION = "capture_session"
+
 # Config-entry key for the 8-byte secret key (hex) some devices (the smart-plug
 # family) require before they accept commands.
 CONF_SECRET = "secret"
@@ -26,7 +29,7 @@ POLL_INTERVAL_SECONDS = 120
 # success. on/off still updates live from advertisements regardless.
 MAX_POLL_INTERVAL_SECONDS = 1800
 
-# Maps a library zone name (GoveeDevice.zones[i].name) to an entity translation
+# Maps a library zone name (Device.zones[i].name) to an entity translation
 # key. The library uses the device's own zone names (from the Govee app/cloud:
 # mainLightToggle / backgroundLightToggle); unknown names fall back to the raw
 # name via the switch's translation-key lookup.

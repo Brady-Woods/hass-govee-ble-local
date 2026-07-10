@@ -1,8 +1,8 @@
 """Tests for the connection coordinator.
 
-The v2 library has no aggregate status read-back: the coordinator just calls
-GoveeDevice.update() (connect + optimistic state) and maps BLE failures to
-UpdateFailed so HA logs them as expected, not as a crash.
+The coordinator calls Device.update() (connect + read-back where supported,
+else optimistic state) and maps BLE failures to UpdateFailed so HA logs them as
+expected, not as a crash.
 """
 from __future__ import annotations
 

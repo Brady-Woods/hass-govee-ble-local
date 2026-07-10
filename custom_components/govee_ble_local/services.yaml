@@ -1,0 +1,4 @@
+capture_session:
+  target:
+    device:
+      integration: govee_ble_local

@@ -1,17 +1,27 @@
 {
   "entity": {
-    "switch": {
-      "upper_ring": {
-        "default": "mdi:wall-sconce-flat-variant"
+    "light": {
+      "segment": {
+        "default": "mdi:led-strip-variant"
       },
-      "lower_panel": {
+      "background_light": {
         "default": "mdi:wall-sconce-flat"
       },
       "left_bar": {
-        "default": "mdi:wall-sconce-flat-variant"
+        "default": "mdi:led-strip-variant"
       },
       "right_bar": {
-        "default": "mdi:wall-sconce-flat-variant"
+        "default": "mdi:led-strip-variant"
+      }
+    },
+    "switch": {
+      "main_light": {
+        "default": "mdi:ceiling-light"
+      }
+    },
+    "button": {
+      "self_test": {
+        "default": "mdi:bug-check"
       }
     },
     "sensor": {
@@ -20,7 +30,18 @@
       },
       "poll_interval": {
         "default": "mdi:timer-outline"
+      },
+      "last_seen": {
+        "default": "mdi:bluetooth"
+      },
+      "last_connected": {
+        "default": "mdi:bluetooth-connect"
       }
+    }
+  },
+  "services": {
+    "capture_session": {
+      "service": "mdi:bug-check"
     }
   }
 }

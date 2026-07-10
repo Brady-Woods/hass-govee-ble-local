@@ -5,18 +5,28 @@ import asyncio
 import logging
 import zlib
 from dataclasses import dataclass
+from typing import Any
 
-from govee_ble_local import Capability, GoveeBleNotSupported, GoveeDevice, create_device
+import voluptuous as vol
+from govee_ble_local import Capability, Device, GoveeBleNotSupported, create_device
 from govee_ble_local.identify import identify
 from homeassistant.components import bluetooth
-from homeassistant.config_entries import ConfigEntry
+from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.const import Platform
-from homeassistant.core import HomeAssistant, callback
-from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.core import (
+    HomeAssistant,
+    ServiceCall,
+    ServiceResponse,
+    SupportsResponse,
+    callback,
+)
+from homeassistant.exceptions import ConfigEntryNotReady, HomeAssistantError
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.service import async_extract_config_entry_ids
 
-from .const import CONF_SECRET, DOMAIN
+from .capture import LogCapture, async_run_self_test
+from .const import CONF_SECRET, DOMAIN, SERVICE_CAPTURE_SESSION
 from .coordinator import GoveeBleLocalCoordinator
 
 _LOGGER = logging.getLogger(__name__)
@@ -25,6 +35,7 @@ PLATFORMS: list[Platform] = [
     Platform.SWITCH,
     Platform.SENSOR,
     Platform.BINARY_SENSOR,
+    Platform.BUTTON,
 ]
 
 
@@ -32,8 +43,9 @@ PLATFORMS: list[Platform] = [
 class GoveeBleLocalRuntimeData:
     """Runtime objects shared between the platforms for one config entry."""
 
-    device: GoveeDevice
+    device: Device
     coordinator: GoveeBleLocalCoordinator
+    log_capture: LogCapture
 
 
 type GoveeBleLocalConfigEntry = ConfigEntry[GoveeBleLocalRuntimeData]
@@ -75,7 +87,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: GoveeBleLocalConfigEntry
     if Capability.SCENES in device.capabilities:
         await hass.async_add_executor_job(lambda: device.scene_names)
 
-    _remove_legacy_zone_entities(hass, address)
+    _remove_legacy_zone_entities(hass, address, device)
+
+    # Always-on WARNING+ capture so unrecognised frames / rejections surface in the
+    # downloadable diagnostics without the user having to enable debug logging.
+    log_capture = LogCapture(address)
+    entry.async_on_unload(log_capture.detach)
 
     coordinator = GoveeBleLocalCoordinator(hass, device, address)
 
@@ -90,19 +107,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: GoveeBleLocalConfigEntry
 
     @callback
     def _sync_device_registry() -> None:
+        # Device-info (wifi MAC, hardware/firmware version, serial) lives on the
+        # DeviceState in the v3 library, populated by read-back where supported.
+        state = device.state
         connections = {(dr.CONNECTION_BLUETOOTH, address)}
-        if device.wifi_mac:
-            connections.add((dr.CONNECTION_NETWORK_MAC, device.wifi_mac))
+        if state.ble_mac:
+            connections.add((dr.CONNECTION_BLUETOOTH, dr.format_mac(state.ble_mac)))
+        if state.wifi_mac:
+            connections.add((dr.CONNECTION_NETWORK_MAC, dr.format_mac(state.wifi_mac)))
         registry = dr.async_get(hass)
         registry.async_get_or_create(
             config_entry_id=entry.entry_id,
             identifiers={(DOMAIN, address)},
             connections=connections,
             manufacturer="Govee",
-            model=device.model,
-            hw_version=device.hardware_version,
-            sw_version=device.firmware_version,
-            serial_number=device.serial_number,
+            model=device.sku,
+            hw_version=state.hardware_version,
+            sw_version=state.firmware_version,
+            serial_number=state.serial_number,
         )
 
     _sync_device_registry()
@@ -116,11 +138,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: GoveeBleLocalConfigEntry
         change: bluetooth.BluetoothChange,
     ) -> None:
         # Refresh the BLEDevice handle for future connections, and update on/off
-        # PASSIVELY from the advertisement (no connection/slot). Push the change
-        # straight to the entities so on/off is live between polls.
+        # PASSIVELY from the advertisement (no connection/slot). The library
+        # parses on/off out of the Govee manufacturer data and reports whether it
+        # changed; push any change straight to the entities so on/off is live
+        # between polls.
+        coordinator.note_advertisement_seen()
         device.update_ble_device(service_info.device)
         if device.ingest_advertisement(service_info):
             coordinator.async_set_updated_data(device.state)
+        else:
+            # Presence/last-seen diagnostics still moved even if on/off didn't.
+            coordinator.async_update_listeners()
 
     entry.async_on_unload(
         bluetooth.async_register_callback(
@@ -131,26 +159,83 @@ async def async_setup_entry(hass: HomeAssistant, entry: GoveeBleLocalConfigEntry
         )
     )
 
-    entry.runtime_data = GoveeBleLocalRuntimeData(device=device, coordinator=coordinator)
+    @callback
+    def _async_unavailable(_info: bluetooth.BluetoothServiceInfoBleak) -> None:
+        # The device stopped advertising; push so the presence/connectivity
+        # sensor flips to "disconnected" promptly.
+        coordinator.async_update_listeners()
+
+    entry.async_on_unload(
+        bluetooth.async_track_unavailable(
+            hass, _async_unavailable, address, connectable=False
+        )
+    )
+
+    entry.runtime_data = GoveeBleLocalRuntimeData(
+        device=device, coordinator=coordinator, log_capture=log_capture
+    )
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    _async_register_services(hass)
     return True
 
 
-@callback
-def _remove_legacy_zone_entities(hass: HomeAssistant, address: str) -> None:
-    """Remove orphaned zone-switch entities from before v0.11.
+def _async_register_services(hass: HomeAssistant) -> None:
+    """Register the integration-wide services once."""
+    if hass.services.has_service(DOMAIN, SERVICE_CAPTURE_SESSION):
+        return
 
-    Zone switches used to be keyed by integer index ({address}_zone_0 /
-    _zone_1); they are now keyed by zone name (_zone_main / _zone_background).
-    The scheme change left the old entities behind as duplicate "unavailable"
-    switches. Drop them so only the current, correctly-named switches remain."""
+    async def _async_capture_session(call: ServiceCall) -> ServiceResponse:
+        """Run the device self-test against each targeted device and return the
+        captured session(s)."""
+        entry_ids = await async_extract_config_entry_ids(hass, call)
+        results: list[Any] = []
+        for entry_id in entry_ids:
+            target = hass.config_entries.async_get_entry(entry_id)
+            if (
+                target is None
+                or target.domain != DOMAIN
+                or target.state is not ConfigEntryState.LOADED
+            ):
+                continue
+            data: GoveeBleLocalRuntimeData = target.runtime_data
+            report = await async_run_self_test(data.device)
+            data.coordinator.last_self_test = report
+            results.append(report)
+        if not results:
+            raise HomeAssistantError(
+                "No loaded Govee BLE Local device matched the service target"
+            )
+        return {"results": results}
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_CAPTURE_SESSION,
+        _async_capture_session,
+        # Target-only service (device/entity/area); allow the target keys through.
+        schema=vol.Schema({}, extra=vol.ALLOW_EXTRA),
+        supports_response=SupportsResponse.ONLY,
+    )
+
+
+@callback
+def _remove_legacy_zone_entities(hass: HomeAssistant, address: str, device: Device) -> None:
+    """Remove orphaned zone-switch entities left by earlier entity schemes.
+
+    1. Pre-v0.11 zone switches were keyed by integer index ({address}_zone_0 /
+       _zone_1); they are now keyed by zone name (_zone_main / _zone_background).
+    2. A colour-controllable zone (one with segments) is now a light, not a
+       switch, so its old switch entity ({address}_zone_{name}) is orphaned.
+
+    Drop both so only the current entities remain."""
     registry = er.async_get(hass)
-    for legacy_index in ("0", "1"):
-        entity_id = registry.async_get_entity_id(
-            "switch", DOMAIN, f"{address}_zone_{legacy_index}"
-        )
+    stale_unique_ids = [f"{address}_zone_{i}" for i in ("0", "1")]
+    stale_unique_ids += [
+        f"{address}_zone_{zone.name}" for zone in device.zones if zone.segments
+    ]
+    for unique_id in stale_unique_ids:
+        entity_id = registry.async_get_entity_id("switch", DOMAIN, unique_id)
         if entity_id is not None:
-            _LOGGER.debug("Removing legacy zone entity %s", entity_id)
+            _LOGGER.debug("Removing orphaned zone switch %s", entity_id)
             registry.async_remove(entity_id)
 
 
@@ -158,4 +243,13 @@ async def async_unload_entry(hass: HomeAssistant, entry: GoveeBleLocalConfigEntr
     """Unload a config entry, disconnecting the BLE device."""
     _LOGGER.debug("Unloading entry for %s", entry.data["address"])
     await entry.runtime_data.device.stop()
-    return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    # Drop the shared service once the last device is gone.
+    other_loaded = [
+        e
+        for e in hass.config_entries.async_entries(DOMAIN)
+        if e.entry_id != entry.entry_id and e.state is ConfigEntryState.LOADED
+    ]
+    if not other_loaded and hass.services.has_service(DOMAIN, SERVICE_CAPTURE_SESSION):
+        hass.services.async_remove(DOMAIN, SERVICE_CAPTURE_SESSION)
+    return unloaded

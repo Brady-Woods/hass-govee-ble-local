@@ -9,7 +9,9 @@ graph exactly when a device is struggling.
 """
 from __future__ import annotations
 
-from govee_ble_local import GoveeDevice
+from datetime import datetime
+
+from govee_ble_local import Device
 from homeassistant.components.sensor import (
     SensorDeviceClass,
     SensorEntity,
@@ -45,6 +47,8 @@ async def async_setup_entry(
             GoveeBleLocalRssiSensor(coordinator, device, address, entry.title),
             GoveeBleLocalConnectionFailuresSensor(coordinator, device, address, entry.title),
             GoveeBleLocalPollIntervalSensor(coordinator, device, address, entry.title),
+            GoveeBleLocalLastSeenSensor(coordinator, device, address, entry.title),
+            GoveeBleLocalLastConnectedSensor(coordinator, device, address, entry.title),
         ]
     )
 
@@ -57,11 +61,11 @@ class _DiagnosticSensor(GoveeBleLocalEntity, SensorEntity):
     def __init__(
         self,
         coordinator: GoveeBleLocalCoordinator,
-        device: GoveeDevice,
+        device: Device,
         address: str,
         device_name: str,
     ) -> None:
-        super().__init__(coordinator, address, device_name, device.model)
+        super().__init__(coordinator, address, device_name, device.sku)
 
     @property
     def available(self) -> bool:
@@ -81,7 +85,7 @@ class GoveeBleLocalRssiSensor(_DiagnosticSensor):
     def __init__(
         self,
         coordinator: GoveeBleLocalCoordinator,
-        device: GoveeDevice,
+        device: Device,
         address: str,
         device_name: str,
     ) -> None:
@@ -106,7 +110,7 @@ class GoveeBleLocalConnectionFailuresSensor(_DiagnosticSensor):
     def __init__(
         self,
         coordinator: GoveeBleLocalCoordinator,
-        device: GoveeDevice,
+        device: Device,
         address: str,
         device_name: str,
     ) -> None:
@@ -129,7 +133,7 @@ class GoveeBleLocalPollIntervalSensor(_DiagnosticSensor):
     def __init__(
         self,
         coordinator: GoveeBleLocalCoordinator,
-        device: GoveeDevice,
+        device: Device,
         address: str,
         device_name: str,
     ) -> None:
@@ -140,3 +144,45 @@ class GoveeBleLocalPollIntervalSensor(_DiagnosticSensor):
     def native_value(self) -> int | None:
         interval = self.coordinator.update_interval
         return int(interval.total_seconds()) if interval else None
+
+
+class GoveeBleLocalLastSeenSensor(_DiagnosticSensor):
+    """When the device's advertisement was last seen (passive reachability)."""
+
+    _attr_translation_key = "last_seen"
+    _attr_device_class = SensorDeviceClass.TIMESTAMP
+
+    def __init__(
+        self,
+        coordinator: GoveeBleLocalCoordinator,
+        device: Device,
+        address: str,
+        device_name: str,
+    ) -> None:
+        super().__init__(coordinator, device, address, device_name)
+        self._attr_unique_id = f"{address}_last_seen"
+
+    @property
+    def native_value(self) -> datetime | None:
+        return self.coordinator.last_seen
+
+
+class GoveeBleLocalLastConnectedSensor(_DiagnosticSensor):
+    """When the device was last successfully connected to (control path)."""
+
+    _attr_translation_key = "last_connected"
+    _attr_device_class = SensorDeviceClass.TIMESTAMP
+
+    def __init__(
+        self,
+        coordinator: GoveeBleLocalCoordinator,
+        device: Device,
+        address: str,
+        device_name: str,
+    ) -> None:
+        super().__init__(coordinator, device, address, device_name)
+        self._attr_unique_id = f"{address}_last_connected"
+
+    @property
+    def native_value(self) -> datetime | None:
+        return self.coordinator.last_connected

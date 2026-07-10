@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 from datetime import timedelta
-from unittest.mock import AsyncMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 from bleak.exc import BleakError
 from homeassistant.components.sensor import SensorStateClass
@@ -24,7 +25,13 @@ async def test_diagnostic_sensors_created(
 ) -> None:
     """All three diagnostic sensors are registered as DIAGNOSTIC entities."""
     registry = er.async_get(hass)
-    for suffix in ("rssi", "connection_failures", "poll_interval"):
+    for suffix in (
+        "rssi",
+        "connection_failures",
+        "poll_interval",
+        "last_seen",
+        "last_connected",
+    ):
         entity_id = registry.async_get_entity_id("sensor", DOMAIN, f"{ADDRESS}_{suffix}")
         assert entity_id is not None, suffix
         entry = registry.async_get(entity_id)
@@ -77,3 +84,30 @@ async def test_failures_and_poll_interval_track_coordinator(
     assert hass.states.get(fail_id).state != "unavailable"
     assert int(hass.states.get(poll_id).state) > POLL_INTERVAL_SECONDS
     assert coordinator.update_interval > timedelta(seconds=POLL_INTERVAL_SECONDS)
+
+
+async def test_last_connected_and_last_seen(
+    hass: HomeAssistant,
+    setup_integration: MockConfigEntry,
+    mock_bluetooth: SimpleNamespace,
+) -> None:
+    """last_connected is stamped by a successful poll; last_seen by an advert."""
+    coordinator = setup_integration.runtime_data.coordinator
+    registry = er.async_get(hass)
+    connected_id = registry.async_get_entity_id(
+        "sensor", DOMAIN, f"{ADDRESS}_last_connected"
+    )
+    seen_id = registry.async_get_entity_id("sensor", DOMAIN, f"{ADDRESS}_last_seen")
+    assert connected_id is not None and seen_id is not None
+
+    # The first (successful) refresh during setup stamped last_connected.
+    assert coordinator.last_connected is not None
+    assert hass.states.get(connected_id).state not in ("unknown", "unavailable")
+
+    # last_seen starts empty and is set when a passive advertisement arrives.
+    assert coordinator.last_seen is None
+    advert_callback = mock_bluetooth.register.call_args.args[1]
+    advert_callback(mock_bluetooth.service_info, MagicMock())
+    await hass.async_block_till_done()
+    assert coordinator.last_seen is not None
+    assert hass.states.get(seen_id).state not in ("unknown", "unavailable")

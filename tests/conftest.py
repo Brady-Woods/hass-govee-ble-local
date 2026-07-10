@@ -26,22 +26,23 @@ def make_device(
     sku: str = "H60A6",
     min_kelvin: int = 2700,
     max_kelvin: int = 6500,
+    segments: int = 13,
 ) -> AsyncMock:
-    """Build a mock GoveeDevice with the given capability surface."""
+    """Build a mock v3 Device with the given capability surface."""
     device = AsyncMock()
     device.address = ADDRESS
     device.sku = sku
-    device.model = sku
     device.capabilities = capabilities
     device.zones = zones
+    # Segment count comes off the device's DeviceProfile (light.py reads
+    # device.profile.segments to build one entity per segment).
+    device.profile.segments = segments
     device.scene_names = SCENE_NAMES if scene_names is None else scene_names
     device.active_scene = None
     device.min_kelvin = min_kelvin
     device.max_kelvin = max_kelvin
-    device.wifi_mac = None
-    device.hardware_version = None
-    device.firmware_version = None
-    device.serial_number = None
+    # Device-info + on/off live on the DeviceState in the v3 library; the plugin
+    # reads them through device.state (not standalone Device properties).
     device.update.return_value = DeviceState(optimistic=True)
     device.update_ble_device = MagicMock()
     device.ingest_advertisement = MagicMock(return_value=False)
@@ -74,7 +75,7 @@ def ble_device() -> BLEDevice:
 
 @pytest.fixture
 def mock_device() -> Generator[AsyncMock]:
-    """Patch create_device with a mock GoveeDevice (H60A6 capability surface)."""
+    """Patch create_device with a mock Device (H60A6 capability surface)."""
     device = make_device()
     with patch(
         "custom_components.govee_ble_local.create_device", return_value=device
@@ -115,10 +116,14 @@ def mock_bluetooth(ble_device: BLEDevice) -> Generator[SimpleNamespace]:
             "custom_components.govee_ble_local.bluetooth.async_register_callback",
             return_value=MagicMock(),
         ) as register,
+        patch(
+            "custom_components.govee_ble_local.bluetooth.async_track_unavailable",
+            return_value=MagicMock(),
+        ) as track_unavailable,
     ):
         yield SimpleNamespace(
             ble_lookup=ble_lookup, register=register, last_info=last_info,
-            service_info=service_info,
+            service_info=service_info, track_unavailable=track_unavailable,
         )
 
 

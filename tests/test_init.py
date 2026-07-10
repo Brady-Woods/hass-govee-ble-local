@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from bleak.exc import BleakError
-from govee_ble_local import Capability, GoveeBleNotSupported
+from govee_ble_local import Capability, DeviceState, GoveeBleNotSupported
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr
@@ -15,7 +15,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from custom_components.govee_ble_local.const import DOMAIN
 
 from .conftest import make_device
-from .const import ADDRESS
+from .const import ADDRESS, TITLE
 
 
 async def test_setup_and_unload(
@@ -124,24 +124,83 @@ async def test_passive_advert_pushes_state(
     push.assert_called_once()
 
 
-async def test_setup_removes_legacy_zone_entities(
+async def test_ble_mac_added_to_device_registry(
+    hass: HomeAssistant, mock_bluetooth: SimpleNamespace
+) -> None:
+    """A device that reads back a distinct BLE MAC gets it as a second
+    Bluetooth connection on the registry entry."""
+    device = make_device()
+    device.state = DeviceState(optimistic=False, ble_mac="A4:C1:38:AA:BB:CC")
+    device.update.return_value = device.state
+    entry = MockConfigEntry(
+        domain=DOMAIN, title=TITLE, unique_id=ADDRESS,
+        data={"address": ADDRESS, "sku": "H60A6"},
+    )
+    entry.add_to_hass(hass)
+    with patch("custom_components.govee_ble_local.create_device", return_value=device):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    registry = dr.async_get(hass)
+    dev = registry.async_get_device(identifiers={(DOMAIN, ADDRESS)})
+    assert dev is not None
+    assert (dr.CONNECTION_BLUETOOTH, dr.format_mac("A4:C1:38:AA:BB:CC")) in dev.connections
+    assert await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_capture_session_service_returns_report(
+    hass: HomeAssistant, setup_integration: MockConfigEntry, mock_device: AsyncMock
+) -> None:
+    """The capture_session service runs the self-test for the targeted device and
+    returns the captured report as response data."""
+    device_registry = dr.async_get(hass)
+    device_entry = device_registry.async_get_device(identifiers={(DOMAIN, ADDRESS)})
+    assert device_entry is not None
+
+    response = await hass.services.async_call(
+        DOMAIN,
+        "capture_session",
+        {"device_id": device_entry.id},
+        blocking=True,
+        return_response=True,
+    )
+
+    assert response is not None
+    assert response["results"], response
+    assert response["results"][0]["sku"] == "H60A6"
+    # Stored for the diagnostics dump too.
+    assert setup_integration.runtime_data.coordinator.last_self_test is not None
+
+
+async def test_setup_removes_legacy_and_orphaned_zone_switches(
     hass: HomeAssistant, setup_integration: MockConfigEntry
 ) -> None:
-    """Orphaned old integer-indexed zone switches are removed on setup."""
+    """Setup drops both pre-v0.11 integer-indexed zone switches and switches for
+    zones that are now colour lights, while keeping on/off-only zone switches."""
     registry = er.async_get(hass)
-    # Simulate a pre-v0.11 orphaned zone switch.
+    # A pre-v0.11 integer-indexed switch, and a switch for `main` - which has
+    # segments in the test fixture and is now a light, so its switch is orphaned.
     registry.async_get_or_create(
         "switch", DOMAIN, f"{ADDRESS}_zone_1",
         config_entry=setup_integration, suggested_object_id="legacy_ring",
     )
+    registry.async_get_or_create(
+        "switch", DOMAIN, f"{ADDRESS}_zone_main",
+        config_entry=setup_integration, suggested_object_id="legacy_main",
+    )
     assert registry.async_get_entity_id("switch", DOMAIN, f"{ADDRESS}_zone_1") is not None
+    assert registry.async_get_entity_id("switch", DOMAIN, f"{ADDRESS}_zone_main") is not None
 
     await hass.config_entries.async_reload(setup_integration.entry_id)
     await hass.async_block_till_done()
 
     assert registry.async_get_entity_id("switch", DOMAIN, f"{ADDRESS}_zone_1") is None
-    # current, name-keyed switches still present
-    assert registry.async_get_entity_id("switch", DOMAIN, f"{ADDRESS}_zone_main") is not None
+    assert registry.async_get_entity_id("switch", DOMAIN, f"{ADDRESS}_zone_main") is None
+    # The on/off-only zone (background, no segments) keeps its switch.
+    assert (
+        registry.async_get_entity_id("switch", DOMAIN, f"{ADDRESS}_zone_background")
+        is not None
+    )
 
 
 async def test_setup_passes_secret_to_library(

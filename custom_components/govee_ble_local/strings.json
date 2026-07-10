@@ -51,9 +51,9 @@
     }
   },
   "entity": {
-    "switch": {
-      "main_light": {
-        "name": "Main light"
+    "light": {
+      "segment": {
+        "name": "Segment {number}"
       },
       "background_light": {
         "name": "Background light"
@@ -65,13 +65,35 @@
         "name": "Right bar"
       }
     },
+    "switch": {
+      "main_light": {
+        "name": "Main light"
+      }
+    },
+    "button": {
+      "self_test": {
+        "name": "Run self-test"
+      }
+    },
     "sensor": {
       "connection_failures": {
         "name": "Connection failures"
       },
       "poll_interval": {
         "name": "Poll interval"
+      },
+      "last_seen": {
+        "name": "Last seen"
+      },
+      "last_connected": {
+        "name": "Last connected"
       }
+    }
+  },
+  "services": {
+    "capture_session": {
+      "name": "Capture session",
+      "description": "Run the full device self-test against the targeted Govee device(s) and return the captured BLE session (decoded frames + per-step ACK/read-back results)."
     }
   },
   "exceptions": {

@@ -19,7 +19,7 @@ from bleak.exc import BleakError
 from govee_ble_local import (
     GoveeBleError,
     create_device,
-    device_class_for_sku,
+    device_profile_for,
     is_supported_sku,
 )
 from govee_ble_local.identify import identify
@@ -46,9 +46,9 @@ def _supported_sku(info: BluetoothServiceInfoBleak) -> str | None:
 
 
 def _requires_secret(sku: str) -> bool:
-    """True if this SKU's device class gates commands behind a secret key."""
-    cls = device_class_for_sku(sku)
-    return bool(cls and cls.requires_secret)
+    """True if this SKU's device profile gates commands behind a secret key."""
+    profile = device_profile_for(sku)
+    return bool(profile and profile.requires_secret)
 
 
 def _parse_secret(raw: str) -> str | None:
@@ -154,9 +154,9 @@ class GoveeBleLocalConfigFlow(ConfigFlow, domain=DOMAIN):
 
     async def _read_secret_from_device(self, address: str, sku: str) -> str | None:
         """Try to read the 8-byte secret straight off the device over BLE
-        (GoveeDevice.read_secret / `aa b1`). Works only while the device is
-        UNBOUND (factory-reset, not paired to the Govee app); a bound device
-        declines. Returns the secret as hex, or None if it couldn't be read."""
+        (Device.read_secret / `aa b1`). Works only while the device is UNBOUND
+        (factory-reset, not paired to the Govee app); a bound device declines.
+        Returns the secret as hex, or None if it couldn't be read."""
         ble_device = async_ble_device_from_address(self.hass, address, connectable=True)
         if ble_device is None:
             return None

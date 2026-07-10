@@ -1,21 +1,23 @@
 """Connection coordinator for a Govee BLE device, shared by all entities.
 
-The v2 library has no aggregate status read-back: ``GoveeDevice.update()``
-ensures the connection is alive and returns the device's best-known
-(optimistic) :class:`DeviceState`. This coordinator therefore exists mainly for
-connection management + availability tracking on a slow cadence; entities track
-their own optimistic state from the commands they issue.
+``Device.update()`` connects and reads back real state for devices that support
+it (profile ``readback`` of ``status``/``polled``) and otherwise returns the
+device's best-known (optimistic) :class:`DeviceState`. This coordinator manages
+that connection + availability tracking on a slow cadence; on/off is also
+tracked passively from advertisements (no connection) in ``__init__``.
 """
 from __future__ import annotations
 
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta
+from typing import Any
 
 from bleak.exc import BleakError
-from govee_ble_local import DeviceState, GoveeBleError, GoveeDevice
+from govee_ble_local import Device, DeviceState, GoveeBleError
 from homeassistant.components import bluetooth
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN, MAX_POLL_INTERVAL_SECONDS, POLL_INTERVAL_SECONDS
 
@@ -28,7 +30,7 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
     def __init__(
         self,
         hass: HomeAssistant,
-        device: GoveeDevice,
+        device: Device,
         address: str,
     ) -> None:
         super().__init__(
@@ -45,6 +47,14 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         # Read-only diagnostics surfaced by the sensor/binary_sensor platforms.
         self.rssi: int | None = None
         self.total_failures = 0
+        # "Last seen" = most recent advertisement (passive, no connection),
+        # stamped by the advertisement callback in __init__. "Last connected" =
+        # most recent successful connect-poll. The two answer different
+        # questions: reachability vs. successful control.
+        self.last_seen: datetime | None = None
+        self.last_connected: datetime | None = None
+        # Most recent self-test report (button / capture_session service), for diagnostics.
+        self.last_self_test: dict[str, Any] | None = None
 
     async def _async_update_data(self) -> DeviceState:
         # Sample the last advertisement's RSSI (no connection needed) so the
@@ -68,10 +78,16 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
             self._apply_backoff()
             raise UpdateFailed(f"Error communicating with device: {err}") from err
         else:
+            self.last_connected = dt_util.utcnow()
             if self._consecutive_failures:
                 self._consecutive_failures = 0
                 self.update_interval = self._base_interval
             return data
+
+    @callback
+    def note_advertisement_seen(self) -> None:
+        """Record that a passive advertisement just arrived (device reachable)."""
+        self.last_seen = dt_util.utcnow()
 
     @callback
     def _async_refresh_finished(self) -> None:
