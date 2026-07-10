@@ -17,6 +17,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
 from .coordinator import GoveeBleLocalCoordinator
+from .helpers import clean_mac, clean_text
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -61,17 +62,19 @@ class GoveeBleLocalEntity(CoordinatorEntity[GoveeBleLocalCoordinator]):
     def device_info(self) -> DeviceInfo:
         state = self.coordinator.data
         connections = {(CONNECTION_BLUETOOTH, self._address)}
-        if state is not None and state.ble_mac:
-            connections.add((CONNECTION_BLUETOOTH, format_mac(state.ble_mac)))
-        if state is not None and state.wifi_mac:
-            connections.add((CONNECTION_NETWORK_MAC, format_mac(state.wifi_mac)))
+        ble_mac = clean_mac(state.ble_mac) if state is not None else None
+        wifi_mac = clean_mac(state.wifi_mac) if state is not None else None
+        if ble_mac:
+            connections.add((CONNECTION_BLUETOOTH, format_mac(ble_mac)))
+        if wifi_mac:
+            connections.add((CONNECTION_NETWORK_MAC, format_mac(wifi_mac)))
         return DeviceInfo(
             identifiers={(DOMAIN, self._address)},
             connections=connections,
             name=self._device_name,
             manufacturer="Govee",
             model=self._model,
-            hw_version=state.hardware_version if state is not None else None,
-            sw_version=state.firmware_version if state is not None else None,
-            serial_number=state.serial_number if state is not None else None,
+            hw_version=clean_text(state.hardware_version) if state is not None else None,
+            sw_version=clean_text(state.firmware_version) if state is not None else None,
+            serial_number=clean_text(state.serial_number) if state is not None else None,
         )

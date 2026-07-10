@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from bleak.exc import BleakError
-from govee_ble_local import Capability, DeviceState, Segment
+from govee_ble_local import Capability, DeviceState, Segment, Zone
 from homeassistant.components.light import (
     ATTR_BRIGHTNESS,
     ATTR_COLOR_TEMP_KELVIN,
@@ -269,6 +269,11 @@ async def test_segment_turn_on_off_via_service(
     )
     mock_device.set_segment_brightness.assert_awaited_with([1], 50)
 
+    await hass.services.async_call(
+        "light", "turn_on", {"entity_id": eid, "color_temp_kelvin": 4000}, blocking=True
+    )
+    mock_device.set_segment_color_temp.assert_awaited_with([1], 4000)
+
     await hass.services.async_call("light", "turn_off", {"entity_id": eid}, blocking=True)
     mock_device.set_segment_rgb.assert_awaited_with([1], (0, 0, 0))
     assert hass.states.get(eid).state == "off"
@@ -340,9 +345,37 @@ async def test_zone_light_controls(
     )
     mock_device.set_segment_brightness.assert_awaited_with(list(range(13)), 50)
 
+    # H60A6 supports colour temp -> the zone offers independent per-zone kelvin.
+    await hass.services.async_call(
+        "light", "turn_on", {"entity_id": eid, "color_temp_kelvin": 4000}, blocking=True
+    )
+    mock_device.set_zone_color_temp.assert_awaited_with("main", 4000)
+    assert ColorMode.COLOR_TEMP in hass.states.get(eid).attributes["supported_color_modes"]
+
     await hass.services.async_call("light", "turn_off", {"entity_id": eid}, blocking=True)
     mock_device.set_zone_power.assert_awaited_with("main", False)
     assert hass.states.get(eid).state == "off"
+
+
+def test_zone_and_segment_lights_rgb_only_without_color_temp(hass: HomeAssistant) -> None:
+    """A fixture without COLOR_TEMP (e.g. H61A8) gets RGB-only zone/segment lights."""
+    device = make_device(
+        capabilities=frozenset(
+            {Capability.POWER, Capability.BRIGHTNESS, Capability.RGB,
+             Capability.SEGMENTS, Capability.SCENES}
+        ),
+        zones=(Zone("strip", power_index=0, segments=(0, 1, 2)),),
+        min_kelvin=0,
+        max_kelvin=0,
+        sku="H61A8",
+    )
+    coordinator = GoveeBleLocalCoordinator(hass, device, ADDRESS)
+    coordinator.data = DeviceState()
+    _CREATED.append(coordinator)
+    zone = GoveeBleLocalZoneLight(coordinator, device, ADDRESS, TITLE, "strip")
+    seg = GoveeBleLocalSegmentLight(coordinator, device, ADDRESS, TITLE, 0)
+    assert zone.supported_color_modes == {ColorMode.RGB}
+    assert seg.supported_color_modes == {ColorMode.RGB}
 
 
 async def test_zone_light_is_on_tracks_zone_power(hass: HomeAssistant) -> None:

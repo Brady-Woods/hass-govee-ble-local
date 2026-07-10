@@ -33,9 +33,13 @@ Treat their read-back values as provisional.
   shared-A), no hardware on hand. H60A6 mechanism-A is the verified reference.
 - **Device-info read-back (`serial` / `wifi_mac` / `hw` / `fw`) and `ble_mac`.** Library now
   reads aa 07 (basic/wifi/SN) once into `DeviceState`; the integration surfaces `wifi_mac`/
-  `ble_mac` as registry connections and hw/fw/serial as device-info. **Partial:** serial came
-  back on H6047/H6008; `wifi_mac`/`hw`/`fw` still need a clean capture, and `ble_mac` stays
-  `None` unless a device reports a MAC distinct from its connectable address.
+  `ble_mac` as registry connections and hw/fw/serial as device-info. **Observed returning
+  all-zeros** on live hardware (MAC `00:00:00:00:00:00`, versions/serial `0`) — the aa 07
+  parse yields zeroed fields for at least some SKUs. The integration now defensively drops
+  all-zero MAC / `0`-ish version+serial (`helpers.clean_mac`/`clean_text`) so it shows nothing
+  rather than garbage; the underlying parse should return `None` for zeroed fields (library
+  fix) and the layout still needs a clean capture to verify.
+
 
 ## 3. Per-segment light entities — behavioural note
 
@@ -45,6 +49,11 @@ Segment lights (H60A6 / H6047 / H61A8 / H6641) model "off" as **setting the segm
 some declared segment entities may never report state until read-back is confirmed (see §2).
 
 ---
+
+*Resolved:* Per-zone/per-segment **colour temperature** — the library added
+`set_zone_color_temp` / `set_segment_color_temp` (masked CCT) and corrected the H60A6 topology
+(main = segment 12, background = 0–11, independently addressable, live-verified). The zone and
+segment lights now expose `ColorMode.COLOR_TEMP` wherever the fixture supports kelvin.
 
 *Resolved:* `Device.read_secret()` (config-flow secret auto-read) and
 `Device.ingest_advertisement()` (passive on/off) were restored upstream and are used directly.

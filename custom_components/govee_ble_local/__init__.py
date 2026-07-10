@@ -28,6 +28,7 @@ from homeassistant.helpers.service import async_extract_config_entry_ids
 from .capture import LogCapture, async_run_self_test
 from .const import CONF_SECRET, DOMAIN, SERVICE_CAPTURE_SESSION
 from .coordinator import GoveeBleLocalCoordinator
+from .helpers import clean_mac, clean_text
 
 _LOGGER = logging.getLogger(__name__)
 PLATFORMS: list[Platform] = [
@@ -111,10 +112,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: GoveeBleLocalConfigEntry
         # DeviceState in the v3 library, populated by read-back where supported.
         state = device.state
         connections = {(dr.CONNECTION_BLUETOOTH, address)}
-        if state.ble_mac:
-            connections.add((dr.CONNECTION_BLUETOOTH, dr.format_mac(state.ble_mac)))
-        if state.wifi_mac:
-            connections.add((dr.CONNECTION_NETWORK_MAC, dr.format_mac(state.wifi_mac)))
+        ble_mac = clean_mac(state.ble_mac)
+        wifi_mac = clean_mac(state.wifi_mac)
+        if ble_mac:
+            connections.add((dr.CONNECTION_BLUETOOTH, dr.format_mac(ble_mac)))
+        if wifi_mac:
+            connections.add((dr.CONNECTION_NETWORK_MAC, dr.format_mac(wifi_mac)))
         registry = dr.async_get(hass)
         registry.async_get_or_create(
             config_entry_id=entry.entry_id,
@@ -122,9 +125,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: GoveeBleLocalConfigEntry
             connections=connections,
             manufacturer="Govee",
             model=device.sku,
-            hw_version=state.hardware_version,
-            sw_version=state.firmware_version,
-            serial_number=state.serial_number,
+            hw_version=clean_text(state.hardware_version),
+            sw_version=clean_text(state.firmware_version),
+            serial_number=clean_text(state.serial_number),
         )
 
     _sync_device_registry()

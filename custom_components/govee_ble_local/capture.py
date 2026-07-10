@@ -205,6 +205,11 @@ async def async_run_self_test(device: Device) -> dict[str, Any]:
                 await step(f"scene:{name}", _scene, _scene_ok)
         if Capability.SEGMENTS in caps and device.profile.segments:
             await step("segment_0_rgb", lambda: device.set_segment_rgb([0], (255, 0, 0)))
+            if Capability.COLOR_TEMP in caps:
+                await step(
+                    "segment_0_color_temp",
+                    lambda: device.set_segment_color_temp([0], _mid_kelvin(device)),
+                )
         for zone in device.zones:
 
             def _zone_on(name: str = zone.name) -> Awaitable[None]:
@@ -220,6 +225,12 @@ async def async_run_self_test(device: Device) -> dict[str, Any]:
                     return device.set_zone_rgb(name, (0, 255, 0))
 
                 await step(f"zone_rgb:{zone.name}", _zone_rgb)
+                if Capability.COLOR_TEMP in caps:
+
+                    def _zone_cct(name: str = zone.name) -> Awaitable[None]:
+                        return device.set_zone_color_temp(name, _mid_kelvin(device))
+
+                    await step(f"zone_color_temp:{zone.name}", _zone_cct)
 
         await _restore(device, snap)
 
