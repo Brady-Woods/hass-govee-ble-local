@@ -31,14 +31,18 @@ Treat their read-back values as provisional.
   **empty 0xAC**, so mechanism-A on H6047 is unconfirmed — segment colours may not populate.
 - **H61A8 / H6052 / H6641 segment/colour read-back.** Source-modeled (mechanism-B / -C /
   shared-A), no hardware on hand. H60A6 mechanism-A is the verified reference.
-- **Device-info read-back (`serial` / `wifi_mac` / `hw` / `fw`) and `ble_mac`.** Library now
-  reads aa 07 (basic/wifi/SN) once into `DeviceState`; the integration surfaces `wifi_mac`/
-  `ble_mac` as registry connections and hw/fw/serial as device-info. **Observed returning
-  all-zeros** on live hardware (MAC `00:00:00:00:00:00`, versions/serial `0`) — the aa 07
-  parse yields zeroed fields for at least some SKUs. The integration now defensively drops
-  all-zero MAC / `0`-ish version+serial (`helpers.clean_mac`/`clean_text`) so it shows nothing
-  rather than garbage; the underlying parse should return `None` for zeroed fields (library
-  fix) and the layout still needs a clean capture to verify.
+- **Device-info read-back for BLE-only devices (e.g. H60A6) — v3 REGRESSION.** v2 recovered
+  `wifi_mac` + `hardware_version` for BLE-only fixtures from the **0xAC status burst**
+  (`ble/status.py:_anchor_device_info` — reversed Wi-Fi MAC + hardware version at fixed offsets;
+  its comment: *"this is how BLE-only devices (e.g. H60A6) report their hardware version; wifi
+  bytes are zero"* via the aa 07 query). v3's `_read_device_info` reads **only** the aa 07
+  device-info queries (0x10/0x11/0x02), which return **all-zeros** for the H60A6 → the HA
+  device-info panel lost fw/hw/Wi-Fi-MAC that it showed pre-v3. **Library fix:** re-add the
+  0xAC-status-anchored `wifi_mac`/`hardware_version` extraction (populate them from
+  `reassemble.parse_status` for `readback="status"` devices) as v2 did. Meanwhile the
+  integration drops all-zero MAC / `0`-ish version+serial (`helpers.clean_mac`/`clean_text`) so
+  it shows nothing rather than garbage; it will display the real values automatically once the
+  library repopulates `state.wifi_mac`/`hardware_version` from the status burst.
 
 
 ## 3. Per-segment light entities — behavioural note

@@ -55,6 +55,9 @@
       "segment": {
         "name": "Segment {number}"
       },
+      "main_light": {
+        "name": "Main light"
+      },
       "background_light": {
         "name": "Background light"
       },
