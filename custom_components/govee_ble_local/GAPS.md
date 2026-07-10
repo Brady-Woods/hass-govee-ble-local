@@ -31,18 +31,6 @@ Treat their read-back values as provisional.
   **empty 0xAC**, so mechanism-A on H6047 is unconfirmed — segment colours may not populate.
 - **H61A8 / H6052 / H6641 segment/colour read-back.** Source-modeled (mechanism-B / -C /
   shared-A), no hardware on hand. H60A6 mechanism-A is the verified reference.
-- **Device-info read-back for BLE-only devices (e.g. H60A6) — v3 REGRESSION.** v2 recovered
-  `wifi_mac` + `hardware_version` for BLE-only fixtures from the **0xAC status burst**
-  (`ble/status.py:_anchor_device_info` — reversed Wi-Fi MAC + hardware version at fixed offsets;
-  its comment: *"this is how BLE-only devices (e.g. H60A6) report their hardware version; wifi
-  bytes are zero"* via the aa 07 query). v3's `_read_device_info` reads **only** the aa 07
-  device-info queries (0x10/0x11/0x02), which return **all-zeros** for the H60A6 → the HA
-  device-info panel lost fw/hw/Wi-Fi-MAC that it showed pre-v3. **Library fix:** re-add the
-  0xAC-status-anchored `wifi_mac`/`hardware_version` extraction (populate them from
-  `reassemble.parse_status` for `readback="status"` devices) as v2 did. Meanwhile the
-  integration drops all-zero MAC / `0`-ish version+serial (`helpers.clean_mac`/`clean_text`) so
-  it shows nothing rather than garbage; it will display the real values automatically once the
-  library repopulates `state.wifi_mac`/`hardware_version` from the status burst.
 
 
 ## 3. Per-segment light entities — behavioural note
@@ -53,6 +41,14 @@ Segment lights (H60A6 / H6047 / H61A8 / H6641) model "off" as **setting the segm
 some declared segment entities may never report state until read-back is confirmed (see §2).
 
 ---
+
+*Resolved:* **Device-info for BLE-only devices (H60A6)** — the library re-added the
+`0xAC`-status-anchored extraction (`reassemble.anchor_device_info`, byte-exact from v2) plus
+zero-gating in `parse_device_info`, so `readback="status"` devices repopulate
+`state.wifi_mac` + `hardware_version` from the status burst (their only source). The HA panel's
+Wi-Fi-MAC / hardware version return; the integration's `clean_mac`/`clean_text` guard is now
+belt-and-suspenders rather than the thing hiding data. (Firmware/serial still only where the
+`aa 07` queries answer non-zero.)
 
 *Resolved:* Per-zone/per-segment **colour temperature** — the library added
 `set_zone_color_temp` / `set_segment_color_temp` (masked CCT) and corrected the H60A6 topology
