@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-07-11
+
+First stable release, committing to Semantic Versioning. Verified against the
+`govee-ble-local` library's `v1.0.0` release with no regressions (mypy `--strict`, full test
+suite, ≥95% coverage).
+
+### Changed
+- **Pin the library requirement to `govee-ble-local @ …@v1.0.0`** (was unpinned `@master`), for
+  reproducible installs now that the library has a stable tagged release — the pre-1.0
+  `3.0.0.dev0` version collisions are gone.
+
 ### Added
 - Placeholder brand assets under `brands/` (`icon.png`/`icon@2x.png` 256/512 square,
   `logo.png`/`logo@2x.png` 256×128 / 512×256) at the home-assistant/brands sizes, plus a
@@ -58,6 +69,7 @@ Migration to the `govee-ble-local` v3 library and a large feature expansion.
 - Fixed / added entity icons and names; on/off tracked passively from advertisements between
   polls.
 
-[Unreleased]: https://github.com/Brady-Woods/hass-govee-ble-local/compare/v0.12.1...HEAD
+[Unreleased]: https://github.com/Brady-Woods/hass-govee-ble-local/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/Brady-Woods/hass-govee-ble-local/compare/v0.12.1...v1.0.0
 [0.12.1]: https://github.com/Brady-Woods/hass-govee-ble-local/compare/v0.12.0...v0.12.1
 [0.12.0]: https://github.com/Brady-Woods/hass-govee-ble-local/releases/tag/v0.12.0
