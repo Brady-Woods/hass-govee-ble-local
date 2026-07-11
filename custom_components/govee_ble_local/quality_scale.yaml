@@ -9,8 +9,11 @@
 rules:
   # ------------------------------------------------------------------ Bronze
   action-setup:
-    status: exempt
-    comment: Integration registers no custom service actions.
+    status: done
+    comment: >
+      The capture_session service action is registered in async_setup (not
+      async_setup_entry), so it exists integration-wide and raises a clear
+      HomeAssistantError when the targeted device's entry isn't loaded.
   appropriate-polling: done
   brands:
     status: todo
@@ -36,8 +39,10 @@ rules:
       required for HA core submission but is not needed for HACS/custom-
       component distribution.
   docs-actions:
-    status: exempt
-    comment: No custom service actions.
+    status: done
+    comment: >
+      The capture_session service action is described in services.yaml +
+      strings.json and documented in the README ("Entities & services").
   docs-high-level-description: done
   docs-installation-instructions: done
   docs-removal-instructions: done
@@ -94,14 +99,15 @@ rules:
   entity-category:
     status: done
     comment: >
-      RSSI, connection-failures, poll-interval sensors and the connectivity
-      binary_sensor are EntityCategory.DIAGNOSTIC; the light/switch controls are
-      primary.
+      RSSI, connection-failures, poll-interval, last-seen and last-connected
+      sensors, the connectivity binary_sensor, and the self-test button are all
+      EntityCategory.DIAGNOSTIC; the light/switch controls are primary.
   entity-device-class:
     status: done
     comment: >
-      Diagnostic entities use signal_strength / duration / connectivity device
-      classes; the light and zone on/off switches have no applicable class.
+      Diagnostic entities use signal_strength / duration / timestamp /
+      connectivity device classes; the light and zone on/off switches have no
+      applicable class.
   entity-disabled-by-default: done
   entity-translations: done
   exception-translations: done

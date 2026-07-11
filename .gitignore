@@ -12,3 +12,6 @@ htmlcov/
 .venv-check/
 venv/
 .DS_Store
+
+# Local, untracked developer/agent working notes (not shipped)
+CLAUDE.local.md
