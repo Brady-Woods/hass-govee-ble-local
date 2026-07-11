@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Placeholder brand assets under `brands/` (`icon.png`/`icon@2x.png` 256/512 square,
+  `logo.png`/`logo@2x.png` 256×128 / 512×256) at the home-assistant/brands sizes, plus a
+  stdlib generator (`brands/make_placeholders.py`) and a README. These are placeholders —
+  replace with real artwork before submitting to home-assistant/brands; the `brands`
+  quality-scale rule stays `todo` until real assets are accepted upstream.
+
 ## [0.12.1] - 2026-07-11
 
 ### Added
