@@ -24,6 +24,7 @@ from homeassistant.exceptions import ConfigEntryNotReady, HomeAssistantError
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.service import async_extract_config_entry_ids
+from homeassistant.helpers.typing import ConfigType
 
 from .capture import LogCapture, async_run_self_test
 from .const import CONF_SECRET, DOMAIN, SERVICE_CAPTURE_SESSION
@@ -50,6 +51,12 @@ class GoveeBleLocalRuntimeData:
 
 
 type GoveeBleLocalConfigEntry = ConfigEntry[GoveeBleLocalRuntimeData]
+
+
+async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
+    """Register integration-wide service actions (once, independent of entries)."""
+    _async_register_services(hass)
+    return True
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: GoveeBleLocalConfigEntry) -> bool:
@@ -178,7 +185,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: GoveeBleLocalConfigEntry
         device=device, coordinator=coordinator, log_capture=log_capture
     )
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-    _async_register_services(hass)
     return True
 
 
@@ -246,13 +252,6 @@ async def async_unload_entry(hass: HomeAssistant, entry: GoveeBleLocalConfigEntr
     """Unload a config entry, disconnecting the BLE device."""
     _LOGGER.debug("Unloading entry for %s", entry.data["address"])
     await entry.runtime_data.device.stop()
-    unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
-    # Drop the shared service once the last device is gone.
-    other_loaded = [
-        e
-        for e in hass.config_entries.async_entries(DOMAIN)
-        if e.entry_id != entry.entry_id and e.state is ConfigEntryState.LOADED
-    ]
-    if not other_loaded and hass.services.has_service(DOMAIN, SERVICE_CAPTURE_SESSION):
-        hass.services.async_remove(DOMAIN, SERVICE_CAPTURE_SESSION)
-    return unloaded
+    # The capture_session service is registered in async_setup (integration-wide),
+    # so it is intentionally left in place across entry unloads.
+    return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
