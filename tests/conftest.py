@@ -67,6 +67,21 @@ def auto_enable_custom_integrations(
     yield
 
 
+@pytest.fixture(autouse=True)
+def mock_plenty_of_ble_slots() -> Generator[MagicMock]:
+    """By default, report an abundance of BLE connection slots so tests that
+    don't care about slot-awareness (the vast majority) aren't affected by it -
+    the isolated test environment has no real scanners registered, which would
+    otherwise read as "0 slots available" and make every poll skip itself as
+    exhausted. Tests specifically exercising slot-exhaustion / dynamic-interval
+    behavior override this patch locally with their own values."""
+    with patch(
+        "custom_components.govee_ble_local.scheduling.bluetooth.async_scanner_count",
+        return_value=10,
+    ) as scanner_count:
+        yield scanner_count
+
+
 @pytest.fixture
 def ble_device() -> BLEDevice:
     """A fake BLEDevice standing in for the light."""

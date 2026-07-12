@@ -21,5 +21,5 @@
   "loggers": ["bleak", "bleak_retry_connector", "govee_ble_local", "govee_ble_local.frames"],
   "quality_scale": "platinum",
   "requirements": ["govee-ble-local @ git+https://github.com/Brady-Woods/govee-ble-local@v1.0.0"],
-  "version": "1.0.0"
+  "version": "1.1.0"
 }

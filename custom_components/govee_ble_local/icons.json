@@ -36,6 +36,9 @@
       },
       "last_connected": {
         "default": "mdi:bluetooth-connect"
+      },
+      "connection_source": {
+        "default": "mdi:bluetooth-transfer"
       }
     }
   },

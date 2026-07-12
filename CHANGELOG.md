@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-07-12
+
+Slot-aware BLE connection scheduling, prompted by a live outage: two devices hit
+`BleakOutOfConnectionSlotsError` after 10 connect attempts each when an ESPHome BLE proxy went
+offline, leaving 12 devices contending for a shrunk connection-slot pool with zero cross-device
+coordination beyond a one-time startup stagger.
+
+### Added
+- A domain-wide semaphore capping how many devices may be simultaneously mid-connect, sized from
+  live Bluetooth connection-slot data (`homeassistant.components.bluetooth`), always reserving
+  at least one slot for a manual connection (e.g. the Govee app) or another integration.
+- The poll interval now dynamically lengthens when devices outnumber usable slots, and jitter is
+  applied to every recurring interval and backoff-reset (not just the one-time initial stagger),
+  so devices don't drift back into lockstep over uptime.
+- `BleakOutOfConnectionSlotsError` (the whole pool is out of slots, not just this device) is now
+  detected both proactively (before attempting a connect) and reactively, skipping the usual
+  1-failure grace and backing off harder immediately, instead of retrying quickly into the same
+  exhausted pool.
+- A new **Connection source** diagnostic sensor showing which Bluetooth scanner (local adapter
+  vs. a named ESPHome proxy) last saw each device - closes the blind spot that required manual
+  log-digging to diagnose the outage above.
+- Setup no longer blocks on a full connect+handshake for a device currently visible via BLE
+  advertisement: it's marked ready immediately from passive state, and the real first poll runs
+  as a staggered, slot-aware background task instead of serializing every device's handshake into
+  the HA startup sequence. A device never seen advertising still requires a real connect before
+  setup succeeds (`ConfigEntryNotReady` on failure), unchanged from before.
+
 ## [1.0.0] - 2026-07-11
 
 First stable release, committing to Semantic Versioning. Verified against the
@@ -69,7 +96,8 @@ Migration to the `govee-ble-local` v3 library and a large feature expansion.
 - Fixed / added entity icons and names; on/off tracked passively from advertisements between
   polls.
 
-[Unreleased]: https://github.com/Brady-Woods/hass-govee-ble-local/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/Brady-Woods/hass-govee-ble-local/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/Brady-Woods/hass-govee-ble-local/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/Brady-Woods/hass-govee-ble-local/compare/v0.12.1...v1.0.0
 [0.12.1]: https://github.com/Brady-Woods/hass-govee-ble-local/compare/v0.12.0...v0.12.1
 [0.12.0]: https://github.com/Brady-Woods/hass-govee-ble-local/releases/tag/v0.12.0

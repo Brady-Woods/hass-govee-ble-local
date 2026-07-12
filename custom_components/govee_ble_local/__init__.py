@@ -107,11 +107,44 @@ async def async_setup_entry(hass: HomeAssistant, entry: GoveeBleLocalConfigEntry
     # Stagger multiple devices' poll schedules so they don't stay in lockstep
     # and repeatedly fight over the adapter's limited BLE connection slots.
     stagger = zlib.crc32(address.encode()) % 8
-    _LOGGER.debug("Waiting %ds stagger before first poll of %s", stagger, address)
-    await asyncio.sleep(stagger)
 
-    _LOGGER.debug("Establishing initial connection for %s", address)
-    await coordinator.async_config_entry_first_refresh()
+    if service_info is not None:
+        # The device is currently advertising - trust that as "ready" rather than
+        # blocking config-entry setup on a full connect+handshake for every
+        # device on every HA restart. With many devices sharing a constrained BLE
+        # connection-slot pool, that startup storm is a direct contributor to
+        # slot exhaustion (confirmed live: BleakOutOfConnectionSlotsError after
+        # 10 attempts when a proxy went offline). Entities come up available
+        # immediately from whatever passive state we already have (on/off from
+        # the last advertisement, if any); the real first connect+poll still
+        # happens - staggered, and subject to the semaphore/slot-awareness in
+        # coordinator.py - as a tracked task that does NOT block setup. A
+        # failure there is handled by the coordinator's normal backoff, not an
+        # entry-level ConfigEntryNotReady - we already know the device is present.
+        _LOGGER.debug(
+            "%s: visible via advertisement; marking ready without blocking setup"
+            " on a full handshake",
+            address,
+        )
+        coordinator.async_set_updated_data(device.state)
+
+        async def _staggered_first_poll() -> None:
+            _LOGGER.debug("Waiting %ds stagger before first poll of %s", stagger, address)
+            await asyncio.sleep(stagger)
+            _LOGGER.debug("Establishing initial connection for %s", address)
+            await coordinator.async_refresh()
+
+        entry.async_create_task(
+            hass, _staggered_first_poll(), name=f"{DOMAIN}_first_poll_{address}"
+        )
+    else:
+        # Never seen this device advertise at all - there's no passive signal to
+        # trust, so require a real connect before considering setup successful
+        # (raises ConfigEntryNotReady on failure), same as before.
+        _LOGGER.debug("Waiting %ds stagger before first poll of %s", stagger, address)
+        await asyncio.sleep(stagger)
+        _LOGGER.debug("Establishing initial connection for %s", address)
+        await coordinator.async_config_entry_first_refresh()
 
     @callback
     def _sync_device_registry() -> None:
