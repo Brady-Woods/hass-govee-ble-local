@@ -37,6 +37,10 @@ def make_device(
     # Segment count comes off the device's DeviceProfile (light.py reads
     # device.profile.segments to build one entity per segment).
     device.profile.segments = segments
+    # Explicit, sane default - an AsyncMock's auto-created attributes are
+    # truthy, so leaving this unset would make every mock device look
+    # "gradual-capable" (only H61A8 really is) to capture.py's self-test.
+    device.profile.gradual = False
     device.scene_names = SCENE_NAMES if scene_names is None else scene_names
     device.active_scene = None
     device.min_kelvin = min_kelvin

@@ -36,6 +36,7 @@ async def test_diagnostics_includes_capture_with_address_scrubbed(
     coordinator = setup_integration.runtime_data.coordinator
     coordinator.last_self_test = {
         "ok": True,
+        "address": ADDRESS,
         "sku": "H60A6",
         "encryption": "aes_rc4_psk",
         "capabilities": ["power"],
@@ -49,6 +50,10 @@ async def test_diagnostics_includes_capture_with_address_scrubbed(
     assert "recent_warnings" in diagnostics
     dump = diagnostics["last_self_test"]
     assert dump["ok"] is True
+    # The report's own "address" field is redacted by the same key-based
+    # async_redact_data pass as entry.data.address (TO_REDACT reaches nested
+    # dicts), and the free-text frame/log lines are separately scrubbed.
+    assert dump["address"] == REDACTED
     assert ADDRESS not in dump["frames"][0]
     assert REDACTED in dump["frames"][0]
     assert ADDRESS not in dump["log"][0]

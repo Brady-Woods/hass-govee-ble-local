@@ -99,10 +99,14 @@ Per device (depending on its capabilities):
 | `binary_sensor` | Connectivity | Advertisement presence (reachable), not connect-poll success |
 | `button` | Run self-test | Runs the full-capability self-test and stores the capture |
 
-**Service — `govee_ble_local.capture_session`** (target a device): runs the device self-test
-(power/brightness/RGB/kelvin/scenes/segments/zones with per-step ACK + read-back checks, then
-restores state) and returns the captured BLE frame session as response data — useful for
-diagnosing protocol issues. The same capture is stored for the config-entry diagnostics download.
+**Service — `govee_ble_local.capture_session`** (target one or more devices): runs the device
+self-test (power/brightness/RGB/kelvin/scenes/segments/zones with per-step ACK + read-back
+checks) and returns the captured BLE frame session as response data, one report per targeted
+device (each identifying its own address, so results from multiple devices are never ambiguous)
+— useful for diagnosing protocol issues. Before making any changes it snapshots the device's full
+state (power, brightness, colour, active scene, every zone's power/colour, segment colour, the
+gradual flag) and restores all of it when the test finishes. The same capture is stored for the
+config-entry diagnostics download.
 
 ## Architecture
 
