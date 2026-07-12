@@ -95,7 +95,7 @@ Per device (depending on its capabilities):
 | `light` | Zone light(s) | One per colour-controllable zone (RGB + kelvin); on/off-only zones become switches |
 | `light` | Segment light(s) | One per addressable segment (RGB + kelvin); **disabled by default** |
 | `switch` | Power / zone switch | Smart plugs, and on/off-only zones |
-| `sensor` | Signal strength, poll interval, connection failures, **last seen**, **last connected** | Diagnostic |
+| `sensor` | Signal strength, poll interval, connection failures, **last seen**, **last connected**, **connection source** | Diagnostic |
 | `binary_sensor` | Connectivity | Advertisement presence (reachable), not connect-poll success |
 | `button` | Run self-test | Runs the full-capability self-test and stores the capture |
 

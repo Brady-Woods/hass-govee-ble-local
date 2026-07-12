@@ -56,7 +56,15 @@ rules:
       Setup is from passive BLE discovery (or a picker of already-discovered
       devices), which already implies the device is advertising and reachable;
       there is no host/credential to validate before creating the entry.
-  test-before-setup: done
+  test-before-setup:
+    status: done
+    comment: >
+      A device currently visible via a BLE advertisement is accepted as
+      "reachable" without a live connect+handshake (avoids a full-handshake
+      startup storm across many devices sharing a constrained BLE
+      connection-slot pool); a device never seen advertising at all still
+      requires a successful connect before setup succeeds, raising
+      ConfigEntryNotReady otherwise, same as before.
   unique-config-entry: done
 
   # ------------------------------------------------------------------ Silver

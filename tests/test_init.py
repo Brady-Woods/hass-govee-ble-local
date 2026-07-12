@@ -51,6 +51,45 @@ async def test_setup_ble_device_not_found(
     assert mock_config_entry.state is ConfigEntryState.SETUP_RETRY
 
 
+async def test_setup_never_seen_requires_real_connect(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_device: AsyncMock,
+    mock_bluetooth: SimpleNamespace,
+) -> None:
+    """A device that has never advertised (no passive signal to trust) still
+    requires a real, blocking connect before setup succeeds - the pre-existing
+    safety net is preserved even though a VISIBLE device now skips it."""
+    mock_bluetooth.last_info.return_value = None
+    mock_config_entry.add_to_hass(hass)
+
+    assert await hass.config_entries.async_setup(mock_config_entry.entry_id)
+    await hass.async_block_till_done()
+    assert mock_config_entry.state is ConfigEntryState.LOADED
+    # The blocking async_config_entry_first_refresh path ran, unlike the
+    # deferred/tracked-task path a visible device takes.
+    mock_device.update.assert_awaited()
+    coordinator = mock_config_entry.runtime_data.coordinator
+    assert coordinator.last_update_success is True
+
+
+async def test_setup_never_seen_retries_on_connect_failure(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_device: AsyncMock,
+    mock_bluetooth: SimpleNamespace,
+) -> None:
+    """A never-seen device that also fails to connect keeps the old
+    ConfigEntryNotReady safety net (setup-level retry), not just an ordinary
+    coordinator backoff."""
+    mock_bluetooth.last_info.return_value = None
+    mock_device.update.side_effect = BleakError("no route to device")
+    mock_config_entry.add_to_hass(hass)
+
+    assert not await hass.config_entries.async_setup(mock_config_entry.entry_id)
+    assert mock_config_entry.state is ConfigEntryState.SETUP_RETRY
+
+
 async def test_setup_sku_from_advertisement(
     hass: HomeAssistant, mock_device: AsyncMock, mock_bluetooth: SimpleNamespace
 ) -> None:

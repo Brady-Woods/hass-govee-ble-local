@@ -29,6 +29,25 @@ POLL_INTERVAL_SECONDS = 120
 # success. on/off still updates live from advertisements regardless.
 MAX_POLL_INTERVAL_SECONDS = 1800
 
+# Always leave at least this many BLE connection slots free for a manual connection
+# (e.g. the Govee app) or another integration entirely — never let this integration's
+# own polling consume every available slot.
+RESERVED_CONNECTION_SLOTS = 1
+
+# Random jitter (seconds) added to BOTH the recurring poll interval and the
+# backoff-reset-to-base transition. Without it, every device's independent timer is
+# deterministic, so they drift back into lockstep over uptime even after starting
+# staggered — see the one-time crc32 stagger in __init__.py, which only covers the
+# very first poll. Jitter keeps them spread out for the life of the entry.
+POLL_JITTER_SECONDS = (0, 30)
+
+# Extra backoff steps applied specifically when a poll fails with
+# BleakOutOfConnectionSlotsError (the whole adapter/proxy pool is out of slots) rather
+# than a generic BLE error. Retrying quickly when EVERY device is contending for the
+# same exhausted pool just adds to the contention; skip the normal 1-failure grace and
+# jump straight this many exponential-backoff steps ahead.
+OUT_OF_SLOTS_BACKOFF_STEPS = 2
+
 # Maps a library zone name (Device.zones[i].name) to an entity translation
 # key. The library uses the device's own zone names (from the Govee app/cloud:
 # mainLightToggle / backgroundLightToggle); unknown names fall back to the raw

@@ -90,6 +90,9 @@
       },
       "last_connected": {
         "name": "Last connected"
+      },
+      "connection_source": {
+        "name": "Connection source"
       }
     }
   },

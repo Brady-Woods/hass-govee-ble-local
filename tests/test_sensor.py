@@ -70,7 +70,8 @@ async def test_failures_and_poll_interval_track_coordinator(
     assert fail_id is not None and poll_id is not None
 
     assert hass.states.get(fail_id).state == "0"
-    assert hass.states.get(poll_id).state == str(POLL_INTERVAL_SECONDS)
+    # Jittered, so >= base rather than an exact match (see const.POLL_JITTER_SECONDS).
+    assert int(hass.states.get(poll_id).state) >= POLL_INTERVAL_SECONDS
 
     mock_device.update.side_effect = BleakError("no slot")
     # A few failed polls: failures climb; interval backs off past the grace poll.

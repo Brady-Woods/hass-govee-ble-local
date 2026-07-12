@@ -12,6 +12,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from govee_ble_local import Device
+from homeassistant.components import bluetooth
 from homeassistant.components.sensor import (
     SensorDeviceClass,
     SensorEntity,
@@ -49,6 +50,7 @@ async def async_setup_entry(
             GoveeBleLocalPollIntervalSensor(coordinator, device, address, entry.title),
             GoveeBleLocalLastSeenSensor(coordinator, device, address, entry.title),
             GoveeBleLocalLastConnectedSensor(coordinator, device, address, entry.title),
+            GoveeBleLocalConnectionSourceSensor(coordinator, device, address, entry.title),
         ]
     )
 
@@ -186,3 +188,35 @@ class GoveeBleLocalLastConnectedSensor(_DiagnosticSensor):
     @property
     def native_value(self) -> datetime | None:
         return self.coordinator.last_connected
+
+
+class GoveeBleLocalConnectionSourceSensor(_DiagnosticSensor):
+    """Which Bluetooth source (local adapter vs. a named ESPHome proxy) last saw
+    this device's advertisement. Answers "is this actually reaching the proxy I
+    expect, or silently falling back to the local adapter" without digging
+    through raw logs - the local adapter being overloaded and proxies going
+    offline are both things this integration otherwise has no visibility into."""
+
+    _attr_translation_key = "connection_source"
+
+    def __init__(
+        self,
+        coordinator: GoveeBleLocalCoordinator,
+        device: Device,
+        address: str,
+        device_name: str,
+    ) -> None:
+        super().__init__(coordinator, device, address, device_name)
+        self._address = address
+        self._attr_unique_id = f"{address}_connection_source"
+
+    @property
+    def native_value(self) -> str | None:
+        try:
+            info = bluetooth.async_last_service_info(
+                self.hass, self._address, connectable=True
+            )
+        except RuntimeError:
+            # Bluetooth manager not set up (isolated unit tests only).
+            return None
+        return info.source if info is not None else None
