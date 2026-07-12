@@ -26,11 +26,31 @@ Treat their read-back values as provisional.
 - **Plug power poll (H5083 family).** Library reads the relay bitmask (aa 01) into
   `state.is_on`; the HA power switch now reflects it. **Unverified** — needs an H5083 to confirm
   the query (aa 01 vs plug-spec) and the relay-bit → on/off mapping.
-- **H6047 segment read-back.** H6047 moved to `readback="status"` (mechanism-A) and the
-  integration exposes per-segment lights. **Caveat:** the one live H6047 connect returned an
-  **empty 0xAC**, so mechanism-A on H6047 is unconfirmed — segment colours may not populate.
-- **H61A8 / H6052 / H6641 segment/colour read-back.** Source-modeled (mechanism-B / -C /
-  shared-A), no hardware on hand. H60A6 mechanism-A is the verified reference.
+- **H6047 / H6641 segment read-back — corrected upstream, still not live-verified.** The prior
+  entry here (H6047 modeled as `readback="status"`, mechanism-A) was itself wrong and has been
+  fixed in two steps on the library's `master` (not yet tagged past `v1.0.0`): neither SKU
+  actually answers the `0xAC` status burst at all (source-confirmed: H6047 routes to
+  `Compose4InfoBleIot`; H6641 goodsType 247 never reaches the `0xAC` dispatch) — both are back to
+  `readback="polled"` (power/brightness/scene via `aa 01/04/05`), with per-segment colour read
+  via a new **`color_readback="mechanism_a_direct"`** (direct per-group `aa a5 <group>` requests,
+  correct group size 4 — an interim fix had reused H61A8's group-size-3 decoder, silently
+  misassigning segment indices, since fixed). H6641 additionally now reads its true colour-group
+  count live (`color_readback_live_ic`, a `0x40` IC-count query) instead of approximating from
+  the write-mask width. This is a **real correctness fix** for exactly the gap this entry used to
+  describe (the one live H6047 connect earlier returned an empty 0xAC) — but the library's own
+  changelog doesn't claim hardware verification for `mechanism_a_direct` either, only that the
+  test suite caught the wrong-decoder bug before it shipped. Once the library tags a stable
+  release past `v1.0.0` and we bump the pin, this should be re-tested live on H6047 specifically.
+- **H61A8 / H6052 segment/colour read-back.** Source-modeled (mechanism-B / -C respectively), no
+  hardware on hand. H60A6 mechanism-A remains the verified reference.
+- **H60A6 truncated/empty `0xAC` status bursts — fixed upstream (retry), matches our own live
+  test.** Separately from the segment-mechanism fix above, the library's `master` now retries a
+  status read once on an empty parse before leaving state stale (rather than giving up
+  immediately), specifically to recover a single dropped BLE notification mid-burst. We
+  independently live-tested this exact fix on `core` before it was merged (H60A6 recovered full
+  state — brightness, all 13 segments, both zones — on retry in ~1.3s where it previously logged
+  `state left stale` on ~80-88% of polls); the library's own changelog reports the same result
+  field-tested on their end. Not yet pinned (see the version note below).
 
 
 ## 3. Per-segment light entities — behavioural note

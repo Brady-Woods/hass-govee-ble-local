@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-07-12
+
+### Changed
+- Bump the pinned `govee-ble-local` library requirement from `v1.0.0` to `v1.0.3`. Brings in
+  three upstream fixes, all backward-compatible (no public API change; `scripts/check.sh`
+  verified clean against the new pin — mypy `--strict`, 115 tests, 96.70% coverage):
+  - **H6047 / H6641 segment colour read-back corrected.** Neither SKU actually answers the
+    `0xAC` status burst; both are back to `readback="polled"` with a new, correctly-decoded
+    direct per-group colour read (`mechanism_a_direct` — an interim fix had silently reused
+    H61A8's decoder, which uses a different group size). H6641 also gains a live IC-count read
+    instead of an approximation. Still not confirmed on real H6047/H6641 hardware — see
+    `GAPS.md`.
+  - **H60A6-style `0xAC` status reads now retry once on an empty parse** before leaving state
+    stale, recovering a single dropped BLE notification mid-burst instead of costing a whole
+    poll cycle. Field-tested by both the library (their changelog) and independently by us on
+    `core` prior to this release: full state (brightness, all segments, both zones) recovered
+    on retry in ~1.3s where it previously logged `state left stale`.
+
 ## [1.2.0] - 2026-07-12
 
 Hardens the device self-test (`capture_session` service / "Run self-test" button) so it's a
@@ -118,7 +136,8 @@ Migration to the `govee-ble-local` v3 library and a large feature expansion.
 - Fixed / added entity icons and names; on/off tracked passively from advertisements between
   polls.
 
-[Unreleased]: https://github.com/Brady-Woods/hass-govee-ble-local/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/Brady-Woods/hass-govee-ble-local/compare/v1.2.1...HEAD
+[1.2.1]: https://github.com/Brady-Woods/hass-govee-ble-local/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/Brady-Woods/hass-govee-ble-local/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/Brady-Woods/hass-govee-ble-local/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/Brady-Woods/hass-govee-ble-local/compare/v0.12.1...v1.0.0
