@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-07-12
+
+Hardens the device self-test (`capture_session` service / "Run self-test" button) so it's a
+genuine full integration test that unambiguously reports which device it ran against and fully
+restores whatever it changed - two gaps found on review of the original implementation.
+
+### Added
+- The self-test report now includes the device's `address`, so results from multiple devices
+  (the `capture_session` service can target several at once) are never ambiguous - previously
+  two units of the same SKU would have been indistinguishable in the response.
+- New coverage: segment brightness, the gradual/fade flag (H61A8), explicit zone-power-off, and
+  whole-device power-off - each a distinct code path that wasn't previously exercised.
+- Zone and segment colour changes are now verified against read-back state (tri-state, same as
+  the existing checks), not just "did the command ACK".
+
+### Fixed
+- State restoration now covers everything the test actually changes, not just whole-fixture
+  power/brightness/colour: every zone's power and colour, segment 0's colour/brightness, the
+  originally active scene, and the gradual flag are all captured before the test and restored
+  after - previously only the four whole-fixture fields were restored, silently leaving zones
+  turned on, segments/zones recoloured, and any active scene cleared after every run.
+
 ## [1.1.0] - 2026-07-12
 
 Slot-aware BLE connection scheduling, prompted by a live outage: two devices hit
@@ -96,7 +118,8 @@ Migration to the `govee-ble-local` v3 library and a large feature expansion.
 - Fixed / added entity icons and names; on/off tracked passively from advertisements between
   polls.
 
-[Unreleased]: https://github.com/Brady-Woods/hass-govee-ble-local/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/Brady-Woods/hass-govee-ble-local/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/Brady-Woods/hass-govee-ble-local/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/Brady-Woods/hass-govee-ble-local/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/Brady-Woods/hass-govee-ble-local/compare/v0.12.1...v1.0.0
 [0.12.1]: https://github.com/Brady-Woods/hass-govee-ble-local/compare/v0.12.0...v0.12.1

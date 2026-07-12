@@ -10,8 +10,13 @@ Two consumers:
     surfaced in the downloadable diagnostics (closes the library's silent-drop gap: an
     unrecognised RX frame / empty status / rejection now shows up).
   * :func:`async_run_self_test` — an in-HA device integration test that exercises the full
-    capability surface with per-step ACK/read-back tracking, restores the original state, and
-    returns the captured frames (feed to ``govee-ble-analyze --from-frames-log``).
+    capability surface (power, brightness, RGB, colour temperature, scenes, segments, zones,
+    the gradual flag) with per-step ACK/read-back tracking, captures the device's full pre-test
+    state and restores it when done (whole-fixture power/brightness/colour/scene, every zone's
+    power/colour, segment 0's colour/brightness, and the gradual flag - not just the fields the
+    test happens to touch first), and returns the captured frames (feed to
+    ``govee-ble-analyze --from-frames-log``) plus which physical device (``address``) it ran
+    against.
 """
 from __future__ import annotations
 
@@ -112,24 +117,77 @@ def _match(actual: Any, expected: Any) -> bool | None:
     return bool(actual == expected)
 
 
+def _segment_at(state: Any, index: int) -> Any:
+    return next((s for s in state.segments if s.index == index), None)
+
+
+def _zone_colour(state: Any, zone: Any) -> tuple[int, int, int] | None:
+    """A representative colour for a zone, read from whichever of its segments
+    the device reported (same lookup `light.py`'s zone light uses)."""
+    seg = next((s for s in state.segments if s.index in zone.segments), None)
+    return seg.rgb if seg else None
+
+
 def _snapshot(device: Device) -> dict[str, Any]:
+    """Capture everything the self-test might change, so it can all be restored
+    afterward: whole-device power/brightness/colour/active-scene, the gradual
+    flag, each zone's power and (if it has segments) a representative colour,
+    and segment 0's colour/brightness (the only segment index the test
+    exercises). Fields are None where the device has no read-back for them -
+    `_restore` simply skips those (nothing to put back)."""
     state = device.state
+    segment0 = _segment_at(state, 0)
     return {
         "is_on": state.is_on,
         "brightness": state.brightness,
         "rgb_color": state.rgb_color,
         "color_temp_kelvin": state.color_temp_kelvin,
+        "scene_code": state.scene_code,
+        "gradual": state.gradual,
+        "zone_power": {zone.name: device.zone_is_on(zone.name) for zone in device.zones},
+        "zone_colour": {
+            zone.name: _zone_colour(state, zone) for zone in device.zones if zone.segments
+        },
+        "segment0_rgb": segment0.rgb if segment0 else None,
+        "segment0_brightness": segment0.brightness if segment0 else None,
     }
 
 
 async def _restore(device: Device, snap: dict[str, Any]) -> None:
-    """Best-effort return to the pre-test state; never raises."""
+    """Best-effort return to the pre-test state; never raises (a restore
+    failure is logged, not surfaced as a self-test failure - the steps
+    themselves already reported the real problem, if any).
+
+    Order matters: zones/segments/gradual first (each only touches its own
+    mask, so order among them doesn't matter), then either the originally
+    active scene or a static colour (activating a scene clears rgb/color_temp,
+    so it must come after any static-colour restore, never before), then
+    brightness, then power LAST - whatever incidental on/off side effect a
+    scene/zone command has, the final word is always the original power state.
+    """
     caps = device.capabilities
     try:
-        if snap["color_temp_kelvin"] is not None and Capability.COLOR_TEMP in caps:
+        for zone in device.zones:
+            colour = snap["zone_colour"].get(zone.name)
+            if colour is not None:
+                await device.set_zone_rgb(zone.name, colour)
+            was_on = snap["zone_power"].get(zone.name)
+            if was_on is not None:
+                await device.set_zone_power(zone.name, was_on)
+        if snap["segment0_rgb"] is not None:
+            await device.set_segment_rgb([0], snap["segment0_rgb"])
+        if snap["segment0_brightness"] is not None:
+            await device.set_segment_brightness([0], snap["segment0_brightness"])
+        if snap["gradual"] is not None and device.profile.gradual:
+            await device.set_gradual(snap["gradual"])
+
+        if snap["scene_code"] is not None and Capability.SCENES in caps:
+            await device.set_scene(snap["scene_code"])
+        elif snap["color_temp_kelvin"] is not None and Capability.COLOR_TEMP in caps:
             await device.set_color_temp(snap["color_temp_kelvin"])
         elif snap["rgb_color"] is not None and Capability.RGB in caps:
             await device.set_rgb(snap["rgb_color"])
+
         if snap["brightness"] is not None and Capability.BRIGHTNESS in caps:
             await device.set_brightness(snap["brightness"])
         if snap["is_on"] is not None and Capability.POWER in caps:
@@ -141,9 +199,15 @@ async def _restore(device: Device, snap: dict[str, Any]) -> None:
 async def async_run_self_test(device: Device) -> dict[str, Any]:
     """Exercise the device's full capability surface and capture the BLE session.
 
-    Returns a report ``{ok, sku, encryption, capabilities, steps, frames, log}``. Each step
+    Returns a report ``{ok, address, sku, encryption, capabilities, steps, frames, log}`` -
+    ``address`` unambiguously identifies which physical device this ran against (needed since
+    the ``capture_session`` service can target several devices in one call and their reports
+    would otherwise be indistinguishable, e.g. multiple units of the same SKU). Each step
     records ``acked`` (command returned without a BLE error) and ``readback_ok`` (tri-state:
-    None when the device has no read-back). Restores the original state at the end.
+    None when the device has no read-back). The device's FULL pre-test state - power,
+    brightness, colour, active scene, gradual flag, every zone's power/colour, and segment 0's
+    colour/brightness - is captured up front and restored at the end (see `_snapshot`/`_restore`),
+    not just the whole-fixture fields the test happens to touch first.
     """
     caps = device.capabilities
     steps: list[dict[str, Any]] = []
@@ -204,7 +268,23 @@ async def async_run_self_test(device: Device) -> dict[str, Any]:
 
                 await step(f"scene:{name}", _scene, _scene_ok)
         if Capability.SEGMENTS in caps and device.profile.segments:
-            await step("segment_0_rgb", lambda: device.set_segment_rgb([0], (255, 0, 0)))
+
+            def _segment0_rgb_ok() -> bool | None:
+                seg = _segment_at(device.state, 0)
+                return _match(seg.rgb if seg else None, (255, 0, 0))
+
+            def _segment0_brightness_ok() -> bool | None:
+                seg = _segment_at(device.state, 0)
+                return _match(seg.brightness if seg else None, 50)
+
+            await step(
+                "segment_0_rgb", lambda: device.set_segment_rgb([0], (255, 0, 0)),
+                _segment0_rgb_ok,
+            )
+            await step(
+                "segment_0_brightness", lambda: device.set_segment_brightness([0], 50),
+                _segment0_brightness_ok,
+            )
             if Capability.COLOR_TEMP in caps:
                 await step(
                     "segment_0_color_temp",
@@ -218,19 +298,51 @@ async def async_run_self_test(device: Device) -> dict[str, Any]:
             def _zone_on_ok(name: str = zone.name) -> bool | None:
                 return _match(device.zone_is_on(name), True)
 
-            await step(f"zone_power:{zone.name}", _zone_on, _zone_on_ok)
+            # Power on first so a zone with segments can also be driven to a
+            # colour while on; power off is tested last for this zone (verifies
+            # the distinct off code path), and _restore puts the zone back to
+            # whatever it was before the test regardless of where this leaves it.
+            await step(f"zone_power_on:{zone.name}", _zone_on, _zone_on_ok)
+
             if zone.segments:
 
                 def _zone_rgb(name: str = zone.name) -> Awaitable[None]:
                     return device.set_zone_rgb(name, (0, 255, 0))
 
-                await step(f"zone_rgb:{zone.name}", _zone_rgb)
+                def _zone_rgb_ok(z: Any = zone) -> bool | None:
+                    return _match(_zone_colour(device.state, z), (0, 255, 0))
+
+                await step(f"zone_rgb:{zone.name}", _zone_rgb, _zone_rgb_ok)
                 if Capability.COLOR_TEMP in caps:
 
                     def _zone_cct(name: str = zone.name) -> Awaitable[None]:
                         return device.set_zone_color_temp(name, _mid_kelvin(device))
 
                     await step(f"zone_color_temp:{zone.name}", _zone_cct)
+
+            def _zone_off(name: str = zone.name) -> Awaitable[None]:
+                return device.set_zone_power(name, False)
+
+            def _zone_off_ok(name: str = zone.name) -> bool | None:
+                return _match(device.zone_is_on(name), False)
+
+            await step(f"zone_power_off:{zone.name}", _zone_off, _zone_off_ok)
+        if device.profile.gradual:
+            toggled = not bool(device.state.gradual)
+
+            def _set_gradual(t: bool = toggled) -> Awaitable[None]:
+                return device.set_gradual(t)
+
+            def _gradual_ok(t: bool = toggled) -> bool | None:
+                return _match(device.state.gradual, t)
+
+            await step("gradual", _set_gradual, _gradual_ok)
+        if Capability.POWER in caps:
+            # Tested last (not right after power_on) so it doesn't disrupt the
+            # preconditions of the brightness/colour/scene/zone/segment steps
+            # above; _restore fixes the final power state regardless.
+            await step("power_off", lambda: device.set_power(False),
+                       lambda: _match(device.state.is_on, False))
 
         await _restore(device, snap)
 
@@ -243,6 +355,7 @@ async def async_run_self_test(device: Device) -> dict[str, Any]:
     ok = all(s["ok"] for s in steps) if steps else True
     return {
         "ok": ok,
+        "address": device.address,
         "sku": device.sku,
         "encryption": device.profile.encryption.value,
         "capabilities": sorted(c.value for c in caps),
