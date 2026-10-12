@@ -7,17 +7,13 @@
 #
 # Claimed tier: GOLD (manifest "quality_scale": "gold").
 #
-# Every Bronze/Silver/Gold rule is done or legitimately exempt EXCEPT one:
-#   * dependency-transparency (a Bronze rule) - core requires the dependency to
-#     be published to PyPI with wheels built and uploaded by CI. govee-ble-local
-#     is installed from a pinned git tag today. The library repo ships a
-#     trusted-publishing release workflow (.github/workflows/release.yml); once
-#     PyPI publishing is enabled and the manifest requirement switches to
-#     `govee-ble-local==X.Y.Z`, this rule is met.
-# Strictly, that open Bronze rule caps every tier; "gold" is claimed as the tier
-# all OTHER rules satisfy. With the PyPI release in place, Platinum's own three
-# rules (async-dependency, inject-websession, strict-typing) are already met, so
-# the integration would qualify for Platinum.
+# Every Bronze/Silver/Gold rule is done or legitimately exempt.
+# dependency-transparency depends on govee-ble-local being published to PyPI by
+# the library's trusted-publishing release workflow (.github/workflows/release.yml);
+# the manifest requires `govee-ble-local==1.1.0`, so the integration cannot even
+# install until that release exists - publish the library first.
+# Platinum's own three rules (async-dependency, inject-websession, strict-typing)
+# are also met.
 # Also outstanding for a core submission (not a rule failure): the bundled brand
 # images are generic placeholders, not final artwork.
 
@@ -26,9 +22,10 @@ rules:
   action-setup:
     status: done
     comment: >
-      The capture_session service action is registered in async_setup (not
-      async_setup_entry), so it exists integration-wide and raises a clear
-      HomeAssistantError when the targeted device's entry isn't loaded.
+      The capture_session service action is registered (admin-only) in
+      async_setup, not async_setup_entry, so it exists integration-wide. A
+      targeted device whose entry isn't loaded gets an error entry in the
+      response; no matching device raises a translated ServiceValidationError.
   appropriate-polling: done
   brands:
     status: done
@@ -41,16 +38,16 @@ rules:
   config-flow-test-coverage:
     status: done
     comment: >
-      Full config-flow coverage (bluetooth discovery, user, and reconfigure
-      steps plus not_supported/already_configured/no_devices/not_found aborts)
-      via pytest-homeassistant-custom-component; see tests/test_config_flow.py.
+      Full config-flow coverage (bluetooth discovery, user, secret read/cloud/
+      manual, reauth and reconfigure steps plus the not_supported /
+      already_configured / no_devices_found aborts) via
+      pytest-homeassistant-custom-component; see tests/test_config_flow.py.
   dependency-transparency:
-    status: todo
+    status: done
     comment: >
-      The sole dependency (govee-ble-local) is MIT, source on GitHub, pinned to
-      a release tag, and its CI runs the full test + mypy --strict gate. Not yet
-      published to PyPI with CI-built wheels, which the rule requires - this is
-      the one thing standing between this integration and Platinum.
+      The sole dependency (govee-ble-local) is MIT, source on GitHub, and
+      released to PyPI with CI-built wheels by its trusted-publishing workflow;
+      the manifest pins `govee-ble-local==1.1.0`.
   docs-actions:
     status: done
     comment: >
