@@ -29,8 +29,11 @@ from homeassistant.components.bluetooth import (
     async_discovered_service_info,
     async_last_service_info,
 )
-from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
+from collections.abc import Mapping
+
+from homeassistant.config_entries import SOURCE_REAUTH, ConfigFlow, ConfigFlowResult
 from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import CONF_SECRET, DOMAIN
 
@@ -173,10 +176,43 @@ class GoveeBleLocalConfigFlow(ConfigFlow, domain=DOMAIN):
 
     def _create_secret_entry(self, secret: str | None) -> ConfigFlowResult:
         assert self._pending is not None
+        if self.source == SOURCE_REAUTH:
+            entry = self._get_reauth_entry()
+            data = dict(entry.data)
+            if secret:
+                data[CONF_SECRET] = secret
+            else:
+                data.pop(CONF_SECRET, None)
+            return self.async_update_reload_and_abort(entry, data=data)
         data = {"address": self._pending["address"], "sku": self._pending["sku"]}
         if secret:
             data[CONF_SECRET] = secret
         return self.async_create_entry(title=self._pending["title"], data=data)
+
+    # -- reauth -------------------------------------------------------------
+
+    async def async_step_reauth(
+        self, entry_data: Mapping[str, Any]
+    ) -> ConfigFlowResult:
+        """The device rejected its stored secret key (wrong, or the device was
+        re-paired to an account, which rotates it): collect a new one."""
+        entry = self._get_reauth_entry()
+        self._pending = {
+            "address": entry_data["address"],
+            "sku": entry_data.get("sku", ""),
+            "title": entry.title,
+        }
+        return await self.async_step_reauth_confirm()
+
+    async def async_step_reauth_confirm(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        assert self._pending is not None
+        return self.async_show_menu(
+            step_id="reauth_confirm",
+            menu_options=["secret_cloud", "secret_manual"],
+            description_placeholders={"name": self._pending["title"]},
+        )
 
     async def async_step_secret(
         self, user_input: dict[str, Any] | None = None
@@ -253,7 +289,9 @@ class GoveeBleLocalConfigFlow(ConfigFlow, domain=DOMAIN):
         from govee_ble_local.cloud import GoveeCloudAccount, GoveeCloudError
 
         want = self._pending["address"].replace(":", "").lower()
-        account = GoveeCloudAccount(email, password)
+        account = GoveeCloudAccount(
+            email, password, session=async_get_clientsession(self.hass)
+        )
         try:
             devices = await account.get_devices()
         except GoveeCloudError as err:
@@ -281,8 +319,8 @@ class GoveeBleLocalConfigFlow(ConfigFlow, domain=DOMAIN):
         needs_secret = _requires_secret(sku) if sku else False
 
         if user_input is not None:
-            if async_ble_device_from_address(self.hass, address, connectable=True) is None:
-                return self.async_abort(reason="not_found")
+            # Updating the stored secret doesn't need the device in range; the
+            # reload picks it up whenever the device is next reachable.
             data = dict(entry.data)
             if needs_secret:
                 try:

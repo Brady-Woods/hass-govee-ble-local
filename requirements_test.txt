@@ -1,7 +1,9 @@
 # Test dependencies for the Home Assistant integration layer.
-# The pinned Home Assistant version comes transitively from
-# pytest-homeassistant-custom-component.
-pytest-homeassistant-custom-component
+# Pinned to the Home Assistant release the lab/production instance runs, so the
+# tests (and mypy) see the same APIs as the code that ships. Bump both together
+# (pytest-homeassistant-custom-component pins homeassistant exactly).
+pytest-homeassistant-custom-component==0.13.367
+homeassistant==2026.9.4
 pytest-cov
 mypy
 
@@ -16,5 +18,5 @@ aioesphomeapi
 dbus-fast
 
 # The integration's runtime dependency (govee-ble-local) is installed
-# separately by scripts/check.sh - from a sibling checkout in dev, or the git
-# URL in CI - since it isn't published to PyPI.
+# separately by scripts/check.sh - from a sibling checkout in dev, or exactly
+# the requirement manifest.json declares in CI - since it isn't on PyPI.

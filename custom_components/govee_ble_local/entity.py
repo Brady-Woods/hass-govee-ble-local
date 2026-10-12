@@ -5,7 +5,8 @@ import logging
 from typing import Any, Coroutine
 
 from bleak.exc import BleakError
-from govee_ble_local import GoveeBleError
+from govee_ble_local import GoveeBleAuthError, GoveeBleError
+from homeassistant.core import callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.device_registry import (
     CONNECTION_BLUETOOTH,
@@ -39,6 +40,20 @@ class GoveeBleLocalEntity(CoordinatorEntity[GoveeBleLocalCoordinator]):
         self._device_name = device_name
         self._model = model
 
+    @property
+    def available(self) -> bool:
+        # Reachability, not last-poll success (see coordinator.device_available).
+        return self.coordinator.device_available
+
+    @callback
+    def _async_publish_command_state(self) -> None:
+        """Push optimistic state after a command to EVERY entity of this device.
+
+        A command often changes state other entities show (whole-fixture off
+        turns the zone lights/switches off too), so writing only this entity's
+        state would leave its siblings stale until the next poll."""
+        self.coordinator.async_update_listeners()
+
     async def _run_client_command(self, coro: Coroutine[Any, Any, Any]) -> Any:
         """Run a device BLE call, turning a BleakError, the library's own
         GoveeBleError (connect/handshake/not-supported failures - not BleakError
@@ -47,6 +62,14 @@ class GoveeBleLocalEntity(CoordinatorEntity[GoveeBleLocalCoordinator]):
         """
         try:
             return await coro
+        except GoveeBleAuthError as err:
+            if (entry := self.coordinator.config_entry) is not None:
+                entry.async_start_reauth(self.hass)
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="secret_rejected",
+                translation_placeholders={"device_name": self._device_name},
+            ) from err
         except (BleakError, GoveeBleError, TimeoutError) as err:
             _LOGGER.debug("BLE command to %s failed: %s", self._address, err)
             raise HomeAssistantError(

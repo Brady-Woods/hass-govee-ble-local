@@ -9,10 +9,11 @@ from homeassistant.components.diagnostics import async_redact_data
 from homeassistant.core import HomeAssistant
 
 from . import GoveeBleLocalConfigEntry
+from .const import CONF_SECRET
 
 # The BLE address identifies a specific physical unit, so keep it out of shared
 # diagnostics dumps.
-TO_REDACT = {"address", "ble_mac", "wifi_mac", "serial_number"}
+TO_REDACT = {"address", "ble_mac", "wifi_mac", "serial_number", CONF_SECRET}
 _REDACTED = "**REDACTED**"
 
 

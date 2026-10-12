@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-10-12
+
+Requires `govee-ble-local` 1.1.0. Validated live on the lab instance (11 devices).
+
+### Fixed
+- **Devices stuck unavailable.** The backoff computed `timedelta * 2**failures` uncapped and hit
+  `OverflowError` after ~30 consecutive failures (1,347 "Unexpected error" tracebacks in 5 days),
+  which also froze the poll interval. Backoff is now capped.
+- **Availability follows reachability**, not last-poll success: a device that is advertising
+  stays available (and controllable) through transient poll failures.
+- Polls skip devices no scanner can see instead of spending ~80 s on a hopeless connect while
+  holding a poll slot.
+- Removed the slot "exhausted" pre-check and one-shot-sized semaphore: with no allocation data it
+  read one adapter as zero free slots and skipped every poll forever. Replaced by a fixed
+  integration-wide cap on concurrent polls.
+- `capture_session` service crashed on current Home Assistant (`async_extract_config_entry_ids`
+  signature); its schema now validates targets.
+- The diagnostics download included the plug secret key; it is redacted (and masked in captured
+  frames).
+- Entities update together after a command (turning the fixture off now updates zone lights and
+  switches immediately).
+- Advertisements no longer write every entity's state several times a second, and no longer
+  re-run the device-registry sync; "Last seen" publishes at most once a minute.
+- HA brightness 1–2 no longer rounds to 0 %.
+- Unload releases the BLE link after the platforms unload (and the device refuses further I/O).
+- Self-tests are serialized and their captures filtered to the device under test.
+
+### Changed
+- Light commands are batched: power + brightness + colour go out as one device operation on one
+  connection (H6047 whole-fixture power is a single frame).
+- Reconfigure no longer requires the device to be in range.
+- Test harness pinned to the production Home Assistant release; CI installs exactly the library
+  the manifest declares.
+- Quality scale claimed as **gold** (was platinum); see `quality_scale.yaml` for the one open
+  rule (dependency-transparency: publish the library to PyPI).
+
+### Added
+- Re-authentication flow when a device rejects its secret key.
+- The cloud secret lookup uses Home Assistant's shared HTTP session.
+- Brand images bundled in the integration (placeholders).
+
 ## [1.2.1] - 2026-07-12
 
 ### Changed

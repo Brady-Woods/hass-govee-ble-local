@@ -1,56 +1,82 @@
 """Connection coordinator for a Govee BLE device, shared by all entities.
 
 ``Device.update()`` connects and reads back real state for devices that support
-it (profile ``readback`` of ``status``/``polled``) and otherwise returns the
-device's best-known (optimistic) :class:`DeviceState`. This coordinator manages
-that connection + availability tracking on a slow cadence; on/off is also
-tracked passively from advertisements (no connection) in ``__init__``.
+it (profile ``readback`` of ``status``/``polled``/``plug``) and otherwise returns
+the device's best-known (optimistic) :class:`DeviceState`. This coordinator runs
+that poll on a slow, jittered cadence with capped exponential backoff; on/off is
+also tracked passively from advertisements (no connection) in ``__init__``.
+
+Availability is driven by *reachability* (is any scanner currently seeing the
+device's advertisements?), not by whether the last poll succeeded: a poll can
+fail for transient reasons (a busy proxy, a dropped link) while the device is
+perfectly controllable, and marking it unavailable then blocks the very
+commands that would succeed.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import random
 from datetime import datetime, timedelta
 from typing import Any
 
 from bleak.exc import BleakError
-from bleak_retry_connector import BleakOutOfConnectionSlotsError
-from govee_ble_local import Device, DeviceState, GoveeBleError
+from govee_ble_local import Device, DeviceState, GoveeBleAuthError, GoveeBleError
 from homeassistant.components import bluetooth
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 
 from .const import (
     DOMAIN,
+    LAST_SEEN_RESOLUTION_SECONDS,
+    MAX_CONCURRENT_POLLS,
     MAX_POLL_INTERVAL_SECONDS,
-    OUT_OF_SLOTS_BACKOFF_STEPS,
     POLL_INTERVAL_SECONDS,
     POLL_JITTER_SECONDS,
-)
-from .scheduling import (
-    async_connect_semaphore,
-    async_loaded_entry_count,
-    async_slots_exhausted,
-    async_usable_slots,
-    dynamic_interval,
+    UNAVAILABLE_AFTER_FAILURES,
 )
 
 _LOGGER = logging.getLogger(__name__)
 
+_POLL_SEMAPHORE_KEY = "poll_semaphore"
+# Backoff doubles per consecutive failure; beyond this many doublings the cap
+# (MAX_POLL_INTERVAL_SECONDS) is reached anyway, and an uncapped exponent
+# overflows timedelta (an unreachable device used to hit OverflowError here
+# after ~30 failures, turning every later poll into an "Unexpected error").
+_MAX_BACKOFF_STEPS = 8
+
+
+def _poll_semaphore(hass: HomeAssistant) -> asyncio.Semaphore:
+    """Domain-wide cap on simultaneous polls. A fixed size: the HA Bluetooth
+    manager already routes each connect to a scanner with a free slot (and
+    bleak-retry-connector backs off on out-of-slots); this only keeps the
+    integration's own background polling from launching a connect storm."""
+    domain_data: dict[str, Any] = hass.data.setdefault(DOMAIN, {})
+    semaphore = domain_data.get(_POLL_SEMAPHORE_KEY)
+    if not isinstance(semaphore, asyncio.Semaphore):
+        semaphore = domain_data[_POLL_SEMAPHORE_KEY] = asyncio.Semaphore(
+            MAX_CONCURRENT_POLLS
+        )
+    return semaphore
+
 
 class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
-    """Keeps the BLE connection warm and tracks availability."""
+    """Polls one device and tracks its reachability."""
 
     def __init__(
         self,
         hass: HomeAssistant,
         device: Device,
         address: str,
+        config_entry: ConfigEntry | None = None,
     ) -> None:
         super().__init__(
             hass,
             _LOGGER,
+            config_entry=config_entry,
             name=f"{DOMAIN}_{address}",
             update_interval=timedelta(seconds=POLL_INTERVAL_SECONDS),
         )
@@ -58,140 +84,116 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         self._address = address
         self._base_interval = timedelta(seconds=POLL_INTERVAL_SECONDS)
         self._max_interval = timedelta(seconds=MAX_POLL_INTERVAL_SECONDS)
-        self._consecutive_failures = 0
+        self.consecutive_failures = 0
         # Read-only diagnostics surfaced by the sensor/binary_sensor platforms.
         self.rssi: int | None = None
         self.total_failures = 0
-        # "Last seen" = most recent advertisement (passive, no connection),
-        # stamped by the advertisement callback in __init__. "Last connected" =
-        # most recent successful connect-poll. The two answer different
+        # "Last seen" = most recent advertisement (passive, no connection);
+        # "last connected" = most recent successful poll. They answer different
         # questions: reachability vs. successful control.
         self.last_seen: datetime | None = None
         self.last_connected: datetime | None = None
         # Most recent self-test report (button / capture_session service), for diagnostics.
         self.last_self_test: dict[str, Any] | None = None
 
-    async def _async_update_data(self) -> DeviceState:
-        # Sample the last advertisement's RSSI (no connection needed) so the
-        # signal-strength sensor tracks even a device we then fail to connect to.
-        self._sample_rssi()
+    # -- reachability -------------------------------------------------------
 
-        # If the shared BLE connection-slot pool has essentially no room left
-        # (reserved headroom already eaten into), don't even attempt a connect -
-        # it would almost certainly fail with BleakOutOfConnectionSlotsError and
-        # only add to the contention every other device sharing the pool is also
-        # experiencing. Treat this the same as actually hitting that error.
-        if await async_slots_exhausted(self.hass):
-            raise self._record_out_of_slots(
-                f"{self.name}: no free BLE connection slots; skipped"
+    def device_present(self) -> bool:
+        """True if any connectable scanner is currently seeing the device."""
+        try:
+            return bluetooth.async_address_present(
+                self.hass, self._address, connectable=True
             )
+        except RuntimeError:
+            # Bluetooth manager not set up (isolated unit tests only).
+            return True
 
-        # Cap how many devices, integration-wide, may be simultaneously mid-connect
-        # so this integration's own polling can't monopolize the shared slot pool.
-        semaphore = await async_connect_semaphore(self.hass)
-        async with semaphore:
-            # BleakError (connection drops, no response, out-of-slots, etc.) is an
-            # expected/recoverable failure mode for a BLE device, not a bug. HA's
-            # DataUpdateCoordinator only treats UpdateFailed as "expected" - other
-            # exceptions get logged as a full "Unexpected error" traceback.
-            # The library wraps connect/handshake failures in GoveeBleError
-            # (GoveeBleConnectionError etc.), which is NOT a BleakError subclass,
-            # so it must be caught explicitly or HA logs it as an "unexpected
-            # error". TimeoutError is caught too: a stalled handshake response
-            # times out via asyncio.wait_for with a bare TimeoutError.
+    @property
+    def device_available(self) -> bool:
+        """Entity availability: reachable over BLE, or still polling fine.
+
+        A device that is advertising stays available through transient poll
+        failures (commands can still reach it); one that has vanished from every
+        scanner goes unavailable once polls have also failed a few times."""
+        if self.device_present():
+            return True
+        return self.consecutive_failures < UNAVAILABLE_AFTER_FAILURES
+
+    @callback
+    def note_advertisement_seen(self) -> bool:
+        """Record a passive advertisement. Returns True when the diagnostic
+        `last_seen` value moved enough to be worth publishing (advertisements
+        arrive several times a second; writing a state per advertisement would
+        flood the recorder)."""
+        now = dt_util.utcnow()
+        previous = self.last_seen
+        self.last_seen = now
+        return previous is None or (
+            now - previous
+        ).total_seconds() >= LAST_SEEN_RESOLUTION_SECONDS
+
+    # -- polling ------------------------------------------------------------
+
+    async def _async_update_data(self) -> DeviceState:
+        self._sample_rssi()
+        if not self.device_present():
+            # Nothing can reach it: a connect would just burn ~1 min of
+            # bleak-retry-connector attempts (and a poll slot) to fail.
+            raise self._record_failure(f"{self._address} is not advertising; poll skipped")
+
+        async with _poll_semaphore(self.hass):
             try:
                 data = await self._device.update()
-            except BleakOutOfConnectionSlotsError as err:
-                # The whole pool was out of slots for this attempt (not just a
-                # "this device" style error) - retrying quickly is nearly
-                # guaranteed to fail again while every other device is also
-                # contending for the same exhausted pool.
-                raise self._record_out_of_slots(
+            except GoveeBleAuthError as err:
+                # Starts HA's reauth flow (config_flow.async_step_reauth).
+                raise ConfigEntryAuthFailed(str(err)) from err
+            except (BleakError, GoveeBleError, TimeoutError) as err:
+                raise self._record_failure(
                     f"Error communicating with device: {err}"
                 ) from err
-            except (BleakError, GoveeBleError, TimeoutError) as err:
-                self._consecutive_failures += 1
-                self.total_failures += 1
-                self._apply_backoff()
-                raise UpdateFailed(f"Error communicating with device: {err}") from err
-            else:
-                self.last_connected = dt_util.utcnow()
-                self._consecutive_failures = 0
-                await self._reset_interval_to_dynamic_base()
-                return data
+        self.last_connected = dt_util.utcnow()
+        self.consecutive_failures = 0
+        self.update_interval = self._jittered(self._base_interval)
+        return data
 
-    def _record_out_of_slots(self, message: str) -> UpdateFailed:
-        """Record a slot-exhaustion event (hit live, or detected proactively before
-        even trying) and skip the usual 1-failure grace, jumping straight several
-        exponential-backoff steps ahead - see OUT_OF_SLOTS_BACKOFF_STEPS."""
-        self._consecutive_failures += 1 + OUT_OF_SLOTS_BACKOFF_STEPS
+    def _record_failure(self, message: str) -> UpdateFailed:
+        self.consecutive_failures += 1
         self.total_failures += 1
         self._apply_backoff()
+        # DataUpdateCoordinator only notifies listeners when a failure *changes*
+        # last_update_success; push explicitly so the diagnostic entities
+        # (failure count, poll interval, availability) track an ongoing outage.
+        self.async_update_listeners()
         return UpdateFailed(message)
-
-    async def _reset_interval_to_dynamic_base(self) -> None:
-        """After a success, retarget the poll interval to the base cadence
-        stretched for the current device-count/slot-availability ratio (see
-        `scheduling.dynamic_interval`), plus jitter so recovering devices don't
-        all snap back to the exact same cadence and re-converge over uptime."""
-        device_count = async_loaded_entry_count(self.hass)
-        usable_slots = await async_usable_slots(self.hass)
-        target = dynamic_interval(self._base_interval, device_count, usable_slots)
-        self.update_interval = self._jittered(target)
 
     @staticmethod
     def _jittered(interval: timedelta) -> timedelta:
-        """Add random jitter so devices sharing the same nominal interval don't
-        stay in lockstep. Applied on every success (dynamic-base reset) and every
-        backoff step - the only place intervals are assigned deterministically
-        without it is the initial one-time startup stagger in __init__.py."""
+        """Random jitter so devices sharing a nominal interval don't drift into
+        lockstep and contend for the same connection slots."""
         return interval + timedelta(seconds=random.uniform(*POLL_JITTER_SECONDS))
 
-    @callback
-    def note_advertisement_seen(self) -> None:
-        """Record that a passive advertisement just arrived (device reachable)."""
-        self.last_seen = dt_util.utcnow()
-
-    @callback
-    def _async_refresh_finished(self) -> None:
-        # DataUpdateCoordinator suppresses listener updates on *consecutive*
-        # failures (no data change), which would freeze our diagnostic entities
-        # (connection failures, poll interval, signal strength) during exactly
-        # the outage they're meant to show. The base still notifies on the first
-        # failure and on recovery, so we only need to cover the suppressed case.
-        if self._consecutive_failures >= 2:
-            self.async_update_listeners()
+    def _apply_backoff(self) -> None:
+        """Lengthen the poll interval after consecutive failures: the first
+        failure keeps the base cadence (grace for a transient blip), then it
+        doubles up to the cap. Reset on the first success."""
+        steps = min(max(0, self.consecutive_failures - 1), _MAX_BACKOFF_STEPS)
+        self.update_interval = min(
+            self._jittered(self._base_interval * (2**steps)), self._max_interval
+        )
+        _LOGGER.debug(
+            "%s: %d consecutive failures, next poll in %ds",
+            self.name,
+            self.consecutive_failures,
+            self.update_interval.total_seconds(),
+        )
 
     def _sample_rssi(self) -> None:
-        """Refresh ``rssi`` from the most recent advertisement. Guarded so a
-        coordinator built without the HA bluetooth stack (direct unit tests)
-        can't break a poll."""
+        """Refresh ``rssi`` from the most recent advertisement (no connection)."""
         try:
             info = bluetooth.async_last_service_info(
                 self.hass, self._address, connectable=True
             )
         except RuntimeError:
-            # Bluetooth manager not set up (only happens in isolated unit tests;
-            # in production the integration depends on the bluetooth stack).
             return
         if info is not None:
             self.rssi = info.rssi
-
-    def _apply_backoff(self) -> None:
-        """Lengthen this device's poll interval after consecutive connect
-        failures so a chronically-unreachable device stops launching a
-        connection-retry storm every base interval and starving the shared
-        adapter. One failure keeps the base cadence (grace for a transient
-        blip); after that the interval doubles up to the cap. HA reads
-        ``update_interval`` when scheduling the next refresh, so this takes
-        effect on the following poll. Reset on the first success.
-        """
-        steps = max(0, self._consecutive_failures - 1)
-        interval = min(self._jittered(self._base_interval * 2**steps), self._max_interval)
-        self.update_interval = interval
-        _LOGGER.debug(
-            "%s: %d consecutive failures, next poll in %ds",
-            self.name,
-            self._consecutive_failures,
-            interval.total_seconds(),
-        )

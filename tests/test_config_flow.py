@@ -404,18 +404,44 @@ async def test_reconfigure_plug_updates_secret(hass: HomeAssistant) -> None:
     assert entry.data["secret"] == "a1b2c3d4e5f60718"
 
 
-async def test_reconfigure_not_found(
+async def test_reconfigure_works_while_out_of_range(
     hass: HomeAssistant, mock_config_entry: MockConfigEntry
 ) -> None:
-    """Reconfigure aborts if the device isn't currently reachable."""
+    """Updating the stored entry doesn't require the device to be advertising;
+    the reload picks it up whenever the device is next reachable."""
     mock_config_entry.add_to_hass(hass)
     result = await mock_config_entry.start_reconfigure_flow(hass)
-    with patch(
-        "custom_components.govee_ble_local.config_flow.async_ble_device_from_address",
-        return_value=None,
+    with (
+        patch(
+            "custom_components.govee_ble_local.config_flow.async_ble_device_from_address",
+            return_value=None,
+        ),
+        patch("custom_components.govee_ble_local.async_setup_entry", return_value=True),
     ):
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"], user_input={}
         )
     assert result["type"] is FlowResultType.ABORT
-    assert result["reason"] == "not_found"
+    assert result["reason"] == "reconfigure_successful"
+
+
+async def test_reauth_updates_secret(hass: HomeAssistant) -> None:
+    """A rejected secret starts reauth; entering a new key updates the entry."""
+    entry = MockConfigEntry(
+        domain=DOMAIN, title="Plug", unique_id="98:17:3C:B1:A2:D1",
+        data={"address": "98:17:3C:B1:A2:D1", "sku": "H5083", "secret": "00" * 8},
+    )
+    entry.add_to_hass(hass)
+    result = await entry.start_reauth_flow(hass)
+    assert result["type"] is FlowResultType.MENU
+    assert result["step_id"] == "reauth_confirm"
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], user_input={"next_step_id": "secret_manual"}
+    )
+    with patch("custom_components.govee_ble_local.async_setup_entry", return_value=True):
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input={"secret": "A1:B2:C3:D4:E5:F6:07:18"}
+        )
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "reauth_successful"
+    assert entry.data["secret"] == "a1b2c3d4e5f60718"

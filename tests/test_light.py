@@ -48,7 +48,9 @@ def _make_light(
 ) -> GoveeBleLocalLight:
     coordinator = GoveeBleLocalCoordinator(hass, device, ADDRESS)
     coordinator.last_update_success = True
-    coordinator.data = data if data is not None else DeviceState()
+    if data is not None:
+        device.state = data
+    coordinator.data = device.state  # in production coordinator.data IS device.state
     _CREATED.append(coordinator)
     light = GoveeBleLocalLight(coordinator, device, ADDRESS, TITLE)
     light.hass = hass
@@ -111,17 +113,29 @@ def test_device_info_surfaces_wifi_hw_serial(hass: HomeAssistant) -> None:
 
 
 async def test_light_turn_on_all_attributes(hass: HomeAssistant) -> None:
-    """turn_on applies brightness/rgb/color-temp and powers zones from off."""
+    """turn_on sends power + brightness + colour as ONE batched device call."""
     device = make_device()
     light = _make_light(hass, device)
-    await light.async_turn_on(
-        **{ATTR_BRIGHTNESS: 255, ATTR_RGB_COLOR: (10, 20, 30), ATTR_COLOR_TEMP_KELVIN: 3000}
+    await light.async_turn_on(**{ATTR_BRIGHTNESS: 255, ATTR_RGB_COLOR: (10, 20, 30)})
+    device.turn_on.assert_awaited_once_with(
+        power=True, brightness=100, rgb=(10, 20, 30), kelvin=None
     )
-    device.set_brightness.assert_awaited_once_with(100)
-    device.set_rgb.assert_awaited_once_with((10, 20, 30))
-    device.set_color_temp.assert_awaited_once_with(3000)
-    assert device.set_zone_power.await_count == 2  # both zones powered on
-    assert light.is_on is True  # zone power nudged onto the DeviceState
+    assert light.is_on is True
+
+
+async def test_light_turn_on_when_on_skips_power(hass: HomeAssistant) -> None:
+    """A brightness change on a lit fixture doesn't re-send power."""
+    device = make_device()
+    light = _make_light(hass, device, DeviceState(is_on=True))
+    await light.async_turn_on(**{ATTR_BRIGHTNESS: 1})
+    device.turn_on.assert_awaited_once_with(power=False, brightness=1, rgb=None, kelvin=None)
+
+
+async def test_light_turn_on_kelvin(hass: HomeAssistant) -> None:
+    device = make_device()
+    light = _make_light(hass, device)
+    await light.async_turn_on(**{ATTR_COLOR_TEMP_KELVIN: 3000})
+    device.turn_on.assert_awaited_once_with(power=True, brightness=None, rgb=None, kelvin=3000)
 
 
 async def test_light_turn_on_effect(hass: HomeAssistant) -> None:
@@ -137,33 +151,20 @@ async def test_light_turn_on_effect(hass: HomeAssistant) -> None:
     assert light.effect == "Forest"
 
 
-async def test_light_turn_off_powers_zones(hass: HomeAssistant) -> None:
-    """turn_off powers down every zone."""
+async def test_light_turn_off(hass: HomeAssistant) -> None:
+    """turn_off delegates whole-fixture power to the device (zones/global/bars
+    are the library's concern)."""
     device = make_device()
-    light = _make_light(hass, device)
+    light = _make_light(hass, device, DeviceState(is_on=True))
     await light.async_turn_off()
-    assert device.set_zone_power.await_count == 2
-    for call in device.set_zone_power.await_args_list:
-        assert call.args[1] is False
+    device.turn_off.assert_awaited_once()
     assert light.is_on is False
-
-
-async def test_light_no_zones_uses_global_power(hass: HomeAssistant) -> None:
-    """A light with no zones toggles global power instead."""
-    device = make_device(
-        capabilities=frozenset({Capability.BRIGHTNESS, Capability.RGB}), zones=()
-    )
-    light = _make_light(hass, device)
-    await light.async_turn_on()
-    device.set_power.assert_awaited_once_with(True)
-    await light.async_turn_off()
-    device.set_power.assert_awaited_with(False)
 
 
 async def test_light_command_error_becomes_ha_error(hass: HomeAssistant) -> None:
     """A BLE failure during a command surfaces as a HomeAssistantError."""
     device = make_device()
-    device.set_brightness.side_effect = BleakError("nope")
+    device.turn_on.side_effect = BleakError("nope")
     light = _make_light(hass, device)
     with pytest.raises(HomeAssistantError):
         await light.async_turn_on(**{ATTR_BRIGHTNESS: 255})
@@ -172,7 +173,7 @@ async def test_light_command_error_becomes_ha_error(hass: HomeAssistant) -> None
 async def test_light_command_timeout_becomes_ha_error(hass: HomeAssistant) -> None:
     """A stalled-handshake TimeoutError also surfaces as a clean HA error."""
     device = make_device()
-    device.set_brightness.side_effect = TimeoutError("handshake stalled")
+    device.turn_on.side_effect = TimeoutError("handshake stalled")
     light = _make_light(hass, device)
     with pytest.raises(HomeAssistantError):
         await light.async_turn_on(**{ATTR_BRIGHTNESS: 255})

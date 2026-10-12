@@ -27,7 +27,7 @@ async def test_setup_and_unload(
     assert entry.runtime_data.device is mock_device
 
     registry = dr.async_get(hass)
-    device = registry.async_get_device(identifiers={(DOMAIN, ADDRESS)})
+    device = registry.async_get_device_by_identifier((DOMAIN, ADDRESS), entry.entry_id)
     assert device is not None
     assert (dr.CONNECTION_BLUETOOTH, ADDRESS) in device.connections
     assert device.model == "H60A6"
@@ -73,21 +73,23 @@ async def test_setup_never_seen_requires_real_connect(
     assert coordinator.last_update_success is True
 
 
-async def test_setup_never_seen_retries_on_connect_failure(
+async def test_setup_does_not_block_on_failing_first_poll(
     hass: HomeAssistant,
     mock_config_entry: MockConfigEntry,
     mock_device: AsyncMock,
     mock_bluetooth: SimpleNamespace,
 ) -> None:
-    """A never-seen device that also fails to connect keeps the old
-    ConfigEntryNotReady safety net (setup-level retry), not just an ordinary
-    coordinator backoff."""
-    mock_bluetooth.last_info.return_value = None
+    """A reachable device whose first connect fails still loads (the poll runs
+    in the background and backs off) and its light stays available."""
     mock_device.update.side_effect = BleakError("no route to device")
     mock_config_entry.add_to_hass(hass)
-
-    assert not await hass.config_entries.async_setup(mock_config_entry.entry_id)
-    assert mock_config_entry.state is ConfigEntryState.SETUP_RETRY
+    assert await hass.config_entries.async_setup(mock_config_entry.entry_id)
+    await hass.async_block_till_done()
+    assert mock_config_entry.state is ConfigEntryState.LOADED
+    entity_id = er.async_get(hass).async_get_entity_id("light", DOMAIN, f"{ADDRESS}_light")
+    assert entity_id is not None
+    state = hass.states.get(entity_id)
+    assert state is not None and state.state != "unavailable"
 
 
 async def test_setup_sku_from_advertisement(
@@ -181,7 +183,7 @@ async def test_ble_mac_added_to_device_registry(
         await hass.async_block_till_done()
 
     registry = dr.async_get(hass)
-    dev = registry.async_get_device(identifiers={(DOMAIN, ADDRESS)})
+    dev = registry.async_get_device_by_identifier((DOMAIN, ADDRESS), entry.entry_id)
     assert dev is not None
     assert (dr.CONNECTION_BLUETOOTH, dr.format_mac("A4:C1:38:AA:BB:CC")) in dev.connections
     assert await hass.config_entries.async_unload(entry.entry_id)
@@ -193,7 +195,9 @@ async def test_capture_session_service_returns_report(
     """The capture_session service runs the self-test for the targeted device and
     returns the captured report as response data."""
     device_registry = dr.async_get(hass)
-    device_entry = device_registry.async_get_device(identifiers={(DOMAIN, ADDRESS)})
+    device_entry = device_registry.async_get_device_by_identifier(
+        (DOMAIN, ADDRESS), setup_integration.entry_id
+    )
     assert device_entry is not None
 
     response = await hass.services.async_call(

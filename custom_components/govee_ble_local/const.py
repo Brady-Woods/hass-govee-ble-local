@@ -15,10 +15,9 @@ SERVICE_CAPTURE_SESSION = "capture_session"
 CONF_SECRET = "secret"
 
 # Rich state (brightness, colour, scene, segments, zones) needs a connection, so
-# each poll briefly locks one of the adapter/proxy's scarce connection slots.
-# on/off is now tracked PASSIVELY from advertisements (no slot), so this poll can
-# be slow — it only reconciles the richer fields. Devices the advert reports as
-# off aren't connected to at all.
+# each poll briefly holds one of the adapter/proxy's scarce connection slots.
+# on/off is also tracked PASSIVELY from advertisements (no slot), so this poll
+# can be slow — it reconciles the richer fields and catches external changes.
 POLL_INTERVAL_SECONDS = 120
 
 # Ceiling for the coordinator's adaptive backoff. A device that repeatedly fails
@@ -29,24 +28,24 @@ POLL_INTERVAL_SECONDS = 120
 # success. on/off still updates live from advertisements regardless.
 MAX_POLL_INTERVAL_SECONDS = 1800
 
-# Always leave at least this many BLE connection slots free for a manual connection
-# (e.g. the Govee app) or another integration entirely — never let this integration's
-# own polling consume every available slot.
-RESERVED_CONNECTION_SLOTS = 1
+# Integration-wide cap on simultaneous background polls. HA's Bluetooth manager
+# already routes each connection to a scanner with a free slot; this just keeps
+# our own polling from launching a connect storm (a single local adapter can
+# only establish one LE connection at a time).
+MAX_CONCURRENT_POLLS = 2
 
-# Random jitter (seconds) added to BOTH the recurring poll interval and the
-# backoff-reset-to-base transition. Without it, every device's independent timer is
-# deterministic, so they drift back into lockstep over uptime even after starting
-# staggered — see the one-time crc32 stagger in __init__.py, which only covers the
-# very first poll. Jitter keeps them spread out for the life of the entry.
+# Random jitter (seconds) added to the poll interval (base and backoff) so
+# devices don't drift into lockstep over uptime. The crc32 stagger in
+# __init__.py only spreads the very first poll.
 POLL_JITTER_SECONDS = (0, 30)
 
-# Extra backoff steps applied specifically when a poll fails with
-# BleakOutOfConnectionSlotsError (the whole adapter/proxy pool is out of slots) rather
-# than a generic BLE error. Retrying quickly when EVERY device is contending for the
-# same exhausted pool just adds to the contention; skip the normal 1-failure grace and
-# jump straight this many exponential-backoff steps ahead.
-OUT_OF_SLOTS_BACKOFF_STEPS = 2
+# A device that has vanished from every scanner goes unavailable after this many
+# consecutive failed polls. A device still advertising stays available.
+UNAVAILABLE_AFTER_FAILURES = 3
+
+# Publish the "last seen" diagnostic at most this often (advertisements arrive
+# several times a second; one recorder row per advertisement is pure bloat).
+LAST_SEEN_RESOLUTION_SECONDS = 60
 
 # Maps a library zone name (Device.zones[i].name) to an entity translation
 # key. The library uses the device's own zone names (from the Govee app/cloud:

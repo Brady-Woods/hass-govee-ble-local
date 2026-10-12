@@ -20,6 +20,7 @@ Two consumers:
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections import deque
 from collections.abc import Awaitable, Callable, Iterator
@@ -42,21 +43,27 @@ _BLE_ERRORS = (BleakError, GoveeBleError, TimeoutError)
 _MAX_SCENES = 3
 
 
-class _RingHandler(logging.Handler):
-    """A bounded in-memory log sink (keeps the last ``maxlen`` records)."""
+# One self-test at a time: session_capture flips the shared library logger to
+# DEBUG and restores it afterwards, which concurrent runs would clobber.
+_SELF_TEST_LOCK = asyncio.Lock()
 
-    def __init__(self, maxlen: int) -> None:
+
+class _RingHandler(logging.Handler):
+    """A bounded in-memory log sink (keeps the last ``maxlen`` records),
+    optionally keeping only records that mention ``address``."""
+
+    def __init__(self, maxlen: int, address: str | None = None) -> None:
         super().__init__()
         self.buffer: deque[dict[str, str]] = deque(maxlen=maxlen)
+        self._address = address
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
+            message = record.getMessage()
+            if self._address is not None and self._address not in message:
+                return
             self.buffer.append(
-                {
-                    "logger": record.name,
-                    "level": record.levelname,
-                    "message": record.getMessage(),
-                }
+                {"logger": record.name, "level": record.levelname, "message": message}
             )
         except Exception:  # pragma: no cover - logging must never raise
             self.handleError(record)
@@ -66,30 +73,28 @@ class LogCapture:
     """Always-on, address-scoped WARNING+ ring buffer for one device.
 
     Attached to the ``govee_ble_local`` logger for the life of the config entry; cheap because
-    the handler only accepts WARNING and above. ``records()`` returns just the lines that
-    mention this device's address, for the diagnostics dump.
+    the handler only accepts WARNING and above, and it keeps only lines mentioning this
+    device's address (so a noisy neighbour can't evict them).
     """
 
     def __init__(self, address: str, *, maxlen: int = 200) -> None:
         self._address = address
-        self._handler = _RingHandler(maxlen)
+        self._handler = _RingHandler(maxlen, address)
         self._handler.setLevel(logging.WARNING)
         self._logger = logging.getLogger(_ROOT_LOGGER)
         self._logger.addHandler(self._handler)
 
     def records(self) -> list[str]:
-        return [
-            f"{r['level']} {r['message']}"
-            for r in self._handler.buffer
-            if self._address in r["message"]
-        ]
+        return [f"{r['level']} {r['message']}" for r in self._handler.buffer]
 
     def detach(self) -> None:
         self._logger.removeHandler(self._handler)
 
 
 @contextmanager
-def session_capture(*, maxlen: int = 4000) -> Iterator[_RingHandler]:
+def session_capture(
+    *, maxlen: int = 4000, address: str | None = None
+) -> Iterator[_RingHandler]:
     """Temporarily capture the full ``govee_ble_local`` flow + frame stream.
 
     Raises the ``govee_ble_local`` logger to DEBUG (the child ``.frames`` logger inherits it,
@@ -97,7 +102,7 @@ def session_capture(*, maxlen: int = 4000) -> Iterator[_RingHandler]:
     buffer; both the level and the handler are restored on exit.
     """
     logger = logging.getLogger(_ROOT_LOGGER)
-    handler = _RingHandler(maxlen)
+    handler = _RingHandler(maxlen, address)
     handler.setLevel(logging.DEBUG)
     previous_level = logger.level
     logger.setLevel(logging.DEBUG)
@@ -209,10 +214,15 @@ async def async_run_self_test(device: Device) -> dict[str, Any]:
     colour/brightness - is captured up front and restored at the end (see `_snapshot`/`_restore`),
     not just the whole-fixture fields the test happens to touch first.
     """
+    async with _SELF_TEST_LOCK:
+        return await _run_self_test(device)
+
+
+async def _run_self_test(device: Device) -> dict[str, Any]:
     caps = device.capabilities
     steps: list[dict[str, Any]] = []
 
-    with session_capture() as capture:
+    with session_capture(address=device.address) as capture:
         try:
             await device.update()
         except _BLE_ERRORS as err:
@@ -357,7 +367,7 @@ async def async_run_self_test(device: Device) -> dict[str, Any]:
         "ok": ok,
         "address": device.address,
         "sku": device.sku,
-        "encryption": device.profile.encryption.value,
+        "encryption": device.encryption.value,
         "capabilities": sorted(c.value for c in caps),
         "steps": steps,
         "frames": frames,

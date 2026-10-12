@@ -30,8 +30,16 @@
           "secret": "Secret key (hex)"
         }
       },
+      "reauth_confirm": {
+        "title": "Secret key rejected",
+        "description": "{name} rejected its stored secret key. This happens when the key is wrong or the device was re-paired to a Govee account (which rotates the key). How do you want to provide the new one?",
+        "menu_options": {
+          "secret_cloud": "Fetch it from my Govee account",
+          "secret_manual": "Enter it manually (hex)"
+        }
+      },
       "reconfigure": {
-        "description": "Re-check that {name} is currently reachable over Bluetooth and reload it. For devices that need a secret key, you can set or update it below.",
+        "description": "Reload {name}. For devices that need a secret key, you can set or update it below.",
         "data": {
           "secret": "Secret key (hex)"
         }
@@ -47,7 +55,8 @@
       "already_configured": "Device is already configured.",
       "not_supported": "This Govee model isn't supported by this integration yet.",
       "not_found": "The device could not be found over Bluetooth right now. Make sure it is powered on and in range, then try again.",
-      "reconfigure_successful": "Device re-verified and reloaded successfully."
+      "reconfigure_successful": "Device reloaded successfully.",
+      "reauth_successful": "Secret key updated."
     }
   },
   "entity": {
@@ -108,6 +117,9 @@
     },
     "ble_command_failed": {
       "message": "Could not communicate with {device_name}: {error}"
+    },
+    "secret_rejected": {
+      "message": "{device_name} rejected its secret key. Update it via the re-authentication prompt in Settings > Devices & services."
     }
   }
 }

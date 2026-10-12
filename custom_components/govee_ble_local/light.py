@@ -30,6 +30,11 @@ _LOGGER = logging.getLogger(__name__)
 PARALLEL_UPDATES = 1
 
 
+def _pct(brightness: int) -> int:
+    """HA 1..255 -> device percent 1..100 (HA 1-2 must not round down to 0)."""
+    return max(1, round(brightness / 255 * 100))
+
+
 def _sub_light_modes(device: Device) -> set[ColorMode]:
     """Colour modes for a zone/segment sub-light: always RGB, plus COLOR_TEMP
     when the fixture supports colour temperature (the library exposes masked,
@@ -110,16 +115,12 @@ class GoveeBleLocalLight(GoveeBleLocalEntity, LightEntity):
         self._attr_supported_color_modes = modes
 
         if Capability.COLOR_TEMP in caps:
-            self._attr_min_color_temp_kelvin = getattr(device, "min_kelvin", 2700)
-            self._attr_max_color_temp_kelvin = getattr(device, "max_kelvin", 6500)
+            self._attr_min_color_temp_kelvin = device.min_kelvin or 2700
+            self._attr_max_color_temp_kelvin = device.max_kelvin or 6500
         if Capability.SCENES in caps:
             self._attr_supported_features = LightEntityFeature.EFFECT
             # EFFECT_OFF lets the user clear a running scene from the UI.
             self._attr_effect_list = [EFFECT_OFF, *device.scene_names]
-
-        # Whole-fixture power: use the named zones when present (H60A6), else
-        # the global power command.
-        self._zone_names = [z.name for z in device.zones]
 
         # Default color mode when the device hasn't reported/been set to one.
         if ColorMode.COLOR_TEMP in modes:
@@ -187,62 +188,40 @@ class GoveeBleLocalLight(GoveeBleLocalEntity, LightEntity):
         super()._handle_coordinator_update()
 
     async def async_turn_on(self, **kwargs: Any) -> None:
-        was_off = self.is_on is not True
+        # Power is only sent when the fixture isn't known to be on, so a
+        # brightness/colour/effect change on a lit fixture doesn't re-toggle it.
+        power = self.is_on is not True
+        brightness = _pct(kwargs[ATTR_BRIGHTNESS]) if ATTR_BRIGHTNESS in kwargs else None
+        rgb = kwargs.get(ATTR_RGB_COLOR)
+        kelvin = kwargs.get(ATTR_COLOR_TEMP_KELVIN)
+        effect = kwargs.get(ATTR_EFFECT)
+        if effect == EFFECT_OFF:
+            # Exit scene mode by re-applying a solid colour.
+            data = self._data
+            rgb = rgb or (data.rgb_color if data else None) or (255, 255, 255)
+            effect = None
 
-        if ATTR_BRIGHTNESS in kwargs:
-            pct = round(kwargs[ATTR_BRIGHTNESS] / 255 * 100)
-            _LOGGER.debug("Setting brightness to %d%%", pct)
-            await self._run_client_command(self._device.set_brightness(pct))
-
-        if ATTR_RGB_COLOR in kwargs:
-            rgb = kwargs[ATTR_RGB_COLOR]
-            _LOGGER.debug("Setting RGB color to %s", rgb)
-            await self._run_client_command(self._device.set_rgb(rgb))
+        # Power + brightness + colour go out as ONE batched device operation
+        # (one lock, one connection, each frame ack-verified, power first).
+        if power or brightness is not None or rgb is not None or kelvin is not None:
+            await self._run_client_command(
+                self._device.turn_on(
+                    power=power,
+                    brightness=brightness,
+                    rgb=tuple(rgb) if rgb is not None else None,
+                    kelvin=kelvin,
+                )
+            )
+        if rgb is not None or kelvin is not None or ATTR_EFFECT in kwargs:
             self._attr_effect = None
-
-        if ATTR_COLOR_TEMP_KELVIN in kwargs:
-            kelvin = kwargs[ATTR_COLOR_TEMP_KELVIN]
-            _LOGGER.debug("Setting color temperature to %dK", kelvin)
-            await self._run_client_command(self._device.set_color_temp(kelvin))
-            self._attr_effect = None
-
-        if ATTR_EFFECT in kwargs:
-            effect = kwargs[ATTR_EFFECT]
-            if effect == EFFECT_OFF:
-                # Exit scene mode by re-applying a solid colour.
-                data = self._data
-                rgb = (data.rgb_color if data else None) or (255, 255, 255)
-                _LOGGER.debug("Clearing effect via solid RGB %s", rgb)
-                await self._run_client_command(self._device.set_rgb(rgb))
-                self._attr_effect = None
-            else:
-                _LOGGER.debug("Activating scene %s", effect)
-                await self._run_client_command(self._device.set_scene_by_name(effect))
-                self._attr_effect = effect
-
-        # Only touch power when turning the fixture on from off, so a
-        # brightness/effect-only call while already on doesn't re-toggle.
-        if was_off:
-            if self._zone_names:
-                for name in self._zone_names:
-                    await self._run_client_command(self._device.set_zone_power(name, True))
-            else:
-                await self._run_client_command(self._device.set_power(True))
-            # Zone power isn't reflected in DeviceState; nudge it optimistically
-            # (the next poll reconciles). coordinator.data IS the device state.
-            if self._data is not None:
-                self._data.is_on = True
-        self.async_write_ha_state()
+        if effect is not None:
+            await self._run_client_command(self._device.set_scene_by_name(effect))
+            self._attr_effect = effect
+        self._async_publish_command_state()
 
     async def async_turn_off(self, **kwargs: Any) -> None:
-        if self._zone_names:
-            for name in self._zone_names:
-                await self._run_client_command(self._device.set_zone_power(name, False))
-        else:
-            await self._run_client_command(self._device.set_power(False))
-        if self._data is not None:
-            self._data.is_on = False
-        self.async_write_ha_state()
+        await self._run_client_command(self._device.turn_off())
+        self._async_publish_command_state()
 
 
 class GoveeBleLocalSegmentLight(GoveeBleLocalEntity, LightEntity):
@@ -323,7 +302,7 @@ class GoveeBleLocalSegmentLight(GoveeBleLocalEntity, LightEntity):
             self._attr_rgb_color = rgb
             self._attr_color_mode = ColorMode.RGB
         if ATTR_BRIGHTNESS in kwargs:
-            pct = round(kwargs[ATTR_BRIGHTNESS] / 255 * 100)
+            pct = _pct(kwargs[ATTR_BRIGHTNESS])
             _LOGGER.debug("Setting segment %d brightness to %d%%", self._index, pct)
             await self._run_client_command(
                 self._device.set_segment_brightness([self._index], pct)
@@ -336,13 +315,13 @@ class GoveeBleLocalSegmentLight(GoveeBleLocalEntity, LightEntity):
             self._attr_rgb_color = rgb
             self._attr_color_mode = ColorMode.RGB
         self._attr_is_on = True
-        self.async_write_ha_state()
+        self._async_publish_command_state()
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         # No per-segment power command; black it out.
         await self._run_client_command(self._device.set_segment_rgb([self._index], (0, 0, 0)))
         self._attr_is_on = False
-        self.async_write_ha_state()
+        self._async_publish_command_state()
 
 
 class GoveeBleLocalZoneLight(GoveeBleLocalEntity, LightEntity):
@@ -422,15 +401,15 @@ class GoveeBleLocalZoneLight(GoveeBleLocalEntity, LightEntity):
             self._attr_rgb_color = rgb
             self._attr_color_mode = ColorMode.RGB
         if ATTR_BRIGHTNESS in kwargs:
-            pct = round(kwargs[ATTR_BRIGHTNESS] / 255 * 100)
+            pct = _pct(kwargs[ATTR_BRIGHTNESS])
             _LOGGER.debug("Setting zone %s brightness to %d%%", self._zone_name, pct)
             await self._run_client_command(
                 self._device.set_segment_brightness(list(self._segments), pct)
             )
             self._attr_brightness = kwargs[ATTR_BRIGHTNESS]
         await self._run_client_command(self._device.set_zone_power(self._zone_name, True))
-        self.async_write_ha_state()
+        self._async_publish_command_state()
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         await self._run_client_command(self._device.set_zone_power(self._zone_name, False))
-        self.async_write_ha_state()
+        self._async_publish_command_state()

@@ -75,12 +75,12 @@ class GoveeBleLocalZoneSwitch(GoveeBleLocalEntity, SwitchEntity):
     async def async_turn_on(self, **kwargs: Any) -> None:
         _LOGGER.debug("Turning zone %s on for %s", self._zone_name, self._address)
         await self._run_client_command(self._device.set_zone_power(self._zone_name, True))
-        self.async_write_ha_state()
+        self._async_publish_command_state()
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         _LOGGER.debug("Turning zone %s off for %s", self._zone_name, self._address)
         await self._run_client_command(self._device.set_zone_power(self._zone_name, False))
-        self.async_write_ha_state()
+        self._async_publish_command_state()
 
 
 class GoveeBleLocalPowerSwitch(GoveeBleLocalEntity, SwitchEntity):
@@ -112,9 +112,9 @@ class GoveeBleLocalPowerSwitch(GoveeBleLocalEntity, SwitchEntity):
     async def async_turn_on(self, **kwargs: Any) -> None:
         _LOGGER.debug("Turning power on for %s", self._address)
         await self._run_client_command(self._device.set_power(True))
-        self.async_write_ha_state()
+        self._async_publish_command_state()
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         _LOGGER.debug("Turning power off for %s", self._address)
         await self._run_client_command(self._device.set_power(False))
-        self.async_write_ha_state()
+        self._async_publish_command_state()

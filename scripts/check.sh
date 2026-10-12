@@ -34,11 +34,13 @@ python -m pip install --quiet --upgrade pip
 python -m pip install --quiet -r requirements_test.txt
 
 echo ">> installing govee-ble-local (runtime dependency)"
-if [ -d ../govee-ble-local ]; then
+if [ -d ../govee-ble-local ] && [ -z "${CI:-}" ]; then
   python -m pip install --quiet ../govee-ble-local          # local dev checkout
 else
-  python -m pip install --quiet \
-    "govee-ble-local @ git+https://github.com/Brady-Woods/govee-ble-local"
+  # CI tests exactly what ships: the requirement pinned in manifest.json.
+  REQ="$(python -c 'import json;print(json.load(open("custom_components/govee_ble_local/manifest.json"))["requirements"][0])')"
+  echo "   $REQ"
+  python -m pip install --quiet "$REQ"
 fi
 
 echo ">> mypy (Home Assistant strict config, see mypy.ini)"

@@ -7,7 +7,6 @@ import zlib
 from dataclasses import dataclass
 from typing import Any
 
-import voluptuous as vol
 from govee_ble_local import Capability, Device, GoveeBleNotSupported, create_device
 from govee_ble_local.identify import identify
 from homeassistant.components import bluetooth
@@ -21,6 +20,7 @@ from homeassistant.core import (
     callback,
 )
 from homeassistant.exceptions import ConfigEntryNotReady, HomeAssistantError
+from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.service import async_extract_config_entry_ids
@@ -102,77 +102,66 @@ async def async_setup_entry(hass: HomeAssistant, entry: GoveeBleLocalConfigEntry
     log_capture = LogCapture(address)
     entry.async_on_unload(log_capture.detach)
 
-    coordinator = GoveeBleLocalCoordinator(hass, device, address)
+    coordinator = GoveeBleLocalCoordinator(hass, device, address, entry)
 
     # Stagger multiple devices' poll schedules so they don't stay in lockstep
     # and repeatedly fight over the adapter's limited BLE connection slots.
     stagger = zlib.crc32(address.encode()) % 8
 
-    if service_info is not None:
-        # The device is currently advertising - trust that as "ready" rather than
-        # blocking config-entry setup on a full connect+handshake for every
-        # device on every HA restart. With many devices sharing a constrained BLE
-        # connection-slot pool, that startup storm is a direct contributor to
-        # slot exhaustion (confirmed live: BleakOutOfConnectionSlotsError after
-        # 10 attempts when a proxy went offline). Entities come up available
-        # immediately from whatever passive state we already have (on/off from
-        # the last advertisement, if any); the real first connect+poll still
-        # happens - staggered, and subject to the semaphore/slot-awareness in
-        # coordinator.py - as a tracked task that does NOT block setup. A
-        # failure there is handled by the coordinator's normal backoff, not an
-        # entry-level ConfigEntryNotReady - we already know the device is present.
-        _LOGGER.debug(
-            "%s: visible via advertisement; marking ready without blocking setup"
-            " on a full handshake",
-            address,
-        )
-        coordinator.async_set_updated_data(device.state)
+    # The device is advertising (async_ble_device_from_address above found it),
+    # so mark the entry ready from passive state instead of blocking setup on a
+    # full connect+handshake for every device on every restart - that startup
+    # storm is what exhausts connection slots. The first real poll runs
+    # staggered in the background; a failure there is handled by the
+    # coordinator's backoff, not ConfigEntryNotReady.
+    coordinator.async_set_updated_data(device.state)
 
-        async def _staggered_first_poll() -> None:
-            _LOGGER.debug("Waiting %ds stagger before first poll of %s", stagger, address)
-            await asyncio.sleep(stagger)
-            _LOGGER.debug("Establishing initial connection for %s", address)
-            await coordinator.async_refresh()
-
-        entry.async_create_task(
-            hass, _staggered_first_poll(), name=f"{DOMAIN}_first_poll_{address}"
-        )
-    else:
-        # Never seen this device advertise at all - there's no passive signal to
-        # trust, so require a real connect before considering setup successful
-        # (raises ConfigEntryNotReady on failure), same as before.
+    async def _staggered_first_poll() -> None:
         _LOGGER.debug("Waiting %ds stagger before first poll of %s", stagger, address)
         await asyncio.sleep(stagger)
-        _LOGGER.debug("Establishing initial connection for %s", address)
-        await coordinator.async_config_entry_first_refresh()
+        await coordinator.async_refresh()
+
+    entry.async_create_background_task(
+        hass, _staggered_first_poll(), name=f"{DOMAIN}_first_poll_{address}"
+    )
+
+    registry_info: tuple[Any, ...] | None = None
 
     @callback
     def _sync_device_registry() -> None:
-        # Device-info (wifi MAC, hardware/firmware version, serial) lives on the
-        # DeviceState in the v3 library, populated by read-back where supported.
+        # Device-info (wifi MAC, hardware/firmware version, serial) is read back
+        # on the first poll(s); enrich the registry entry when it changes (this
+        # listener fires on every coordinator update, so skip the no-op case).
+        nonlocal registry_info
         state = device.state
+        info = (
+            clean_mac(state.ble_mac),
+            clean_mac(state.wifi_mac),
+            clean_text(state.hardware_version),
+            clean_text(state.firmware_version),
+            clean_text(state.serial_number),
+        )
+        if info == registry_info:
+            return
+        registry_info = info
+        ble_mac, wifi_mac, hw_version, sw_version, serial = info
         connections = {(dr.CONNECTION_BLUETOOTH, address)}
-        ble_mac = clean_mac(state.ble_mac)
-        wifi_mac = clean_mac(state.wifi_mac)
         if ble_mac:
             connections.add((dr.CONNECTION_BLUETOOTH, dr.format_mac(ble_mac)))
         if wifi_mac:
             connections.add((dr.CONNECTION_NETWORK_MAC, dr.format_mac(wifi_mac)))
-        registry = dr.async_get(hass)
-        registry.async_get_or_create(
+        dr.async_get(hass).async_get_or_create(
             config_entry_id=entry.entry_id,
             identifiers={(DOMAIN, address)},
             connections=connections,
             manufacturer="Govee",
             model=device.sku,
-            hw_version=clean_text(state.hardware_version),
-            sw_version=clean_text(state.firmware_version),
-            serial_number=clean_text(state.serial_number),
+            hw_version=hw_version,
+            sw_version=sw_version,
+            serial_number=serial,
         )
 
     _sync_device_registry()
-    # Device-info (wifi MAC, hardware version, serial) is read back on the first
-    # poll(s); re-sync when it arrives so the registry entry gets enriched.
     entry.async_on_unload(coordinator.async_add_listener(_sync_device_registry))
 
     @callback
@@ -180,17 +169,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: GoveeBleLocalConfigEntry
         service_info: bluetooth.BluetoothServiceInfoBleak,
         change: bluetooth.BluetoothChange,
     ) -> None:
-        # Refresh the BLEDevice handle for future connections, and update on/off
-        # PASSIVELY from the advertisement (no connection/slot). The library
-        # parses on/off out of the Govee manufacturer data and reports whether it
-        # changed; push any change straight to the entities so on/off is live
-        # between polls.
-        coordinator.note_advertisement_seen()
+        # Keep the freshest BLEDevice (best scanner/proxy path) for the next
+        # connection, and take on/off PASSIVELY from the advertisement. Only
+        # push to the entities when something they show actually changed -
+        # advertisements arrive several times a second per device.
+        was_available = coordinator.device_available
+        publish_last_seen = coordinator.note_advertisement_seen()
         device.update_ble_device(service_info.device)
         if device.ingest_advertisement(service_info):
             coordinator.async_set_updated_data(device.state)
-        else:
-            # Presence/last-seen diagnostics still moved even if on/off didn't.
+        elif publish_last_seen or not was_available:
             coordinator.async_update_listeners()
 
     entry.async_on_unload(
@@ -229,7 +217,7 @@ def _async_register_services(hass: HomeAssistant) -> None:
     async def _async_capture_session(call: ServiceCall) -> ServiceResponse:
         """Run the device self-test against each targeted device and return the
         captured session(s)."""
-        entry_ids = await async_extract_config_entry_ids(hass, call)
+        entry_ids = await async_extract_config_entry_ids(call)
         results: list[Any] = []
         for entry_id in entry_ids:
             target = hass.config_entries.async_get_entry(entry_id)
@@ -253,8 +241,8 @@ def _async_register_services(hass: HomeAssistant) -> None:
         DOMAIN,
         SERVICE_CAPTURE_SESSION,
         _async_capture_session,
-        # Target-only service (device/entity/area); allow the target keys through.
-        schema=vol.Schema({}, extra=vol.ALLOW_EXTRA),
+        # Target-only service (device/entity/area).
+        schema=cv.make_entity_service_schema({}),
         supports_response=SupportsResponse.ONLY,
     )
 
@@ -282,9 +270,10 @@ def _remove_legacy_zone_entities(hass: HomeAssistant, address: str, device: Devi
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: GoveeBleLocalConfigEntry) -> bool:
-    """Unload a config entry, disconnecting the BLE device."""
+    """Unload a config entry: platforms first, then release the BLE link."""
     _LOGGER.debug("Unloading entry for %s", entry.data["address"])
-    await entry.runtime_data.device.stop()
     # The capture_session service is registered in async_setup (integration-wide),
     # so it is intentionally left in place across entry unloads.
-    return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    if unload_ok := await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
+        await entry.runtime_data.device.stop()
+    return unload_ok

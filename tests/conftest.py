@@ -60,6 +60,21 @@ def make_device(
         zones_on[name] = on
 
     device.set_zone_power = AsyncMock(side_effect=_set_zone_power)
+
+    async def _turn_on(
+        *, power: bool = True, brightness: int | None = None,
+        rgb: tuple[int, int, int] | None = None, kelvin: int | None = None,
+    ) -> None:
+        if power:
+            device.state.is_on = True
+        if brightness is not None:
+            device.state.brightness = brightness
+
+    async def _turn_off() -> None:
+        device.state.is_on = False
+
+    device.turn_on = AsyncMock(side_effect=_turn_on)
+    device.turn_off = AsyncMock(side_effect=_turn_off)
     return device
 
 
@@ -72,18 +87,15 @@ def auto_enable_custom_integrations(
 
 
 @pytest.fixture(autouse=True)
-def mock_plenty_of_ble_slots() -> Generator[MagicMock]:
-    """By default, report an abundance of BLE connection slots so tests that
-    don't care about slot-awareness (the vast majority) aren't affected by it -
-    the isolated test environment has no real scanners registered, which would
-    otherwise read as "0 slots available" and make every poll skip itself as
-    exhausted. Tests specifically exercising slot-exhaustion / dynamic-interval
-    behavior override this patch locally with their own values."""
+def mock_device_present() -> Generator[MagicMock]:
+    """By default the device is reachable (advertising). The isolated test
+    environment has no real scanners, which would otherwise read as "vanished"
+    and make every poll skip itself. Tests of reachability patch it locally."""
     with patch(
-        "custom_components.govee_ble_local.scheduling.bluetooth.async_scanner_count",
-        return_value=10,
-    ) as scanner_count:
-        yield scanner_count
+        "custom_components.govee_ble_local.coordinator.bluetooth.async_address_present",
+        return_value=True,
+    ) as present:
+        yield present
 
 
 @pytest.fixture

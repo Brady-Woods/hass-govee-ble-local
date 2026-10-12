@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock
 
+import pytest
+
 from govee_ble_local import Capability, Zone
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
@@ -131,3 +133,22 @@ async def test_power_switch_created_for_plug(hass: HomeAssistant) -> None:
     device.set_power.assert_awaited_with(True)
     assert switch.is_on is True
     await entry.runtime_data.coordinator.async_shutdown()
+
+
+async def test_command_auth_error_starts_reauth(
+    hass: HomeAssistant, setup_integration: MockConfigEntry, mock_device: AsyncMock
+) -> None:
+    """A secret rejection on a command raises a clear error and starts reauth."""
+    from govee_ble_local import GoveeBleAuthError
+    from homeassistant.exceptions import HomeAssistantError
+
+    mock_device.turn_off.side_effect = GoveeBleAuthError("rejected")
+    light = next(
+        e for e in hass.data["entity_components"]["light"].entities
+        if e.unique_id == f"{ADDRESS}_light"
+    )
+    with pytest.raises(HomeAssistantError):
+        await light.async_turn_off()
+    await hass.async_block_till_done()
+    flows = hass.config_entries.flow.async_progress_by_handler(DOMAIN)
+    assert any(f["context"]["source"] == "reauth" for f in flows)
