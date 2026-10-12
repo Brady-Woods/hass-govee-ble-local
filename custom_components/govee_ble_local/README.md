@@ -35,12 +35,15 @@ profile's capabilities:
 2. `create_device()` from the library (with the secret key for secret-gated
    plugs) and a `GoveeBleLocalCoordinator`.
 3. Mark the entry ready from passive state and run the **first poll in the
-   background**, staggered by `crc32(address) % 8` s — a full connect +
+   background**, staggered by `crc32(address) % 30` s — a full connect +
    handshake for every device on every restart is what exhausts connection
    slots.
 4. Register a passive advertisement callback: keeps the library's `BLEDevice`
-   fresh (best proxy path for the next connection) and updates on/off from the
-   advertisement. Entities are only written when something they show changed.
+   fresh (best proxy path for the next connection) and updates on/off and RSSI
+   from the advertisement. Device state goes to every entity only when it
+   changed; last-seen/RSSI go to the diagnostic entities at most once a minute.
+   Passive updates never reschedule the poll. Loss of the connectable and of
+   the any-scanner history are tracked separately.
 
 ### Polling (`coordinator.py`)
 - `Device.update()` every `POLL_INTERVAL_SECONDS` (120 s) + jitter; capped
@@ -53,8 +56,10 @@ profile's capabilities:
 - **Availability = reachability**: an entity stays available while the device
   is advertising, regardless of poll failures (commands can still reach it).
   A device that vanished from every scanner goes unavailable after
-  `UNAVAILABLE_AFTER_FAILURES` failed polls.
-- A rejected secret key (`GoveeBleAuthError`) starts the re-auth flow.
+  `UNAVAILABLE_AFTER_FAILURES` failed polls. When it starts advertising
+  again it is polled at once and the backoff is reset.
+- A rejected secret key (`GoveeBleAuthError`) starts the re-auth flow, and
+  polling stops until the entry is reloaded with a new key.
 
 ### Commands (`light.py`, `switch.py`, `entity.py`)
 - The main light sends power + brightness + colour as **one batched library
@@ -88,8 +93,10 @@ verified on hardware.
 No YAML. Add via Bluetooth discovery or **Add Integration → Govee BLE Local**.
 Secret-gated plugs need their 8-byte key: read off an unbound device
 automatically, fetched from your Govee account (credentials used once, not
-stored), or entered manually. **Reconfigure** updates the key and reloads;
-**diagnostics** are downloadable per device (MACs, serial and secret redacted).
+stored), or entered manually. **Reconfigure** replaces the key (a blank field
+keeps the stored one; a checkbox removes it) and reloads; **diagnostics** are
+downloadable per device (MACs, serial and secret redacted by key and scrubbed
+from all free text).
 
 ## Troubleshooting
 

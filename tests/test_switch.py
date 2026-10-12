@@ -1,154 +1,389 @@
-"""Tests for the Govee BLE Local switch (per-zone, and whole-device power)
-platform."""
+"""Tests for the switch platform: the smart-plug power switch and zone switches."""
+
 from __future__ import annotations
 
-from unittest.mock import AsyncMock
+import dataclasses
+from types import SimpleNamespace
+from typing import Any
+from unittest.mock import patch
 
-import pytest
-
-from govee_ble_local import Capability, Zone
+from bleak.exc import BleakError
+from govee_ble_local import (
+    Device,
+    GoveeBleAuthError,
+    GoveeBleConnectionError,
+    GoveeBleHandshakeError,
+    GoveeBleNotSupported,
+    GoveeBleTimeout,
+    Zone,
+)
+from govee_ble_local.wire import build
+from homeassistant.components.switch import SwitchDeviceClass
+from homeassistant.const import STATE_OFF, STATE_ON, STATE_UNAVAILABLE, STATE_UNKNOWN
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import entity_registry as er
+import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.govee_ble_local import GoveeBleLocalRuntimeData
-from custom_components.govee_ble_local.capture import LogCapture
-from custom_components.govee_ble_local.const import DOMAIN
-from custom_components.govee_ble_local.coordinator import GoveeBleLocalCoordinator
-from custom_components.govee_ble_local.switch import (
-    GoveeBleLocalPowerSwitch,
-    GoveeBleLocalZoneSwitch,
-    async_setup_entry,
+from custom_components.govee_ble_local.const import DOMAIN, UNAVAILABLE_AFTER_FAILURES
+
+from .conftest import connection, make_device
+from .const import ADDRESS
+
+PLUG = "switch.test_ceiling"
+
+
+# -- helpers --------------------------------------------------------------------------
+
+
+@pytest.fixture
+async def entry(setup_integration: MockConfigEntry) -> MockConfigEntry:
+    """The loaded entry, with the (background) first poll already finished."""
+    if (task := setup_integration.runtime_data.first_poll) is not None:
+        await task
+    return setup_integration
+
+
+def _eid(hass: HomeAssistant, domain: str, unique_id: str) -> str:
+    """Resolve an entity id from its unique id."""
+    entity_id = er.async_get(hass).async_get_entity_id(domain, DOMAIN, unique_id)
+    assert entity_id is not None, f"no {domain} entity with unique id {unique_id}"
+    return entity_id
+
+
+def _switches(hass: HomeAssistant, entry: MockConfigEntry) -> dict[str, er.RegistryEntry]:
+    """The entry's registered switch entities keyed by unique id."""
+    return {
+        e.unique_id: e
+        for e in er.async_entries_for_config_entry(er.async_get(hass), entry.entry_id)
+        if e.domain == "switch"
+    }
+
+
+def _lights(hass: HomeAssistant, entry: MockConfigEntry) -> list[er.RegistryEntry]:
+    return [
+        e
+        for e in er.async_entries_for_config_entry(er.async_get(hass), entry.entry_id)
+        if e.domain == "light"
+    ]
+
+
+def _seed(entry: MockConfigEntry, **fields: object) -> None:
+    """Mutate the live device state, then publish it like a poll/advert would."""
+    state = entry.runtime_data.device.state
+    for key, value in fields.items():
+        setattr(state, key, value)
+    entry.runtime_data.coordinator.async_publish_device_state()
+
+
+async def _call(hass: HomeAssistant, service: str, entity_id: str) -> None:
+    await hass.services.async_call("switch", service, {"entity_id": entity_id}, blocking=True)
+
+
+def _fail(device: Device, error: BaseException, *, after: int | None = None) -> None:
+    """Make the fake transport raise ``error`` (after letting ``after`` frames through)."""
+    conn = connection(device)
+    conn.error = error
+    conn.fail_after = after
+
+
+def _govee_flows(hass: HomeAssistant) -> list[dict[str, Any]]:
+    """In-progress config flows of this integration (ignores the Bluetooth stack's own)."""
+    return [f for f in hass.config_entries.flow.async_progress() if f["handler"] == DOMAIN]
+
+
+# -- 10. smart plug -------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("device_sku", ["H5083"])
+async def test_plug_has_exactly_one_power_switch(
+    hass: HomeAssistant, entry: MockConfigEntry
+) -> None:
+    """A plug gets one outlet switch named after the device, and no light entities."""
+    switches = _switches(hass, entry)
+    assert set(switches) == {f"{ADDRESS}_power"}
+    assert switches[f"{ADDRESS}_power"].entity_id == PLUG
+    assert hass.states.async_all("light") == []
+
+    state = hass.states.get(PLUG)
+    assert state.attributes["friendly_name"] == "Test Ceiling"
+    assert state.attributes["device_class"] == SwitchDeviceClass.OUTLET
+    assert switches[f"{ADDRESS}_power"].original_device_class == SwitchDeviceClass.OUTLET
+
+
+@pytest.mark.parametrize("device_sku", ["H5083"])
+@pytest.mark.parametrize(
+    ("is_on", "expected"), [(True, STATE_ON), (False, STATE_OFF), (None, STATE_UNKNOWN)]
 )
-
-from .conftest import make_device
-from .const import ADDRESS, TITLE
-
-
-def _entry_with(hass: HomeAssistant, device: AsyncMock) -> MockConfigEntry:
-    coordinator = GoveeBleLocalCoordinator(hass, device, ADDRESS)
-    coordinator.last_update_success = True
-    entry = MockConfigEntry(domain=DOMAIN, title=TITLE, data={"address": ADDRESS})
-    entry.runtime_data = GoveeBleLocalRuntimeData(
-        device=device, coordinator=coordinator, log_capture=LogCapture(ADDRESS)
-    )
-    return entry
-
-
-async def test_onoff_zone_is_switch_colour_zone_is_not(
-    hass: HomeAssistant, setup_integration: MockConfigEntry
+async def test_plug_state_follows_device(
+    hass: HomeAssistant, entry: MockConfigEntry, is_on: bool | None, expected: str
 ) -> None:
-    """An on/off-only zone (no segments) is a switch; a colour-controllable zone
-    (has segments) is a light instead, so it has no switch entity."""
-    registry = er.async_get(hass)
-    # H60A6 test fixture: `background` has no segments -> switch.
-    assert (
-        registry.async_get_entity_id("switch", DOMAIN, f"{ADDRESS}_zone_background")
-        is not None
-    )
-    # `main` has segments -> it's a zone light, not a switch.
-    assert registry.async_get_entity_id("switch", DOMAIN, f"{ADDRESS}_zone_main") is None
+    """The switch shows the relay state read back / advertised by the device."""
+    _seed(entry, is_on=is_on)
+    assert hass.states.get(PLUG).state == expected
 
 
-async def test_zone_switch_turn_on_off(
-    hass: HomeAssistant, setup_integration: MockConfigEntry, mock_device: AsyncMock
+@pytest.mark.parametrize("device_sku", ["H5083"])
+async def test_plug_turn_on_and_off(
+    hass: HomeAssistant, entry: MockConfigEntry, mock_device: Device
 ) -> None:
-    """Toggling a zone switch drives set_zone_power with the zone name/state."""
-    registry = er.async_get(hass)
-    bg = registry.async_get_entity_id("switch", DOMAIN, f"{ADDRESS}_zone_background")
-    assert bg is not None
+    """turn_on / turn_off drive the relay via set_power and update the shown state."""
+    await _call(hass, "turn_on", PLUG)
+    mock_device.set_power.assert_awaited_once_with(True)
+    assert hass.states.get(PLUG).state == STATE_ON
+    assert mock_device.state.is_on is True
+    frames = connection(mock_device).sent
+    assert frames[0] == build.switch(True, relay=True)
+    assert len(frames) == 2  # relay frame + the sync-time follow-up that actuates it
 
-    await hass.services.async_call("switch", "turn_on", {"entity_id": bg}, blocking=True)
-    mock_device.set_zone_power.assert_awaited_with("background", True)
-    assert hass.states.get(bg).state == "on"
-
-    await hass.services.async_call("switch", "turn_off", {"entity_id": bg}, blocking=True)
-    mock_device.set_zone_power.assert_awaited_with("background", False)
-    assert hass.states.get(bg).state == "off"
-
-
-async def test_zoned_device_gets_no_power_switch(hass: HomeAssistant) -> None:
-    """A device with zones is on/off-controlled via those, not an additional
-    whole-device power switch."""
-    device = make_device()  # H60A6: has zones
-    entry = _entry_with(hass, device)
-    added: list[object] = []
-    await async_setup_entry(hass, entry, added.extend)
-    assert all(isinstance(e, GoveeBleLocalZoneSwitch) for e in added)
-    assert not any(isinstance(e, GoveeBleLocalPowerSwitch) for e in added)
-    await entry.runtime_data.coordinator.async_shutdown()
+    connection(mock_device).sent.clear()
+    mock_device.set_power.reset_mock()
+    await _call(hass, "turn_off", PLUG)
+    mock_device.set_power.assert_awaited_once_with(False)
+    assert hass.states.get(PLUG).state == STATE_OFF
+    assert mock_device.state.is_on is False
+    assert connection(mock_device).sent[0] == build.switch(False, relay=True)
 
 
-async def test_h6047_bars_are_lights_not_switches(hass: HomeAssistant) -> None:
-    """The H6047 bars have segments, so they're colour zone-lights (light.py),
-    not switches - the switch platform creates nothing for it."""
-    device = make_device(
-        zones=(
-            Zone("left", power_index=0, segments=tuple(range(0, 5))),
-            Zone("right", power_index=1, segments=tuple(range(5, 10))),
-        ),
-        sku="H6047",
-    )
-    entry = _entry_with(hass, device)
-    added: list[object] = []
-    await async_setup_entry(hass, entry, added.extend)
-    assert added == []
-    await entry.runtime_data.coordinator.async_shutdown()
-
-
-async def test_power_switch_created_for_plug(hass: HomeAssistant) -> None:
-    """A device with no zones and no light capability (e.g. a plug) gets a
-    single whole-device power switch whose state is read back from the device
-    (the plug profile polls its relay) and nudged optimistically on command."""
-    device = make_device(
-        capabilities=frozenset({Capability.POWER}), zones=(), sku="H5083"
-    )
-    # The real plug polls its relay state into DeviceState; the switch reads
-    # coordinator.data. Model set_power mutating that shared state, as the
-    # library's Device.set_power does.
-    state = device.state
-    device.set_power = AsyncMock(side_effect=lambda on: setattr(state, "is_on", on))
-
-    entry = _entry_with(hass, device)
-    entry.runtime_data.coordinator.data = state
-    added: list[object] = []
-    await async_setup_entry(hass, entry, added.extend)
-    assert len(added) == 1
-    switch = added[0]
-    assert isinstance(switch, GoveeBleLocalPowerSwitch)
-    switch.hass = hass
-    switch.entity_id = "switch.test_plug"
-
-    assert switch.is_on is None  # unknown until first poll / command
-
-    # A poll that reads the relay ON is reflected without any command.
-    state.is_on = True
-    assert switch.is_on is True
-
-    await switch.async_turn_off()
-    device.set_power.assert_awaited_with(False)
-    assert switch.is_on is False
-
-    await switch.async_turn_on()
-    device.set_power.assert_awaited_with(True)
-    assert switch.is_on is True
-    await entry.runtime_data.coordinator.async_shutdown()
-
-
-async def test_command_auth_error_starts_reauth(
-    hass: HomeAssistant, setup_integration: MockConfigEntry, mock_device: AsyncMock
+@pytest.mark.parametrize("device_sku", ["H5083"])
+@pytest.mark.parametrize(
+    "error",
+    [
+        GoveeBleConnectionError("no connection"),
+        GoveeBleTimeout("no ack"),
+        GoveeBleHandshakeError("bad handshake"),
+        BleakError("bleak says no"),
+        TimeoutError(),
+    ],
+    ids=lambda e: type(e).__name__,
+)
+@pytest.mark.parametrize("service", ["turn_on", "turn_off"])
+async def test_plug_ble_errors_are_translated(
+    hass: HomeAssistant,
+    entry: MockConfigEntry,
+    mock_device: Device,
+    service: str,
+    error: BaseException,
 ) -> None:
-    """A secret rejection on a command raises a clear error and starts reauth."""
-    from govee_ble_local import GoveeBleAuthError
-    from homeassistant.exceptions import HomeAssistantError
+    """Transport failures become a translated HomeAssistantError and leave the state alone."""
+    _seed(entry, is_on=True)
+    _fail(mock_device, error)
+    with pytest.raises(HomeAssistantError) as exc:
+        await _call(hass, service, PLUG)
+    assert not isinstance(exc.value, ServiceValidationError)
+    assert exc.value.translation_domain == DOMAIN
+    assert exc.value.translation_key == "ble_command_failed"
+    assert exc.value.translation_placeholders["device_name"] == "Test Ceiling"
+    assert exc.value.translation_placeholders["error"]
+    assert hass.states.get(PLUG).state == STATE_ON
+    assert _govee_flows(hass) == []
 
-    mock_device.turn_off.side_effect = GoveeBleAuthError("rejected")
-    light = next(
-        e for e in hass.data["entity_components"]["light"].entities
-        if e.unique_id == f"{ADDRESS}_light"
-    )
-    with pytest.raises(HomeAssistantError):
-        await light.async_turn_off()
+
+@pytest.mark.parametrize("device_sku", ["H5083"])
+async def test_plug_partial_failure_keeps_state_consistent(
+    hass: HomeAssistant, entry: MockConfigEntry, mock_device: Device
+) -> None:
+    """The relay frame lands but the follow-up fails: error raised, state not claimed on."""
+    _seed(entry, is_on=False)
+    _fail(mock_device, GoveeBleTimeout("no ack"), after=1)
+    with pytest.raises(HomeAssistantError) as exc:
+        await _call(hass, "turn_on", PLUG)
+    assert exc.value.translation_key == "ble_command_failed"
+    assert connection(mock_device).sent == [build.switch(True, relay=True)]
+    assert hass.states.get(PLUG).state == STATE_OFF
+
+
+@pytest.mark.parametrize("device_sku", ["H5083"])
+async def test_plug_not_supported_is_a_validation_error(
+    hass: HomeAssistant, entry: MockConfigEntry, mock_device: Device
+) -> None:
+    """GoveeBleNotSupported surfaces as ServiceValidationError."""
+    _fail(mock_device, GoveeBleNotSupported("no relay"))
+    with pytest.raises(ServiceValidationError) as exc:
+        await _call(hass, "turn_on", PLUG)
+    assert exc.value.translation_key == "not_supported"
+    assert exc.value.translation_placeholders["error"] == "no relay"
+
+
+@pytest.mark.parametrize("device_sku", ["H5083"])
+async def test_plug_auth_error_starts_reauth(
+    hass: HomeAssistant, entry: MockConfigEntry, mock_device: Device
+) -> None:
+    """A rejected secret raises secret_rejected and starts a reauth flow."""
+    _fail(mock_device, GoveeBleAuthError("rejected"))
+    with pytest.raises(HomeAssistantError) as exc:
+        await _call(hass, "turn_off", PLUG)
+    assert exc.value.translation_key == "secret_rejected"
     await hass.async_block_till_done()
-    flows = hass.config_entries.flow.async_progress_by_handler(DOMAIN)
-    assert any(f["context"]["source"] == "reauth" for f in flows)
+    flows = _govee_flows(hass)
+    assert [f["context"]["source"] for f in flows] == ["reauth"]
+    assert flows[0]["context"]["entry_id"] == entry.entry_id
+
+
+@pytest.mark.parametrize("device_sku", ["H5083"])
+async def test_plug_unavailable_when_device_vanishes(
+    hass: HomeAssistant, entry: MockConfigEntry, presence: SimpleNamespace
+) -> None:
+    """The plug goes unavailable once it's gone from every scanner and polls keep failing."""
+    _seed(entry, is_on=True)
+    presence.connectable = False
+    entry.runtime_data.coordinator.consecutive_failures = UNAVAILABLE_AFTER_FAILURES
+    entry.runtime_data.coordinator.async_update_listeners()
+    assert hass.states.get(PLUG).state == STATE_UNAVAILABLE
+
+
+@pytest.mark.parametrize("device_sku", ["H60A6", "H6047", "H6006"])
+async def test_light_fixtures_have_no_power_switch(
+    hass: HomeAssistant, entry: MockConfigEntry
+) -> None:
+    """Fixtures with colour-controllable lights (zoned or not) get no switch at all."""
+    assert _switches(hass, entry) == {}
+    assert hass.states.async_all("switch") == []
+
+
+# -- 11. zone switches ----------------------------------------------------------------
+
+
+@pytest.fixture
+async def zone_entry(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_bluetooth: SimpleNamespace
+) -> MockConfigEntry:
+    """An entry around a device whose zones are on/off-only (no shipped SKU has any)."""
+    device = make_device("H60A6")
+    device.profile = dataclasses.replace(
+        device.profile,
+        zones=(Zone("main", power_index=0), Zone("mystery", power_index=1)),
+    )
+    mock_config_entry.add_to_hass(hass)
+    with patch("custom_components.govee_ble_local.create_device", return_value=device):
+        assert await hass.config_entries.async_setup(mock_config_entry.entry_id)
+        await hass.async_block_till_done()
+    if (task := mock_config_entry.runtime_data.first_poll) is not None:
+        await task
+    return mock_config_entry
+
+
+def _device(entry: MockConfigEntry) -> Device:
+    device: Device = entry.runtime_data.device
+    return device
+
+
+async def test_one_switch_per_on_off_zone(hass: HomeAssistant, zone_entry: MockConfigEntry) -> None:
+    """Each segment-less zone becomes a switch; no whole-device power switch is added."""
+    switches = _switches(hass, zone_entry)
+    assert set(switches) == {f"{ADDRESS}_zone_main", f"{ADDRESS}_zone_mystery"}
+    # Segment-less zones are not lights either.
+    assert not any("_zone_" in e.unique_id for e in _lights(hass, zone_entry))
+
+
+async def test_zone_switch_names(hass: HomeAssistant, zone_entry: MockConfigEntry) -> None:
+    """Known zones use their translated name; an unknown zone is named after itself."""
+    main = hass.states.get(_eid(hass, "switch", f"{ADDRESS}_zone_main"))
+    mystery = hass.states.get(_eid(hass, "switch", f"{ADDRESS}_zone_mystery"))
+    assert main.attributes["friendly_name"] == "Test Ceiling Main light"
+    assert mystery.attributes["friendly_name"] == "Test Ceiling mystery"
+    assert main.entity_id != mystery.entity_id
+    assert mystery.entity_id.endswith("_mystery")
+
+
+@pytest.mark.parametrize(
+    ("zone", "index"), [("main", 0), ("mystery", 1)], ids=["translated", "untranslated"]
+)
+async def test_zone_switch_turn_on_and_off(
+    hass: HomeAssistant, zone_entry: MockConfigEntry, zone: str, index: int
+) -> None:
+    """turn_on / turn_off drive set_zone_power for that zone and update its state."""
+    device = _device(zone_entry)
+    entity_id = _eid(hass, "switch", f"{ADDRESS}_zone_{zone}")
+    _seed(zone_entry, is_on=True, zone_power={0: False, 1: False})
+
+    await _call(hass, "turn_on", entity_id)
+    device.set_zone_power.assert_awaited_once_with(zone, True)
+    assert connection(device).sent == [build.zone_power(index, True)]
+    assert hass.states.get(entity_id).state == STATE_ON
+
+    device.set_zone_power.reset_mock()
+    await _call(hass, "turn_off", entity_id)
+    device.set_zone_power.assert_awaited_once_with(zone, False)
+    assert connection(device).sent[-1] == build.zone_power(index, False)
+    assert hass.states.get(entity_id).state == STATE_OFF
+
+
+async def test_zone_switch_leaves_sibling_zone_alone(
+    hass: HomeAssistant, zone_entry: MockConfigEntry
+) -> None:
+    """Switching one zone doesn't change the other zone's switch."""
+    main = _eid(hass, "switch", f"{ADDRESS}_zone_main")
+    mystery = _eid(hass, "switch", f"{ADDRESS}_zone_mystery")
+    _seed(zone_entry, is_on=True, zone_power={0: True, 1: True})
+    await _call(hass, "turn_off", main)
+    assert hass.states.get(main).state == STATE_OFF
+    assert hass.states.get(mystery).state == STATE_ON
+
+
+@pytest.mark.parametrize(
+    ("is_on", "zone_power", "expected"),
+    [
+        (False, {0: True, 1: True}, STATE_OFF),  # fixture off beats a stale zone power
+        (True, {0: True, 1: False}, STATE_ON),
+        (None, {0: False, 1: True}, STATE_OFF),
+        (True, {}, STATE_UNKNOWN),  # zone power not read yet
+    ],
+)
+async def test_zone_switch_state(
+    hass: HomeAssistant,
+    zone_entry: MockConfigEntry,
+    is_on: bool | None,
+    zone_power: dict[int, bool],
+    expected: str,
+) -> None:
+    """A zone switch is off while the fixture is off, else it shows the zone's own power."""
+    _seed(zone_entry, is_on=is_on, zone_power=zone_power)
+    assert hass.states.get(_eid(hass, "switch", f"{ADDRESS}_zone_main")).state == expected
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        GoveeBleConnectionError("no connection"),
+        GoveeBleTimeout("no ack"),
+        GoveeBleHandshakeError("bad handshake"),
+        BleakError("bleak says no"),
+        TimeoutError(),
+    ],
+    ids=lambda e: type(e).__name__,
+)
+@pytest.mark.parametrize("service", ["turn_on", "turn_off"])
+async def test_zone_switch_ble_errors_are_translated(
+    hass: HomeAssistant, zone_entry: MockConfigEntry, service: str, error: BaseException
+) -> None:
+    """Transport failures on a zone switch become a translated error; state is unchanged."""
+    entity_id = _eid(hass, "switch", f"{ADDRESS}_zone_mystery")
+    _seed(zone_entry, is_on=True, zone_power={0: True, 1: True})
+    _fail(_device(zone_entry), error)
+    with pytest.raises(HomeAssistantError) as exc:
+        await _call(hass, service, entity_id)
+    assert exc.value.translation_key == "ble_command_failed"
+    assert exc.value.translation_placeholders["error"]
+    assert hass.states.get(entity_id).state == STATE_ON
+
+
+async def test_zone_switch_auth_error_starts_reauth(
+    hass: HomeAssistant, zone_entry: MockConfigEntry
+) -> None:
+    """A rejected secret on a zone switch starts reauth."""
+    _fail(_device(zone_entry), GoveeBleAuthError("rejected"))
+    with pytest.raises(HomeAssistantError) as exc:
+        await _call(hass, "turn_on", _eid(hass, "switch", f"{ADDRESS}_zone_main"))
+    assert exc.value.translation_key == "secret_rejected"
+    await hass.async_block_till_done()
+    assert [f["context"]["source"] for f in _govee_flows(hass)] == ["reauth"]
+
+
+async def test_zone_switch_not_supported(hass: HomeAssistant, zone_entry: MockConfigEntry) -> None:
+    """An unsupported zone request is a ServiceValidationError."""
+    _fail(_device(zone_entry), GoveeBleNotSupported("unknown zone"))
+    with pytest.raises(ServiceValidationError) as exc:
+        await _call(hass, "turn_off", _eid(hass, "switch", f"{ADDRESS}_zone_main"))
+    assert exc.value.translation_key == "not_supported"

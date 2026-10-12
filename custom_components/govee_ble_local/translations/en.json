@@ -10,7 +10,7 @@
           "address": "Device"
         }
       },
-      "secret": {
+      "secret_menu": {
         "description": "{name} needs an 8-byte secret key before it will accept commands, and it couldn't be read directly from the device (that only works while the device is unbound / factory-reset). How do you want to provide it?",
         "menu_options": {
           "secret_cloud": "Fetch it from my Govee account",
@@ -25,7 +25,7 @@
         }
       },
       "secret_manual": {
-        "description": "Enter {name}'s 8-byte secret key as 16 hex characters (e.g. a1b2c3d4e5f60718), or leave blank to add the device now and set the key later. You can obtain it from the Govee cloud account or a btsnoop capture.",
+        "description": "Enter {name}'s 8-byte secret key as 16 hex characters (e.g. a1b2c3d4e5f60718). When adding the device you can leave it blank to set the key later; a replacement key after a rejection can't be blank. You can obtain it from the Govee cloud account or a btsnoop capture.",
         "data": {
           "secret": "Secret key (hex)"
         }
@@ -39,24 +39,28 @@
         }
       },
       "reconfigure": {
-        "description": "Reload {name}. For devices that need a secret key, you can set or update it below.",
+        "description": "Reload {name}. For devices that need a secret key, enter a new key to replace the stored one (leave blank to keep it), or tick the box to remove it.",
         "data": {
-          "secret": "Secret key (hex)"
+          "secret": "New secret key (hex)",
+          "clear_secret": "Remove the stored secret key"
         }
       }
     },
     "error": {
       "invalid_secret": "The secret key must be 16 hex characters (8 bytes), e.g. a1b2c3d4e5f60718.",
-      "cannot_connect": "Could not log in to the Govee account. Check your email and password and try again.",
+      "cannot_connect": "Could not log in to the Govee account or reach the Govee cloud. Check your email, password and internet connection, then try again.",
       "secret_not_found": "Logged in, but no secret key was found for this device on the account. Make sure the device is added to this Govee account."
     },
     "abort": {
       "no_devices_found": "No unconfigured supported Govee devices found.",
       "already_configured": "Device is already configured.",
       "not_supported": "This Govee model isn't supported by this integration yet.",
-      "not_found": "The device could not be found over Bluetooth right now. Make sure it is powered on and in range, then try again.",
       "reconfigure_successful": "Device reloaded successfully.",
-      "reauth_successful": "Secret key updated."
+      "reauth_successful": "Secret key updated.",
+      "unknown": "Unexpected error: the setup flow lost track of the device. Please start again."
+    },
+    "progress": {
+      "read_secret": "Trying to read {name}'s secret key directly from the device. This only works while it is unbound (factory-reset) and can take up to a minute."
     }
   },
   "entity": {
@@ -80,6 +84,15 @@
     "switch": {
       "main_light": {
         "name": "Main light"
+      },
+      "background_light": {
+        "name": "Background light"
+      },
+      "left_bar": {
+        "name": "Left bar"
+      },
+      "right_bar": {
+        "name": "Right bar"
       }
     },
     "button": {
@@ -112,14 +125,35 @@
     }
   },
   "exceptions": {
-    "scene_broken": {
-      "message": "The scene '{effect}' is known to fail to render correctly on this device and is disabled until that is resolved."
-    },
     "ble_command_failed": {
       "message": "Could not communicate with {device_name}: {error}"
     },
     "secret_rejected": {
       "message": "{device_name} rejected its secret key. Update it via the re-authentication prompt in Settings > Devices & services."
+    },
+    "not_supported": {
+      "message": "{device_name} doesn't support that request: {error}"
+    },
+    "unknown_effect": {
+      "message": "{device_name} has no scene called '{effect}'."
+    },
+    "self_test_busy": {
+      "message": "A self-test is already running; try again when it has finished."
+    },
+    "no_matching_device": {
+      "message": "No Govee BLE Local device matched the service target."
+    },
+    "sku_unknown": {
+      "message": "Could not determine the Govee model of {address} yet; waiting for its advertisement."
+    },
+    "device_not_found": {
+      "message": "Could not find the Govee device {address} over Bluetooth; make sure it is powered on and in range."
+    },
+    "model_not_supported": {
+      "message": "The Govee model {sku} is not supported by this version of the integration."
+    },
+    "secret_malformed": {
+      "message": "The stored secret key for {device_name} is malformed; enter it again via the re-authentication prompt."
     }
   }
 }

@@ -1,18 +1,20 @@
 """Button platform: run the device self-test / session capture from HA."""
+
 from __future__ import annotations
 
 import logging
+from typing import TYPE_CHECKING
 
-from govee_ble_local import Device
 from homeassistant.components.button import ButtonEntity
 from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from . import GoveeBleLocalConfigEntry
-from .capture import async_run_self_test
-from .coordinator import GoveeBleLocalCoordinator
 from .entity import GoveeBleLocalEntity
+from .services import async_self_test_entry
+
+if TYPE_CHECKING:
+    from . import GoveeBleLocalConfigEntry
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -26,16 +28,7 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up the per-device self-test button."""
-    async_add_entities(
-        [
-            GoveeBleLocalSelfTestButton(
-                entry.runtime_data.coordinator,
-                entry.runtime_data.device,
-                entry.data["address"],
-                entry.title,
-            )
-        ]
-    )
+    async_add_entities([GoveeBleLocalSelfTestButton(entry)])
 
 
 class GoveeBleLocalSelfTestButton(GoveeBleLocalEntity, ButtonEntity):
@@ -48,26 +41,21 @@ class GoveeBleLocalSelfTestButton(GoveeBleLocalEntity, ButtonEntity):
     _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_translation_key = "self_test"
 
-    def __init__(
-        self,
-        coordinator: GoveeBleLocalCoordinator,
-        device: Device,
-        address: str,
-        device_name: str,
-    ) -> None:
-        super().__init__(coordinator, address, device_name, device.sku)
-        self._device = device
-        self._attr_unique_id = f"{address}_self_test"
+    def __init__(self, entry: GoveeBleLocalConfigEntry) -> None:
+        """Initialize the self-test button."""
+        super().__init__(entry, "self_test")
+        self._entry = entry
 
     async def async_press(self) -> None:
-        report = await self._run_client_command(async_run_self_test(self._device))
-        self.coordinator.last_self_test = report
+        """Run the self-test and log a one-line summary."""
+        report = await async_self_test_entry(self.hass, self._entry)
         passed = sum(1 for s in report["steps"] if s["ok"])
         _LOGGER.info(
-            "%s self-test: %s (%d/%d steps ok, %d frames captured)",
+            "%s self-test: %s (%d/%d steps ok, %d frames captured%s)",
             self._address,
             "PASS" if report["ok"] else "FAIL",
             passed,
             len(report["steps"]),
             len(report["frames"]),
+            "" if report["restored"] else ", state NOT fully restored",
         )
