@@ -36,14 +36,13 @@ Treat their read-back values as provisional.
   The lost terminator on the first query of a session was a handshake race (the query fired while
   the device's `e7 02` confirm was still in flight). With the handshake fixed, the first burst
   arrives complete; a lost tail now decodes to partial-but-true state without a retry.
-- **H60A6 whole-fixture power via the global switch (`33 01`).** The status burst carries a global
-  switch TLV separate from the two zones, so a single `33 01` frame may be able to switch the whole
-  fixture. Unverified: every captured state had both off, and earlier live tests only drove zones.
-  Whole-fixture power therefore keeps the proven per-zone frames (sent as one batch on one
-  connection). Settle it with `tools/power_semantics_probe.py <addr> H60A6` from the library repo
-  (needs a host in Bluetooth range), then switch `Device._power_frames` if `33 01` alone works.
-- **`0xEE` notification pushes.** Parsed by the library but not consumed: none were observed in
-  five days of captures (sessions are short and poll-driven).
+- **H60A6 whole-fixture power — resolved (2026-10-12, live probe on hardware).** The global `33 01`
+  switch drives both zones (off clears them; on lights both even when each was off), so
+  whole-fixture on/off is now a single frame. Colour and brightness writes also wake the fixture.
+- **`0xEE` notification pushes.** Parsed by the library but not consumed. Only pushed to a
+  connected client, and connections are short-lived by design (connection slots are scarce), so
+  they're rare: none in five days of captures; one `ee 30 01 01` (zone flags) seen during a probe.
+  External changes are picked up by the advertisement on/off byte and the 2-minute poll instead.
 
 ## 3. Per-segment light entities — behavioural note
 
