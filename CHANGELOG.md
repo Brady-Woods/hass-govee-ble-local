@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Requires `govee-ble-local` 1.1.0 **from PyPI** and Home Assistant 2025.10+.
+
+### Fixed
+- **Segment lights couldn't be switched off and back on.** Turning a segment off flipped it back
+  to "on" immediately (read-back brightness overrode the black-out), and turning it on again
+  re-sent black. "On" now restores the last real colour; brightness-only "on" re-lights it too.
+- **Reconfigure wiped a plug's secret** when submitted with the (blank) secret field untouched.
+  A blank field now keeps the stored key; a "remove" checkbox clears it. Reauth rejects a blank key.
+- **Self-test could leave the light off or the zones changed.** The restore stopped at the first
+  failure (skipping the final power restore), never ran when a step raised, and the final
+  whole-device power switched every zone back on. Every restore action now runs independently in
+  a `finally`, zones are restored after whole-device power, and failures are reported
+  (`restored` / `restore_errors`) and logged as a warning.
+- **Plug secret recoverable from captured frames** (`wire=` was unmasked). Frames of
+  secret-gated devices drop `wire=` and handshake lines (library 1.1.0 masks them too).
+- Diagnostics scrub the MAC (any case/format, incl. reversed byte order), Wi-Fi MAC, serial and
+  secret from every string — step errors, frames and warnings included.
+- Passive advertisements no longer reset the poll timer, mark a failing poll successful, re-arm
+  polling after an auth failure, or re-arm the "error fetching" log line.
+- A device returning after an absence is polled immediately instead of waiting out up to 30 min
+  of backoff; skipped polls no longer count as connection failures.
+- Backoff jitter is applied after the cap, so long-offline devices don't poll in lockstep.
+- Device-registry firmware/hardware version and serial are no longer cleared on every restart.
+- `light.turn_on` with no attributes always sends power (it was a silent no-op when HA believed
+  the light was on, and left a second zone off).
+- Zone lights/switches show off as soon as an advertisement reports the fixture off.
+- A command that fails part-way still publishes what landed; unknown effects are rejected before
+  anything is sent; colour temperature is clamped to the device range; unsupported requests raise
+  a validation error instead of "could not communicate".
+- Unload stops polling before closing the BLE link.
+- An unsupported model fails setup permanently; a malformed stored secret starts reauth.
+- RSSI updates from advertisements and goes unavailable when no scanner hears the device.
+
+### Changed
+- `govee-ble-local` is installed from PyPI (`==1.1.0`) instead of a git tag.
+- `capture_session` is admin-only, reports per-device errors instead of aborting, and raises a
+  translated error when nothing matched. A second concurrent self-test is refused.
+- Entity commands time out after 60 s instead of queueing indefinitely.
+- Reading a plug's secret during setup shows a progress step; Govee credentials use
+  password/email fields.
+- Self-test capture no longer floods the Home Assistant log with every device's debug output.
+- Diagnostic-only changes (last seen, RSSI, failure count, poll interval) only rewrite the
+  diagnostic entities.
+- Minimum Home Assistant version is now 2025.10.0 (`hacs.json`).
+
 ## [1.3.0] - 2026-10-12
 
 Requires `govee-ble-local` 1.1.0. Validated live on the lab instance (11 devices).
