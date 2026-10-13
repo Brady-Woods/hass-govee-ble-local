@@ -181,17 +181,16 @@ async def test_plug_ble_errors_are_translated(
 
 
 @pytest.mark.parametrize("device_sku", ["H5083"])
-async def test_plug_partial_failure_keeps_state_consistent(
+async def test_plug_time_sync_failure_is_best_effort(
     hass: HomeAssistant, entry: MockConfigEntry, mock_device: Device
 ) -> None:
-    """The relay frame lands but the follow-up fails: error raised, state not claimed on."""
+    """The relay frame is acked but the time-sync follow-up fails: library 1.2.0 treats
+    the sync as best-effort, so the command succeeds and the state reflects the relay."""
     _seed(entry, is_on=False)
     _fail(mock_device, GoveeBleTimeout("no ack"), after=1)
-    with pytest.raises(HomeAssistantError) as exc:
-        await _call(hass, "turn_on", PLUG)
-    assert exc.value.translation_key == "ble_command_failed"
+    await _call(hass, "turn_on", PLUG)
     assert connection(mock_device).sent == [build.switch(True, relay=True)]
-    assert hass.states.get(PLUG).state == STATE_OFF
+    assert hass.states.get(PLUG).state == STATE_ON
 
 
 @pytest.mark.parametrize("device_sku", ["H5083"])

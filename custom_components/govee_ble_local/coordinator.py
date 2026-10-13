@@ -219,7 +219,7 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
                 self.hass, self.async_request_refresh(), name=f"{self.name}_return_poll"
             )
 
-        if self._device.ingest_advertisement(service_info):
+        if self._device.ingest_advertisement(service_info.advertisement):
             self.async_publish_device_state()
         elif self.device_available != self._published_available:
             self.async_update_listeners()

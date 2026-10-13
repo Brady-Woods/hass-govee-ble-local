@@ -7,7 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Requires `govee-ble-local` 1.1.0 **from PyPI** and Home Assistant 2025.10+.
+## [1.4.0] - 2026-10-13
+
+Requires `govee-ble-local` 1.2.0 **from PyPI** and Home Assistant 2025.10+.
+
+### Changed
+- Bumped to `govee-ble-local` 1.2.0. Passes the typed `AdvertisementData` to `ingest_advertisement`.
+  Relay-plug time sync is now best-effort in the library, so a failed follow-up no longer errors the command.
 
 ### Fixed
 - **Segment lights couldn't be switched off and back on.** Turning a segment off flipped it back
@@ -222,7 +228,8 @@ Migration to the `govee-ble-local` v3 library and a large feature expansion.
 - Fixed / added entity icons and names; on/off tracked passively from advertisements between
   polls.
 
-[Unreleased]: https://github.com/Brady-Woods/hass-govee-ble-local/compare/v1.2.1...HEAD
+[Unreleased]: https://github.com/Brady-Woods/hass-govee-ble-local/compare/v1.4.0...HEAD
+[1.4.0]: https://github.com/Brady-Woods/hass-govee-ble-local/compare/v1.2.1...v1.4.0
 [1.2.1]: https://github.com/Brady-Woods/hass-govee-ble-local/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/Brady-Woods/hass-govee-ble-local/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/Brady-Woods/hass-govee-ble-local/compare/v1.0.0...v1.1.0
