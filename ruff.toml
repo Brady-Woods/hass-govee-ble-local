@@ -1,0 +1,61 @@
+# Lint gate for hass-govee-ble-local (run by scripts/check.sh).
+target-version = "py313"  # Home Assistant 2025.10 (hacs.json minimum) runs on 3.13
+line-length = 100
+
+[lint]
+select = [
+    "ASYNC", # blocking calls in async code
+    "B",     # bugbear
+    "BLE",   # blind except
+    "C90",   # mccabe complexity
+    "D",     # pydocstyle
+    "E",     # pycodestyle errors
+    "F",     # pyflakes
+    "G",     # logging format
+    "I",     # isort
+    "LOG",   # logging misuse
+    "PIE",
+    "PL",    # pylint
+    "PT",    # pytest style
+    "RET",   # return consistency
+    "RUF",
+    "S",     # bandit
+    "SIM",   # simplify
+    "TRY",   # exception handling
+    "UP",    # pyupgrade
+    "W",     # pycodestyle warnings
+]
+ignore = [
+    "D105",    # magic-method docstrings
+    "D107",    # __init__ docstrings are optional
+    "D202",    # blank line after function docstring (conflicts with nested callbacks)
+    "D203",    # incompatible with D211
+    "D213",    # incompatible with D212
+    "PLR0913", # HA entity/flow signatures are fixed by the framework
+    "TRY003",  # long messages in exception constructors are fine
+    "TRY400",  # error-vs-exception logging is a judgement call
+]
+
+[lint.per-file-ignores]
+"tests/**" = [
+    "D",       # test docstrings optional
+    "ARG",     # fixtures are requested for their side effects
+    "PLR2004", # magic values are the point of assertions
+    "S101",    # assert is how pytest works
+    "S105",    # test "secrets" are fixtures
+    "SLF001",  # tests reach into private state on purpose
+]
+"brands/make_placeholders.py" = ["PLR2004"]
+
+[lint.mccabe]
+max-complexity = 12
+
+[lint.pylint]
+max-branches = 14
+max-statements = 60
+
+[lint.isort]
+force-sort-within-sections = true
+known-first-party = ["custom_components.govee_ble_local", "tests"]
+known-third-party = ["govee_ble_local"]
+combine-as-imports = true

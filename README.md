@@ -66,11 +66,10 @@ Requires a working Bluetooth adapter (or an ESPHome Bluetooth proxy) in range
 of the light.
 
 ### The `govee-ble-local` library dependency
-The BLE protocol library is **not published to PyPI yet**. Home Assistant installs it
-automatically at startup from the Git URL in `manifest.json` (`requirements`), so no manual
-`pip install` is needed — HA re-installs it on each start, which keeps it present even after a
-container image update. It stays within Home Assistant's pinned dependency versions (e.g.
-`cryptography`) so it won't disturb your install.
+The BLE protocol library is published to PyPI as `govee-ble-local`; `manifest.json` pins the
+exact version (`requirements`) and Home Assistant installs it automatically, so no manual
+`pip install` is needed. It stays within Home Assistant's pinned dependency versions (e.g.
+`cryptography`) so it won't disturb your install. Requires Home Assistant 2025.10 or newer.
 
 ### Upgrading
 - **HACS:** open the integration in HACS → **Update** → restart Home Assistant.
@@ -99,14 +98,17 @@ Per device (depending on its capabilities):
 | `binary_sensor` | Connectivity | Advertisement presence (reachable), not connect-poll success |
 | `button` | Run self-test | Runs the full-capability self-test and stores the capture |
 
-**Service — `govee_ble_local.capture_session`** (target one or more devices): runs the device
+**Service — `govee_ble_local.capture_session`** (admin only; target one or more devices): runs the device
 self-test (power/brightness/RGB/kelvin/scenes/segments/zones with per-step ACK + read-back
 checks) and returns the captured BLE frame session as response data, one report per targeted
 device (each identifying its own address, so results from multiple devices are never ambiguous)
 — useful for diagnosing protocol issues. Before making any changes it snapshots the device's full
 state (power, brightness, colour, active scene, every zone's power/colour, segment colour, the
-gradual flag) and restores all of it when the test finishes. The same capture is stored for the
-config-entry diagnostics download.
+gradual flag) and restores all of it when the test finishes — also when the test fails part-way;
+each report says whether the restore fully succeeded (`restored`, `restore_errors`). Only one
+self-test runs at a time. A device that can't be tested contributes an `{ok: false, error}`
+entry. For secret-gated plugs the raw `wire=` bytes are left out of the captured frames. The same
+capture is stored for the config-entry diagnostics download (with identifiers scrubbed).
 
 ## Architecture
 

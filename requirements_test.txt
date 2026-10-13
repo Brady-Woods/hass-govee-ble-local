@@ -1,20 +1,25 @@
-# Test dependencies for the Home Assistant integration layer.
-# The pinned Home Assistant version comes transitively from
-# pytest-homeassistant-custom-component.
-pytest-homeassistant-custom-component
-pytest-cov
-mypy
+# Test dependencies for the Home Assistant integration layer - all pinned, so a
+# release of any tool can't turn the (nightly) CI red without a code change.
+# homeassistant is pinned to the release the lab/production instance runs, so
+# the tests (and mypy) see the same APIs as the code that ships. Bump both HA
+# pins together (pytest-homeassistant-custom-component pins homeassistant exactly).
+pytest-homeassistant-custom-component==0.13.367
+homeassistant==2026.9.4
+pytest-cov==7.1.0
+pytest-timeout==2.4.0
+mypy==2.4.0
+ruff==0.17.0
 
 # Optional deps of the bluetooth/usb components this integration depends on.
 # Home Assistant installs these on demand at runtime, but the test harness has
 # to import and set up the bluetooth component itself, so they must be present.
 # (These are NOT runtime requirements of this integration.)
-aiousbwatcher
-pyserial
-serialx
-aioesphomeapi
-dbus-fast
+aiousbwatcher==1.1.2
+pyserial==3.5
+serialx==1.11.0
+aioesphomeapi==46.10.0
+dbus-fast==5.2.0
 
 # The integration's runtime dependency (govee-ble-local) is installed
-# separately by scripts/check.sh - from a sibling checkout in dev, or the git
-# URL in CI - since it isn't published to PyPI.
+# separately by scripts/check.sh - exactly the requirement manifest.json
+# declares, or a local checkout in dev (version-checked against the pin).

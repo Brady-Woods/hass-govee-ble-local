@@ -26,32 +26,23 @@ Treat their read-back values as provisional.
 - **Plug power poll (H5083 family).** Library reads the relay bitmask (aa 01) into
   `state.is_on`; the HA power switch now reflects it. **Unverified** — needs an H5083 to confirm
   the query (aa 01 vs plug-spec) and the relay-bit → on/off mapping.
-- **H6047 / H6641 segment read-back — corrected upstream, still not live-verified.** The prior
-  entry here (H6047 modeled as `readback="status"`, mechanism-A) was itself wrong and has been
-  fixed in two steps on the library's `master` (not yet tagged past `v1.0.0`): neither SKU
-  actually answers the `0xAC` status burst at all (source-confirmed: H6047 routes to
-  `Compose4InfoBleIot`; H6641 goodsType 247 never reaches the `0xAC` dispatch) — both are back to
-  `readback="polled"` (power/brightness/scene via `aa 01/04/05`), with per-segment colour read
-  via a new **`color_readback="mechanism_a_direct"`** (direct per-group `aa a5 <group>` requests,
-  correct group size 4 — an interim fix had reused H61A8's group-size-3 decoder, silently
-  misassigning segment indices, since fixed). H6641 additionally now reads its true colour-group
-  count live (`color_readback_live_ic`, a `0x40` IC-count query) instead of approximating from
-  the write-mask width. This is a **real correctness fix** for exactly the gap this entry used to
-  describe (the one live H6047 connect earlier returned an empty 0xAC) — but the library's own
-  changelog doesn't claim hardware verification for `mechanism_a_direct` either, only that the
-  test suite caught the wrong-decoder bug before it shipped. Once the library tags a stable
-  release past `v1.0.0` and we bump the pin, this should be re-tested live on H6047 specifically.
+- **H6047 segment read-back — live-verified (2026-10-12).** The direct per-group `aa a5 <group>`
+  read (`mechanism_a_direct`, group size 4) returns all 12 read-back pieces on a real H6047, and the
+  bar power read (`aa 36`, polled since library 1.1.0) and colour temperature read-back work too.
+  **H6641** uses the same decoder plus a live `0x40` IC-count read; still no H6641 hardware.
 - **H61A8 / H6052 segment/colour read-back.** Source-modeled (mechanism-B / -C respectively), no
   hardware on hand. H60A6 mechanism-A remains the verified reference.
-- **H60A6 truncated/empty `0xAC` status bursts — fixed upstream (retry), matches our own live
-  test.** Separately from the segment-mechanism fix above, the library's `master` now retries a
-  status read once on an empty parse before leaving state stale (rather than giving up
-  immediately), specifically to recover a single dropped BLE notification mid-burst. We
-  independently live-tested this exact fix on `core` before it was merged (H60A6 recovered full
-  state — brightness, all 13 segments, both zones — on retry in ~1.3s where it previously logged
-  `state left stale` on ~80-88% of polls); the library's own changelog reports the same result
-  field-tested on their end. Not yet pinned (see the version note below).
-
+- **H60A6 truncated `0xAC` status bursts — root-caused and fixed (library 1.1.0), live-verified.**
+  The lost terminator on the first query of a session was a handshake race (the query fired while
+  the device's `e7 02` confirm was still in flight). With the handshake fixed, the first burst
+  arrives complete; a lost tail now decodes to partial-but-true state without a retry.
+- **H60A6 whole-fixture power — resolved (2026-10-12, live probe on hardware).** The global `33 01`
+  switch drives both zones (off clears them; on lights both even when each was off), so
+  whole-fixture on/off is now a single frame. Colour and brightness writes also wake the fixture.
+- **`0xEE` notification pushes.** Parsed by the library but not consumed. Only pushed to a
+  connected client, and connections are short-lived by design (connection slots are scarce), so
+  they're rare: none in five days of captures; one `ee 30 01 01` (zone flags) seen during a probe.
+  External changes are picked up by the advertisement on/off byte and the 2-minute poll instead.
 
 ## 3. Per-segment light entities — behavioural note
 

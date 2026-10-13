@@ -12,6 +12,7 @@ submitting to https://github.com/home-assistant/brands (see README.md in this fo
 """
 from __future__ import annotations
 
+import pathlib
 import struct
 import zlib
 
@@ -19,8 +20,24 @@ import zlib
 TILE = (37, 99, 235, 255)      # #2563EB
 MARK = (255, 255, 255, 235)
 
+# Geometry, as fractions of the shorter side.
+MARGIN = 0.06          # tile inset from the canvas edge
+CORNER_RADIUS = 0.22   # tile corner radius
+RING_RADIUS = 0.26     # outer radius of the hollow ring mark
+RING_THICKNESS = 0.045
+DOT_RADIUS = 0.06      # solid centre dot
+
+SIZES = {
+    "icon.png": (256, 256),
+    "icon@2x.png": (512, 512),
+    "logo.png": (256, 128),
+    "logo@2x.png": (512, 256),
+}
+
 
 def _png(width: int, height: int, pixels: bytes) -> bytes:
+    """Encode raw filtered RGBA scanlines as a PNG file."""
+
     def chunk(tag: bytes, data: bytes) -> bytes:
         return (struct.pack(">I", len(data)) + tag + data
                 + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF))
@@ -32,48 +49,44 @@ def _png(width: int, height: int, pixels: bytes) -> bytes:
             + chunk(b"IEND", b""))
 
 
-def _rounded_rect(x: float, y: float, x0: float, y0: float, x1: float, y1: float,
-                  rad: float) -> bool:
+def _in_rounded_rect(
+    x: float, y: float, rect: tuple[float, float, float, float], radius: float
+) -> bool:
+    """Return True if (x, y) lies inside ``rect`` (x0, y0, x1, y1) with rounded corners."""
+    x0, y0, x1, y1 = rect
     if not (x0 <= x <= x1 and y0 <= y <= y1):
         return False
-    cx = min(max(x, x0 + rad), x1 - rad)
-    cy = min(max(y, y0 + rad), y1 - rad)
-    return (x - cx) ** 2 + (y - cy) ** 2 <= rad * rad
+    cx = min(max(x, x0 + radius), x1 - radius)
+    cy = min(max(y, y0 + radius), y1 - radius)
+    return (x - cx) ** 2 + (y - cy) ** 2 <= radius * radius
 
 
 def render(width: int, height: int) -> bytes:
+    """Render the placeholder (rounded tile with a ring mark) as PNG bytes."""
     s = min(width, height)
-    m = s * 0.06                      # margin
-    rad = s * 0.22                    # tile corner radius
+    m = s * MARGIN
+    tile = (m, m, width - m, height - m)
     ccx, ccy = width / 2, height / 2  # centered mark
-    cr = s * 0.26                     # mark radius
-    ring = s * 0.045                  # ring thickness (hollow circle)
+    ring_outer = s * RING_RADIUS
+    ring_inner = ring_outer - s * RING_THICKNESS
+    dot = s * DOT_RADIUS
     rows = bytearray()
     for py in range(height):
         rows.append(0)                # PNG filter: none
         for px in range(width):
             x, y = px + 0.5, py + 0.5
-            r = g = b = a = 0
-            if _rounded_rect(x, y, m, m, width - m, height - m, rad):
-                r, g, b, a = TILE
+            pixel: tuple[int, int, int, int] = (0, 0, 0, 0)
+            if _in_rounded_rect(x, y, tile, s * CORNER_RADIUS):
                 d = ((x - ccx) ** 2 + (y - ccy) ** 2) ** 0.5
-                if cr - ring <= d <= cr:          # hollow ring
-                    r, g, b, a = MARK
-                elif d <= s * 0.06:               # center dot
-                    r, g, b, a = MARK
-            rows += bytes((r, g, b, a))
+                pixel = MARK if ring_inner <= d <= ring_outer or d <= dot else TILE
+            rows.extend(pixel)
     return _png(width, height, bytes(rows))
 
 
 def main() -> None:
-    import pathlib
+    """Write every placeholder asset next to this script."""
     here = pathlib.Path(__file__).parent
-    for name, (w, h) in {
-        "icon.png": (256, 256),
-        "icon@2x.png": (512, 512),
-        "logo.png": (256, 128),
-        "logo@2x.png": (512, 256),
-    }.items():
+    for name, (w, h) in SIZES.items():
         (here / name).write_bytes(render(w, h))
         print("wrote", name, f"{w}x{h}")
 

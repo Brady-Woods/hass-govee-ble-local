@@ -7,6 +7,98 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-10-13
+
+Requires `govee-ble-local` 1.2.0 **from PyPI** and Home Assistant 2025.10+.
+
+### Changed
+- Bumped to `govee-ble-local` 1.2.0. Passes the typed `AdvertisementData` to `ingest_advertisement`.
+  Relay-plug time sync is now best-effort in the library, so a failed follow-up no longer errors the command.
+
+### Fixed
+- **Segment lights couldn't be switched off and back on.** Turning a segment off flipped it back
+  to "on" immediately (read-back brightness overrode the black-out), and turning it on again
+  re-sent black. "On" now restores the last real colour; brightness-only "on" re-lights it too.
+- **Reconfigure wiped a plug's secret** when submitted with the (blank) secret field untouched.
+  A blank field now keeps the stored key; a "remove" checkbox clears it. Reauth rejects a blank key.
+- **Self-test could leave the light off or the zones changed.** The restore stopped at the first
+  failure (skipping the final power restore), never ran when a step raised, and the final
+  whole-device power switched every zone back on. Every restore action now runs independently in
+  a `finally`, zones are restored after whole-device power, and failures are reported
+  (`restored` / `restore_errors`) and logged as a warning.
+- **Plug secret recoverable from captured frames** (`wire=` was unmasked). Frames of
+  secret-gated devices drop `wire=` and handshake lines (library 1.1.0 masks them too).
+- Diagnostics scrub the MAC (any case/format, incl. reversed byte order), Wi-Fi MAC, serial and
+  secret from every string — step errors, frames and warnings included.
+- Passive advertisements no longer reset the poll timer, mark a failing poll successful, re-arm
+  polling after an auth failure, or re-arm the "error fetching" log line.
+- A device returning after an absence is polled immediately instead of waiting out up to 30 min
+  of backoff; skipped polls no longer count as connection failures.
+- Backoff jitter is applied after the cap, so long-offline devices don't poll in lockstep.
+- Device-registry firmware/hardware version and serial are no longer cleared on every restart.
+- `light.turn_on` with no attributes always sends power (it was a silent no-op when HA believed
+  the light was on, and left a second zone off).
+- Zone lights/switches show off as soon as an advertisement reports the fixture off.
+- A command that fails part-way still publishes what landed; unknown effects are rejected before
+  anything is sent; colour temperature is clamped to the device range; unsupported requests raise
+  a validation error instead of "could not communicate".
+- Unload stops polling before closing the BLE link.
+- An unsupported model fails setup permanently; a malformed stored secret starts reauth.
+- RSSI updates from advertisements and goes unavailable when no scanner hears the device.
+
+### Changed
+- `govee-ble-local` is installed from PyPI (`==1.1.0`) instead of a git tag.
+- `capture_session` is admin-only, reports per-device errors instead of aborting, and raises a
+  translated error when nothing matched. A second concurrent self-test is refused.
+- Entity commands time out after 60 s instead of queueing indefinitely.
+- Reading a plug's secret during setup shows a progress step; Govee credentials use
+  password/email fields.
+- Self-test capture no longer floods the Home Assistant log with every device's debug output.
+- Diagnostic-only changes (last seen, RSSI, failure count, poll interval) only rewrite the
+  diagnostic entities.
+- Minimum Home Assistant version is now 2025.10.0 (`hacs.json`).
+
+## [1.3.0] - 2026-10-12
+
+Requires `govee-ble-local` 1.1.0. Validated live on the lab instance (11 devices).
+
+### Fixed
+- **Devices stuck unavailable.** The backoff computed `timedelta * 2**failures` uncapped and hit
+  `OverflowError` after ~30 consecutive failures (1,347 "Unexpected error" tracebacks in 5 days),
+  which also froze the poll interval. Backoff is now capped.
+- **Availability follows reachability**, not last-poll success: a device that is advertising
+  stays available (and controllable) through transient poll failures.
+- Polls skip devices no scanner can see instead of spending ~80 s on a hopeless connect while
+  holding a poll slot.
+- Removed the slot "exhausted" pre-check and one-shot-sized semaphore: with no allocation data it
+  read one adapter as zero free slots and skipped every poll forever. Replaced by a fixed
+  integration-wide cap on concurrent polls.
+- `capture_session` service crashed on current Home Assistant (`async_extract_config_entry_ids`
+  signature); its schema now validates targets.
+- The diagnostics download included the plug secret key; it is redacted (and masked in captured
+  frames).
+- Entities update together after a command (turning the fixture off now updates zone lights and
+  switches immediately).
+- Advertisements no longer write every entity's state several times a second, and no longer
+  re-run the device-registry sync; "Last seen" publishes at most once a minute.
+- HA brightness 1–2 no longer rounds to 0 %.
+- Unload releases the BLE link after the platforms unload (and the device refuses further I/O).
+- Self-tests are serialized and their captures filtered to the device under test.
+
+### Changed
+- Light commands are batched: power + brightness + colour go out as one device operation on one
+  connection (H6047 whole-fixture power is a single frame).
+- Reconfigure no longer requires the device to be in range.
+- Test harness pinned to the production Home Assistant release; CI installs exactly the library
+  the manifest declares.
+- Quality scale claimed as **gold** (was platinum); see `quality_scale.yaml` for the one open
+  rule (dependency-transparency: publish the library to PyPI).
+
+### Added
+- Re-authentication flow when a device rejects its secret key.
+- The cloud secret lookup uses Home Assistant's shared HTTP session.
+- Brand images bundled in the integration (placeholders).
+
 ## [1.2.1] - 2026-07-12
 
 ### Changed
@@ -136,7 +228,8 @@ Migration to the `govee-ble-local` v3 library and a large feature expansion.
 - Fixed / added entity icons and names; on/off tracked passively from advertisements between
   polls.
 
-[Unreleased]: https://github.com/Brady-Woods/hass-govee-ble-local/compare/v1.2.1...HEAD
+[Unreleased]: https://github.com/Brady-Woods/hass-govee-ble-local/compare/v1.4.0...HEAD
+[1.4.0]: https://github.com/Brady-Woods/hass-govee-ble-local/compare/v1.2.1...v1.4.0
 [1.2.1]: https://github.com/Brady-Woods/hass-govee-ble-local/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/Brady-Woods/hass-govee-ble-local/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/Brady-Woods/hass-govee-ble-local/compare/v1.0.0...v1.1.0

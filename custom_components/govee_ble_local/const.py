@@ -6,19 +6,28 @@ classes now. Only Home-Assistant-integration-level constants remain here.
 """
 
 DOMAIN = "govee_ble_local"
+MANUFACTURER = "Govee"
 
 # Service that runs the in-HA device self-test and returns the captured session.
 SERVICE_CAPTURE_SESSION = "capture_session"
 
-# Config-entry key for the 8-byte secret key (hex) some devices (the smart-plug
-# family) require before they accept commands.
-CONF_SECRET = "secret"
+# Config-entry keys. The BLE address uses HA's CONF_ADDRESS ("address").
+CONF_SKU = "sku"
+# The 8-byte secret key (hex) some devices (the smart-plug family) require
+# before they accept commands.
+CONF_SECRET = "secret"  # noqa: S105 - a config key, not a secret
+# Reconfigure-form checkbox: explicitly remove the stored secret (a blank secret
+# field keeps the existing one).
+CONF_CLEAR_SECRET = "clear_secret"  # noqa: S105 - a config key
+
+# Colour-temperature range assumed when the library's profile doesn't give one.
+DEFAULT_MIN_KELVIN = 2700
+DEFAULT_MAX_KELVIN = 6500
 
 # Rich state (brightness, colour, scene, segments, zones) needs a connection, so
-# each poll briefly locks one of the adapter/proxy's scarce connection slots.
-# on/off is now tracked PASSIVELY from advertisements (no slot), so this poll can
-# be slow — it only reconciles the richer fields. Devices the advert reports as
-# off aren't connected to at all.
+# each poll briefly holds one of the adapter/proxy's scarce connection slots.
+# on/off is also tracked PASSIVELY from advertisements (no slot), so this poll
+# can be slow — it reconciles the richer fields and catches external changes.
 POLL_INTERVAL_SECONDS = 120
 
 # Ceiling for the coordinator's adaptive backoff. A device that repeatedly fails
@@ -29,29 +38,38 @@ POLL_INTERVAL_SECONDS = 120
 # success. on/off still updates live from advertisements regardless.
 MAX_POLL_INTERVAL_SECONDS = 1800
 
-# Always leave at least this many BLE connection slots free for a manual connection
-# (e.g. the Govee app) or another integration entirely — never let this integration's
-# own polling consume every available slot.
-RESERVED_CONNECTION_SLOTS = 1
+# Integration-wide cap on simultaneous background polls. HA's Bluetooth manager
+# routes each connection to a scanner with a free slot: a local adapter can only
+# establish one LE connection at a time, but each ESPHome proxy has slots of its
+# own, so two concurrent polls can both make progress on a mixed setup. The cap
+# only keeps our own background polling from launching a connect storm.
+MAX_CONCURRENT_POLLS = 2
 
-# Random jitter (seconds) added to BOTH the recurring poll interval and the
-# backoff-reset-to-base transition. Without it, every device's independent timer is
-# deterministic, so they drift back into lockstep over uptime even after starting
-# staggered — see the one-time crc32 stagger in __init__.py, which only covers the
-# very first poll. Jitter keeps them spread out for the life of the entry.
+# Random jitter (seconds) added to the poll interval (base and backoff) so
+# devices don't drift into lockstep over uptime. The crc32 stagger in
+# __init__.py only spreads the very first poll.
 POLL_JITTER_SECONDS = (0, 30)
 
-# Extra backoff steps applied specifically when a poll fails with
-# BleakOutOfConnectionSlotsError (the whole adapter/proxy pool is out of slots) rather
-# than a generic BLE error. Retrying quickly when EVERY device is contending for the
-# same exhausted pool just adds to the contention; skip the normal 1-failure grace and
-# jump straight this many exponential-backoff steps ahead.
-OUT_OF_SLOTS_BACKOFF_STEPS = 2
+# Spread (seconds) of the per-device stagger before the first background poll.
+FIRST_POLL_STAGGER_SECONDS = 30
+
+# A device that has vanished from every connectable scanner goes unavailable
+# after this many consecutive failed (or skipped) polls. A device still
+# advertising stays available.
+UNAVAILABLE_AFTER_FAILURES = 3
+
+# Publish the "last seen" / RSSI diagnostics at most this often (advertisements
+# arrive several times a second; one recorder row per advertisement is bloat).
+LAST_SEEN_RESOLUTION_SECONDS = 60
+
+# Upper bound for one entity command (connect + handshake + frames). Commands
+# for a device run one at a time; without a deadline, a burst of commands to a
+# present-but-unconnectable device would queue and replay long after the user
+# gave up.
+COMMAND_TIMEOUT_SECONDS = 60
 
 # Maps a library zone name (Device.zones[i].name) to an entity translation
-# key. The library uses the device's own zone names (from the Govee app/cloud:
-# mainLightToggle / backgroundLightToggle); unknown names fall back to the raw
-# name via the switch's translation-key lookup.
+# key. Zones with any other name use the raw zone name as the entity name.
 ZONE_TRANSLATION_KEYS: dict[str, str] = {
     "main": "main_light",
     "background": "background_light",

@@ -12,11 +12,23 @@
       },
       "right_bar": {
         "default": "mdi:led-strip-variant"
+      },
+      "main_light": {
+        "default": "mdi:ceiling-light"
       }
     },
     "switch": {
       "main_light": {
         "default": "mdi:ceiling-light"
+      },
+      "background_light": {
+        "default": "mdi:wall-sconce-flat"
+      },
+      "left_bar": {
+        "default": "mdi:led-strip-variant"
+      },
+      "right_bar": {
+        "default": "mdi:led-strip-variant"
       }
     },
     "button": {
