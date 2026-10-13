@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.1] - 2026-10-13
+
+Requires `govee-ble-local` 1.2.1 or newer (any 1.x) **from PyPI** and Home Assistant 2025.10+.
+
+### Fixed
+- **Integration failed to load on Home Assistant 2026.10** ("Not loaded"; dependency install
+  failed): `govee-ble-local` 1.2.0 capped `cryptography` below 49 while Home Assistant 2026.10
+  requires `cryptography==50.0.1`. Library 1.2.1 drops the cap
+  ([govee-ble-local#8](https://github.com/Brady-Woods/govee-ble-local/issues/8)).
+
+### Changed
+- The library requirement is now a range, `govee-ble-local>=1.2.1,<2`, instead of an exact pin:
+  library fixes (like the one above) reach users without waiting for an integration release, and
+  only a new major library version needs one. CI tests both the oldest allowed library version
+  and the newest release in the range.
+- Library 1.2.1 also reads device names the way the Govee app does (devices advertising a bare
+  `GV…` name were never discovered).
+
 ## [1.4.0] - 2026-10-13
 
 Requires `govee-ble-local` 1.2.0 **from PyPI** and Home Assistant 2025.10+.
@@ -228,7 +246,8 @@ Migration to the `govee-ble-local` v3 library and a large feature expansion.
 - Fixed / added entity icons and names; on/off tracked passively from advertisements between
   polls.
 
-[Unreleased]: https://github.com/Brady-Woods/hass-govee-ble-local/compare/v1.4.0...HEAD
+[Unreleased]: https://github.com/Brady-Woods/hass-govee-ble-local/compare/v1.4.1...HEAD
+[1.4.1]: https://github.com/Brady-Woods/hass-govee-ble-local/compare/v1.4.0...v1.4.1
 [1.4.0]: https://github.com/Brady-Woods/hass-govee-ble-local/compare/v1.2.1...v1.4.0
 [1.2.1]: https://github.com/Brady-Woods/hass-govee-ble-local/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/Brady-Woods/hass-govee-ble-local/compare/v1.1.0...v1.2.0

@@ -2,7 +2,7 @@
 
 `hass-govee-ble-local` is a custom Home Assistant integration (Home Assistant 2025.10 or newer).
 Its BLE protocol library (`govee-ble-local`, on PyPI) is installed automatically by Home Assistant
-from the version pinned in the integration's `manifest.json` (`requirements`). You just need to
+from the version range declared in the integration's `manifest.json` (`requirements`). You just need to
 get the integration's files into your Home Assistant `config/custom_components/` directory.
 
 You also need a Bluetooth adapter or an [ESPHome Bluetooth proxy](https://esphome.io/components/bluetooth_proxy.html)
