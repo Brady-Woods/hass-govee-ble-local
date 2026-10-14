@@ -14,12 +14,18 @@
 #
 # CI additionally runs hassfest + HACS validation (see .github/workflows).
 #
-# The library is installed exactly as manifest.json pins it. In a dev checkout
-# (no CI) with ../govee-ble-local present, that working tree is installed
-# instead - unless FROM_MANIFEST=1 - and its version must still equal the pin.
+# manifest.json declares a semver RANGE for the library (>=floor,<next-major): only a
+# major release may break the API. Home Assistant won't upgrade an installed version
+# that still satisfies the range, so users can be on the floor long after newer
+# releases exist. LIB_VERSION picks which end is tested:
+#   floor  (default) - exactly the range's minimum (the oldest version a user may have)
+#   newest           - the newest release in the range (what a fresh install gets)
+# CI runs both. In a dev checkout (no CI) with ../govee-ble-local present, that working
+# tree is installed instead - unless FROM_MANIFEST=1 - and must still satisfy the range.
 #
 # Env overrides: PYTHON (default python3), VENV (default .venv-check),
-#                COV_MIN (default 95), FROM_MANIFEST (default unset).
+#                COV_MIN (default 95), FROM_MANIFEST (default unset),
+#                LIB_VERSION (floor | newest, default floor).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -44,9 +50,25 @@ if [ -d ../govee-ble-local ] && [ -z "${CI:-}" ] && [ -z "${FROM_MANIFEST:-}" ];
   echo "   ../govee-ble-local working tree ($(git -C ../govee-ble-local rev-parse --short HEAD 2>/dev/null || echo '?')) - set FROM_MANIFEST=1 to test the pin itself"
   python -m pip install --quiet ../govee-ble-local
 else
-  # Test exactly what ships: the requirement pinned in manifest.json.
-  echo "   $REQ"
-  python -m pip install --quiet "$REQ"
+  case "${LIB_VERSION:-floor}" in
+    floor)
+      # The range's minimum, exactly: the integration must work on the oldest version it allows.
+      SPEC="$(python - "$REQ" <<'PY'
+import sys
+
+from packaging.requirements import Requirement
+
+req = Requirement(sys.argv[1])
+floors = [s.version for s in req.specifier if s.operator == ">="]
+assert len(floors) == 1, f"manifest requirement {req} needs exactly one '>=' floor"
+print(f"{req.name}=={floors[0]}")
+PY
+)" ;;
+    newest) SPEC="$REQ" ;;
+    *) echo "LIB_VERSION must be 'floor' or 'newest', got '${LIB_VERSION}'" >&2; exit 2 ;;
+  esac
+  echo "   $SPEC  (LIB_VERSION=${LIB_VERSION:-floor}, manifest: $REQ)"
+  python -m pip install --quiet --upgrade "$SPEC"
 fi
 python - "$REQ" <<'PY'
 import importlib.metadata
@@ -57,7 +79,7 @@ from packaging.requirements import Requirement
 req = Requirement(sys.argv[1])
 installed = importlib.metadata.version(req.name)
 assert req.specifier.contains(installed, prereleases=True), (
-    f"installed {req.name} {installed} does not satisfy the manifest pin {req}"
+    f"installed {req.name} {installed} does not satisfy the manifest requirement {req}"
 )
 print(f"   {req.name} {installed} satisfies {req}")
 PY

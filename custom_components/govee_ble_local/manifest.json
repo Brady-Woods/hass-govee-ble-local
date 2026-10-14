@@ -16,10 +16,12 @@
   "codeowners": ["@Brady-Woods"],
   "config_flow": true,
   "dependencies": ["bluetooth_adapters"],
+  "documentation": "https://github.com/Brady-Woods/hass-govee-ble-local",
   "integration_type": "device",
   "iot_class": "local_polling",
+  "issue_tracker": "https://github.com/Brady-Woods/hass-govee-ble-local/issues",
   "loggers": ["bleak", "bleak_retry_connector", "govee_ble_local"],
   "quality_scale": "gold",
-  "requirements": ["govee-ble-local==1.2.0"],
-  "version": "1.4.0"
+  "requirements": ["govee-ble-local>=1.2.1,<2"],
+  "version": "1.4.1"
 }

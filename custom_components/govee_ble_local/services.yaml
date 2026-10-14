@@ -1,4 +1,6 @@
 capture_session:
+  # Entity filter, not a device filter (hassfest rejects device filters on target); the UI
+  # still offers device / entity / area targeting and the service-call shape is unchanged.
   target:
-    device:
+    entity:
       integration: govee_ble_local

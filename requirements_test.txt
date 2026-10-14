@@ -21,5 +21,6 @@ aioesphomeapi==46.10.0
 dbus-fast==5.2.0
 
 # The integration's runtime dependency (govee-ble-local) is installed
-# separately by scripts/check.sh - exactly the requirement manifest.json
-# declares, or a local checkout in dev (version-checked against the pin).
+# separately by scripts/check.sh - the floor or the newest release of the range
+# manifest.json declares (LIB_VERSION), or a local checkout in dev (checked
+# against the range).

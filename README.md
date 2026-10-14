@@ -66,10 +66,12 @@ Requires a working Bluetooth adapter (or an ESPHome Bluetooth proxy) in range
 of the light.
 
 ### The `govee-ble-local` library dependency
-The BLE protocol library is published to PyPI as `govee-ble-local`; `manifest.json` pins the
-exact version (`requirements`) and Home Assistant installs it automatically, so no manual
-`pip install` is needed. It stays within Home Assistant's pinned dependency versions (e.g.
-`cryptography`) so it won't disturb your install. Requires Home Assistant 2025.10 or newer.
+The BLE protocol library is published to PyPI as `govee-ble-local`, and Home Assistant installs it
+automatically, so no manual `pip install` is needed. `manifest.json` (`requirements`) accepts any
+release in the current major series (e.g. `>=1.2.1,<2`): the library follows semantic versioning,
+so only a new major version can break the integration, and library fixes don't need an
+integration release. The library's own dependencies (e.g. `cryptography`) carry no upper bounds,
+so they always follow Home Assistant's pinned versions and won't disturb your install. Requires Home Assistant 2025.10 or newer.
 
 ### Upgrading
 - **HACS:** open the integration in HACS → **Update** → restart Home Assistant.
