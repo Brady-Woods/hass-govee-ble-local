@@ -135,7 +135,7 @@
       "message": "{device_name} doesn't support that request: {error}"
     },
     "unknown_effect": {
-      "message": "{device_name} has no scene called '{effect}'."
+      "message": "{device_name} has no scene called {effect}."
     },
     "self_test_busy": {
       "message": "A self-test is already running; try again when it has finished."
