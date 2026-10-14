@@ -16,7 +16,7 @@ import asyncio
 from collections.abc import Mapping
 from dataclasses import dataclass
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from govee_ble_local import (
     GoveeBleError,
@@ -41,7 +41,15 @@ from homeassistant.helpers.selector import (
     TextSelectorConfig,
     TextSelectorType,
 )
-import voluptuous as vol
+
+if TYPE_CHECKING:
+    # Home Assistant 2026.10+ types flow schemas as probatio, and at runtime aliases
+    # `voluptuous` to probatio (homeassistant/__init__.py, install_as_voluptuous). Older
+    # supported Home Assistant (hacs.json: 2025.10+) has no probatio, so import voluptuous
+    # at runtime and type-check against probatio.
+    import probatio as vol
+else:
+    import voluptuous as vol
 
 from .const import CONF_CLEAR_SECRET, CONF_SECRET, CONF_SKU, DOMAIN
 from .helpers import BLE_ERRORS, parse_secret

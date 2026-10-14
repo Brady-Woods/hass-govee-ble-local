@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Tests and type checks run against Home Assistant 2026.10 (`homeassistant==2026.10.0`,
+  `pytest-homeassistant-custom-component==0.13.371`), and CI uses `actions/checkout` v7 and
+  `actions/setup-python` v7 (Node 24).
+- The config flow type-checks against probatio, which Home Assistant 2026.10 uses for flow schemas
+  (it aliases `voluptuous` to probatio at runtime). At runtime the flow still imports
+  `voluptuous`, so Home Assistant 2025.10+ is unaffected.
+
 ## [1.4.1] - 2026-10-13
 
 Requires `govee-ble-local` 1.2.1 or newer (any 1.x) **from PyPI** and Home Assistant 2025.10+.
