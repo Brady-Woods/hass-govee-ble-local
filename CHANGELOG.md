@@ -25,7 +25,7 @@ Requires `govee-ble-local` 1.2.1 or newer (any 1.x) **from PyPI** and Home Assis
 - Library 1.2.1 also reads device names the way the Govee app does (devices advertising a bare
   `GV…` name were never discovered).
 - Passes Home Assistant's current hassfest and HACS validation again (failing since September as
-  their rules tightened): the manifest has a `documentation` link; `capture_session` targets are
+  their rules tightened): the manifest has `documentation` and `issue_tracker` links; `capture_session` targets are
   filtered by this integration's entities instead of a device filter (picking a device, entity or
   area works as before; the service call is unchanged); the "unknown scene" error no longer quotes
   its placeholder.
