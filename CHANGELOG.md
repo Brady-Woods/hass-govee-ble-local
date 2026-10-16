@@ -39,6 +39,11 @@ Ready for the next `govee-ble-local` release (after 1.3.0); the requirement stay
 - The config flow type-checks against probatio, which Home Assistant 2026.10 uses for flow schemas
   (it aliases `voluptuous` to probatio at runtime). At runtime the flow still imports
   `voluptuous`, so Home Assistant 2025.10+ is unaffected.
+- `scripts/check.sh` in a dev checkout: when `../govee-ble-local` no longer tracks its generated
+  Kaitai classes (it then builds them from `spec/*.ksy` on install), the gate requires the JVM
+  `kaitai-struct-compiler` 0.11 and stops with install instructions if it is missing, instead of
+  failing inside a quiet `pip install`. CI and `FROM_MANIFEST=1` install released packages, which
+  ship the classes, so they need no compiler.
 
 ## [1.4.1] - 2026-10-13
 
