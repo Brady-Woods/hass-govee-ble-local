@@ -17,7 +17,8 @@ from typing import Any
 from unittest.mock import AsyncMock, patch
 
 from bleak.backends.device import BLEDevice
-from govee_ble_local import Device, create_device
+import govee_ble_local
+from govee_ble_local import Device, GoveeBleError, create_device
 from govee_ble_local.models import Encryption
 from homeassistant.components.bluetooth import BluetoothServiceInfoBleak
 from homeassistant.core import HomeAssistant
@@ -161,6 +162,38 @@ def make_service_info(
         time=time.monotonic(),
         tx_power=None,
     )
+
+
+class StandInCommandRejected(GoveeBleError):
+    """GoveeBleCommandRejected for a library that predates it (1.3.0 and older)."""
+
+
+@pytest.fixture
+def command_rejected() -> Generator[type[GoveeBleError]]:
+    """The library's GoveeBleCommandRejected, as the integration's handlers catch it.
+
+    A library older than the class gets a stand-in wired into the handlers, so the
+    rejection handling is tested on every library version CI installs.
+    """
+    real: type[GoveeBleError] | None = getattr(govee_ble_local, "GoveeBleCommandRejected", None)
+    if real is not None:
+        yield real
+        return
+    with (
+        patch(
+            "custom_components.govee_ble_local.entity.COMMAND_REJECTED", (StandInCommandRejected,)
+        ),
+        patch(
+            "custom_components.govee_ble_local.coordinator.COMMAND_REJECTED",
+            (StandInCommandRejected,),
+        ),
+    ):
+        yield StandInCommandRejected
+
+
+def rejected_write(error: type[GoveeBleError], address: str = ADDRESS) -> GoveeBleError:
+    """A write rejection as the library raises it (its message names the device)."""
+    return error(f"{address}: device rejected write 0x33 (status 0x01)")
 
 
 @pytest.fixture(autouse=True)

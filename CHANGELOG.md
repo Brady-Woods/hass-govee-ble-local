@@ -5,15 +5,45 @@ All notable changes to this integration are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.5.0] - 2026-10-16
+
+Requires `govee-ble-local` 1.2.1 or newer (any 1.x) **from PyPI** and Home Assistant 2025.10+.
+Ready for the next `govee-ble-local` release (after 1.3.0); the requirement stays
+`govee-ble-local>=1.2.1,<2`. What needs the new library is noted below.
+
+### Added
+- Bluetooth discovery also matches manufacturer IDs 0x8841 and 0x8842, the encrypted v1/v2
+  broadcast headers the Govee app accepts. The manifest now lists every ID in the library's
+  `MANUFACTURER_IDS`.
+- The Govee-account step of the plug secret flow shows "invalid authentication" when the account
+  rejects the email or password, instead of "cannot connect". Needs the library's
+  `GoveeCloudAuthError` (next release). Older libraries still report "cannot connect".
+- A command the device refuses (the library's `GoveeBleCommandRejected`, next release) and a
+  rejected secret key are logged at WARNING with the device address, from a service call or a
+  poll. The next library release logs a refused write only at DEBUG and raises the typed error
+  instead, so without this the refusals would be missing from the diagnostics.
+- The diagnostics' `recent_warnings` now also keep this integration's own WARNING+ lines for the
+  device (rejected commands and secrets, failed polls), as well as the library's.
 
 ### Changed
+- The config flow looks up device profiles with `profile_for`, which the 1.2.1 floor already
+  exports. The next library release deprecates `device_profile_for`, and the integration's tests
+  treat its warning as an error.
+- With the next library release, an H6052 lamp in colour-temperature mode reads back as an RGB
+  colour (the Kelvin's tint) with no colour temperature, which is how the Govee app reads it. Its
+  light switches from color_temp to rgb mode after the next poll. The light handles this: it keeps
+  the read-back colour on brightness changes, and leaving a scene restores that colour.
 - Tests and type checks run against Home Assistant 2026.10 (`homeassistant==2026.10.0`,
   `pytest-homeassistant-custom-component==0.13.371`), and CI uses `actions/checkout` v7 and
   `actions/setup-python` v7 (Node 24).
 - The config flow type-checks against probatio, which Home Assistant 2026.10 uses for flow schemas
   (it aliases `voluptuous` to probatio at runtime). At runtime the flow still imports
   `voluptuous`, so Home Assistant 2025.10+ is unaffected.
+- `scripts/check.sh` in a dev checkout: when `../govee-ble-local` no longer tracks its generated
+  Kaitai classes (it then builds them from `spec/*.ksy` on install), the gate requires the JVM
+  `kaitai-struct-compiler` 0.11 and stops with install instructions if it is missing, instead of
+  failing inside a quiet `pip install`. CI and `FROM_MANIFEST=1` install released packages, which
+  ship the classes, so they need no compiler.
 
 ## [1.4.1] - 2026-10-13
 

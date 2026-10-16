@@ -36,6 +36,7 @@ from .const import ADDRESS, PLUG_ADDRESS, PLUG_NAME
 OTHER_ADDRESS = "11:22:33:44:55:66"
 ROOT_LOGGER = "govee_ble_local"
 FRAMES_LOGGER = "govee_ble_local.frames"
+INTEGRATION_LOGGER = "custom_components.govee_ble_local"
 AFTERNOON_CODE = load_scenes("H60A6")["Afternoon"].code
 
 H60A6_STEPS = [
@@ -810,6 +811,31 @@ async def test_log_capture_keeps_only_warnings_for_its_address(
     # Returns a copy, oldest first.
     log_capture.records().clear()
     assert len(log_capture.records()) == 2
+
+
+async def test_log_capture_keeps_the_integrations_own_warnings(
+    lib_logger: logging.Logger,
+) -> None:
+    """The integration's WARNING lines (command and secret rejections) are captured too.
+
+    Each record is kept once, whichever of the two loggers it comes through, and
+    detaching the last capture leaves no handler on either.
+    """
+    integration_logger = logging.getLogger(INTEGRATION_LOGGER)
+    log_capture = LogCapture(ADDRESS)
+    assert len(_router_handlers(integration_logger)) == 1
+
+    logging.getLogger(f"{INTEGRATION_LOGGER}.entity").warning("%s rejected a command", ADDRESS)
+    logging.getLogger(f"{INTEGRATION_LOGGER}.entity").info("%s just info", ADDRESS)
+    logging.getLogger("govee_ble_local.session").warning("%s unrecognised frame", ADDRESS)
+
+    assert log_capture.records() == [
+        f"WARNING {ADDRESS} rejected a command",
+        f"WARNING {ADDRESS} unrecognised frame",
+    ]
+    log_capture.detach()
+    assert _router_handlers(integration_logger) == []
+    assert _router_handlers(lib_logger) == []
 
 
 async def test_log_capture_ring_buffer_is_bounded(lib_logger: logging.Logger) -> None:

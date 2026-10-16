@@ -6,8 +6,9 @@ import json
 import logging
 from types import SimpleNamespace
 
-from govee_ble_local import Device
+from govee_ble_local import Device, GoveeBleError
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 from pytest_homeassistant_custom_component.components.diagnostics import (
@@ -17,6 +18,7 @@ from pytest_homeassistant_custom_component.typing import ClientSessionGenerator
 
 from custom_components.govee_ble_local.const import CONF_SECRET, CONF_SKU, DOMAIN
 
+from .conftest import connection, rejected_write
 from .const import ADDRESS, SECRET_HEX, TITLE
 
 REDACTED = "**REDACTED**"
@@ -197,6 +199,31 @@ async def test_identifiers_are_redacted_by_key_and_by_value(
     # The warning captured for this device is present, with identifiers scrubbed.
     assert diagnostics["recent_warnings"] == [
         f"WARNING {REDACTED}: unrecognised frame wire={REDACTED} wifi={REDACTED}"
+    ]
+
+
+async def test_rejected_command_reaches_the_diagnostics(
+    hass: HomeAssistant,
+    hass_client: ClientSessionGenerator,
+    setup_integration: MockConfigEntry,
+    mock_device: Device,
+    command_rejected: type[GoveeBleError],
+) -> None:
+    """A command the device refuses shows in recent_warnings, its address scrubbed.
+
+    The library logs the rejection only at DEBUG; the line comes from the
+    integration's own WARNING.
+    """
+    connection(mock_device).error = rejected_write(command_rejected)
+    with pytest.raises(HomeAssistantError):
+        await hass.services.async_call(
+            "light", "turn_on", {"entity_id": "light.test_ceiling"}, blocking=True
+        )
+
+    diagnostics = await get_diagnostics_for_config_entry(hass, hass_client, setup_integration)
+    assert diagnostics["recent_warnings"] == [
+        f"WARNING {REDACTED} rejected a command: {REDACTED}: device rejected write 0x33 "
+        "(status 0x01)"
     ]
 
 

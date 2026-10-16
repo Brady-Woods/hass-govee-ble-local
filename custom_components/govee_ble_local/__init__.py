@@ -132,8 +132,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: GoveeBleLocalConfigEntry
 
     _remove_legacy_zone_entities(hass, address, device)
 
-    # Always-on WARNING+ capture so unrecognised frames / rejections surface in the
-    # downloadable diagnostics without the user having to enable debug logging.
+    # Always-on WARNING+ capture so problems surface in the downloadable diagnostics
+    # without the user having to enable debug logging: unrecognised frames and empty
+    # status reads from the library's WARNING log, command and secret rejections from
+    # this integration's own (entity / coordinator).
     log_capture = LogCapture(address)
     entry.async_on_unload(log_capture.detach)
 

@@ -16,7 +16,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import COMMAND_TIMEOUT_SECONDS, DOMAIN, MANUFACTURER, ZONE_TRANSLATION_KEYS
 from .coordinator import GoveeBleLocalCoordinator
-from .helpers import BLE_ERRORS
+from .helpers import BLE_ERRORS, COMMAND_REJECTED
 
 if TYPE_CHECKING:
     from . import GoveeBleLocalConfigEntry
@@ -76,11 +76,16 @@ class GoveeBleLocalEntity(CoordinatorEntity[GoveeBleLocalCoordinator]):
         mistake (ServiceValidationError); a BleakError, a library GoveeBleError
         or a timeout becomes a clean "could not communicate" error instead of a
         raw traceback in the service-call toast.
+
+        A rejected secret or command is logged at WARNING, where the always-on
+        diagnostics capture (capture.LogCapture) sees it: the library leaves
+        logging it to the caller.
         """
         try:
             async with asyncio.timeout(COMMAND_TIMEOUT_SECONDS):
                 return await coro
         except GoveeBleAuthError as err:
+            _LOGGER.warning("%s rejected its secret key: %s", self._address, err)
             self.coordinator.config_entry.async_start_reauth(self.hass)
             raise HomeAssistantError(
                 translation_domain=DOMAIN,
@@ -93,14 +98,21 @@ class GoveeBleLocalEntity(CoordinatorEntity[GoveeBleLocalCoordinator]):
                 translation_key="not_supported",
                 translation_placeholders={"device_name": self._device_name, "error": str(err)},
             ) from err
+        except COMMAND_REJECTED as err:
+            _LOGGER.warning("%s rejected a command: %s", self._address, err)
+            raise self._command_failed(err) from err
         except BLE_ERRORS as err:
             _LOGGER.debug("BLE command to %s failed: %s", self._address, err)
-            raise HomeAssistantError(
-                translation_domain=DOMAIN,
-                translation_key="ble_command_failed",
-                translation_placeholders={
-                    "device_name": self._device_name,
-                    # A bare TimeoutError (our deadline) has no message.
-                    "error": str(err) or type(err).__name__,
-                },
-            ) from err
+            raise self._command_failed(err) from err
+
+    def _command_failed(self, err: Exception) -> HomeAssistantError:
+        """Return the "could not communicate" error for a failed command."""
+        return HomeAssistantError(
+            translation_domain=DOMAIN,
+            translation_key="ble_command_failed",
+            translation_placeholders={
+                "device_name": self._device_name,
+                # A bare TimeoutError (our deadline) has no message.
+                "error": str(err) or type(err).__name__,
+            },
+        )

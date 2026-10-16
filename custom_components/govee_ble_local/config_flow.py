@@ -18,12 +18,7 @@ from dataclasses import dataclass
 import logging
 from typing import TYPE_CHECKING, Any
 
-from govee_ble_local import (
-    GoveeBleError,
-    create_device,
-    device_profile_for,
-    is_supported_sku,
-)
+from govee_ble_local import GoveeBleError, cloud, create_device, is_supported_sku, profile_for
 from govee_ble_local.cloud import GoveeCloudAccount, GoveeCloudError
 from govee_ble_local.identify import identify
 from homeassistant.components.bluetooth import (
@@ -52,9 +47,13 @@ else:
     import voluptuous as vol
 
 from .const import CONF_CLEAR_SECRET, CONF_SECRET, CONF_SKU, DOMAIN
-from .helpers import BLE_ERRORS, parse_secret
+from .helpers import BLE_ERRORS, optional_errors, parse_secret
 
 _LOGGER = logging.getLogger(__name__)
+
+# The Govee account rejected the email/password. Added after govee-ble-local 1.3.0;
+# an older library raises a plain GoveeCloudError, reported as cannot_connect.
+_CLOUD_AUTH_ERRORS = optional_errors(cloud, "GoveeCloudAuthError")
 
 _MENU_OPTIONS = ["secret_cloud", "secret_manual"]
 _SECRET_SCHEMA = vol.Schema({vol.Optional(CONF_SECRET, default=""): str})
@@ -95,7 +94,7 @@ def _supported_sku(info: BluetoothServiceInfoBleak) -> str | None:
 
 def _requires_secret(sku: str) -> bool:
     """Return True if this SKU's device profile gates commands behind a secret key."""
-    profile = device_profile_for(sku)
+    profile = profile_for(sku)
     return bool(profile and profile.requires_secret)
 
 
@@ -323,13 +322,18 @@ class GoveeBleLocalConfigFlow(ConfigFlow, domain=DOMAIN):
     async def _fetch_cloud_secret(self, address: str, email: str, password: str) -> str:
         """Return the secret (hex) of the account device matching ``address``.
 
-        Raises _CloudSecretError("cannot_connect") when login/listing fails and
-        _CloudSecretError("secret_not_found") when no matching device has a key.
+        Raises _CloudSecretError("invalid_auth") when the account rejects the
+        credentials, _CloudSecretError("cannot_connect") when login/listing fails
+        otherwise and _CloudSecretError("secret_not_found") when no matching device
+        has a key.
         """
         want = address.replace(":", "").lower()
         account = GoveeCloudAccount(email, password, session=async_get_clientsession(self.hass))
         try:
             devices = await account.get_devices()
+        except _CLOUD_AUTH_ERRORS as err:
+            _LOGGER.debug("Govee cloud rejected the credentials: %s", err)
+            raise _CloudSecretError("invalid_auth") from err
         except GoveeCloudError as err:
             _LOGGER.debug("Govee cloud login/list failed: %s", err)
             raise _CloudSecretError("cannot_connect") from err
