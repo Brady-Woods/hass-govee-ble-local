@@ -5,10 +5,11 @@ All notable changes to this integration are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.5.0] - 2026-10-16
 
-Ready for the next `govee-ble-local` release (after 1.3.0), and still works with 1.2.1 and 1.3.0:
-the requirement stays `govee-ble-local>=1.2.1,<2`. What needs the new library is noted below.
+Requires `govee-ble-local` 1.2.1 or newer (any 1.x) **from PyPI** and Home Assistant 2025.10+.
+Ready for the next `govee-ble-local` release (after 1.3.0); the requirement stays
+`govee-ble-local>=1.2.1,<2`. What needs the new library is noted below.
 
 ### Added
 - Bluetooth discovery also matches manufacturer IDs 0x8841 and 0x8842, the encrypted v1/v2

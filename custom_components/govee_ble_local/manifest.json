@@ -25,5 +25,5 @@
   "loggers": ["bleak", "bleak_retry_connector", "govee_ble_local"],
   "quality_scale": "gold",
   "requirements": ["govee-ble-local>=1.2.1,<2"],
-  "version": "1.4.1"
+  "version": "1.5.0"
 }
