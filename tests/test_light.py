@@ -876,8 +876,12 @@ async def test_effect_off_on_colour_temp_only_fixture(
     _seed(entry, is_on=True, optimistic=False)
     assert hass.states.get(MAIN).attributes["supported_color_modes"] == ["color_temp"]
     await _call(hass, "turn_on", MAIN, effect="off")
-    assert device.turn_on.await_args.kwargs["kelvin"] == (2000 + 9000) // 2
-    assert hass.states.get(MAIN).attributes["color_temp_kelvin"] == 5500
+    # The profile's range, not fixed numbers: the library narrows H6006's to the app's.
+    assert device.min_kelvin is not None
+    assert device.max_kelvin is not None
+    middle = (device.min_kelvin + device.max_kelvin) // 2
+    assert device.turn_on.await_args.kwargs["kelvin"] == middle
+    assert hass.states.get(MAIN).attributes["color_temp_kelvin"] == middle
 
 
 @pytest.mark.parametrize("device_sku", ["H6006"])
