@@ -15,6 +15,7 @@ from govee_ble_local import (
     Device,
     GoveeBleAuthError,
     GoveeBleConnectionError,
+    GoveeBleError,
     GoveeBleHandshakeError,
     GoveeBleNotSupported,
     GoveeBleTimeout,
@@ -45,6 +46,7 @@ from .conftest import (
     allow_adverts,
     make_device,
     make_service_info,
+    rejected_write,
 )
 from .const import ADDRESS
 
@@ -244,16 +246,51 @@ async def test_unexpected_error_still_backs_off_and_logs_traceback(
     assert "boom" in str(coordinator.last_exception)
 
 
+def _integration_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
+    """WARNING lines the integration logged itself (what its diagnostics capture keeps)."""
+    return [
+        r.getMessage()
+        for r in caplog.records
+        if r.name.startswith("custom_components.govee_ble_local") and r.levelno == logging.WARNING
+    ]
+
+
+async def test_rejected_command_during_poll_is_a_logged_failure(
+    setup_integration: MockConfigEntry,
+    coordinator: GoveeBleLocalCoordinator,
+    mock_device: Device,
+    command_rejected: type[GoveeBleError],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A refused write while polling fails the poll (with backoff) and is logged at WARNING."""
+    error = rejected_write(command_rejected)
+    fail(mock_device, error)
+    await coordinator.async_refresh()
+    await coordinator.async_refresh()
+
+    assert (coordinator.consecutive_failures, coordinator.total_failures) == (2, 2)
+    assert not coordinator.last_update_success
+    assert interval(coordinator) == BASE * 2
+    assert str(error) in str(coordinator.last_exception)
+    line = f"{ADDRESS} rejected a command during a poll: {error}"
+    assert _integration_warnings(caplog) == [line, line]
+    assert f"WARNING {line}" in setup_integration.runtime_data.log_capture.records()
+
+
 async def test_auth_error_starts_reauth_and_stops_polling(
     hass: HomeAssistant,
     setup_integration: MockConfigEntry,
     coordinator: GoveeBleLocalCoordinator,
     mock_device: Device,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A rejected secret starts reauth, isn't a poll failure and cancels further polling."""
     fail(mock_device, GoveeBleAuthError("secret rejected"))
     await coordinator.async_refresh()
     await hass.async_block_till_done()
+    line = f"{ADDRESS} rejected its secret key: secret rejected"
+    assert _integration_warnings(caplog) == [line]
+    assert f"WARNING {line}" in setup_integration.runtime_data.log_capture.records()
 
     flows = hass.config_entries.flow.async_progress()
     assert any(

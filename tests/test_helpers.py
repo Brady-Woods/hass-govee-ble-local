@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
+from types import ModuleType
+
 from bleak.exc import BleakError
+import govee_ble_local
 from govee_ble_local import GoveeBleConnectionError, GoveeBleError
 import pytest
 
 from custom_components.govee_ble_local.helpers import (
     BLE_ERRORS,
+    COMMAND_REJECTED,
     brightness_to_pct,
     clean_mac,
     clean_text,
+    optional_errors,
     parse_secret,
     pct_to_brightness,
 )
@@ -114,3 +119,34 @@ def test_ble_errors_catches_subclasses() -> None:
     """A library subclass is caught by BLE_ERRORS in an except clause."""
     with pytest.raises(BLE_ERRORS):
         raise GoveeBleConnectionError("nope")
+
+
+def test_optional_errors() -> None:
+    """A class the library defines is caught; a missing one gives an empty tuple."""
+    module = ModuleType("fake_library")
+
+    class NewError(GoveeBleError):
+        pass
+
+    module.NewError = NewError  # type: ignore[attr-defined]
+    assert optional_errors(module, "NewError") == (NewError,)
+    assert optional_errors(module, "NotYetAdded") == ()
+
+    # An empty tuple matches nothing: the error reaches the broader handler after it.
+    caught = None
+    try:
+        raise NewError("rejected")
+    except optional_errors(module, "NotYetAdded"):
+        caught = "optional"
+    except BLE_ERRORS:
+        caught = "ble"
+    assert caught == "ble"
+
+
+def test_command_rejected_tracks_the_installed_library() -> None:
+    """COMMAND_REJECTED is the library's class where it exists (after 1.3.0), else empty."""
+    real = getattr(govee_ble_local, "GoveeBleCommandRejected", None)
+    expected = (real,) if real is not None else ()
+    assert expected == COMMAND_REJECTED
+    for error in COMMAND_REJECTED:
+        assert issubclass(error, GoveeBleError)  # so BLE_ERRORS covers it on any version

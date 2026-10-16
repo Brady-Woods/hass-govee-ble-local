@@ -12,7 +12,8 @@ into HA. The protocol reference lives in the library (`spec/docs/`).
 
 ## Supported devices & entities
 
-Discovery matches Govee manufacturer IDs and local-name prefixes (see
+Discovery matches Govee manufacturer IDs (0x8801-0x8803 and 0x8841-0x8843, the
+library's `const.MANUFACTURER_IDS`) and local-name prefixes (see
 `manifest.json`); the library's profile table decides which models are
 supported (`govee_ble_local.supported_skus()`). Entities are driven by each
 profile's capabilities:
@@ -59,7 +60,8 @@ profile's capabilities:
   `UNAVAILABLE_AFTER_FAILURES` failed polls. When it starts advertising
   again it is polled at once and the backoff is reset.
 - A rejected secret key (`GoveeBleAuthError`) starts the re-auth flow, and
-  polling stops until the entry is reloaded with a new key.
+  polling stops until the entry is reloaded with a new key. It is logged at
+  WARNING, so it shows in the diagnostics' captured log.
 
 ### Commands (`light.py`, `switch.py`, `entity.py`)
 - The main light sends power + brightness + colour as **one batched library
@@ -68,7 +70,10 @@ profile's capabilities:
   (global switch, per-zone frames on H60A6, one combined frame on H6047).
 - After every command all of the device's entities are refreshed together
   (whole-fixture off also updates the zone lights/switches).
-- Library and bleak errors become a translated `HomeAssistantError`.
+- Library and bleak errors become a translated `HomeAssistantError`. A command
+  the device refuses (`GoveeBleCommandRejected`, govee-ble-local releases after
+  1.3.0) or a rejected secret is also logged at WARNING: the library logs it
+  only at DEBUG.
 
 ## Data updates
 
@@ -100,6 +105,9 @@ from all free text).
 
 ## Troubleshooting
 
+- The diagnostics download includes the device's recent WARNING+ log lines:
+  unrecognised frames and empty status reads from the library, rejected
+  commands and secrets and failed polls from this integration.
 - Enable `govee_ble_local.frames: debug` to log every TX/RX frame; the
   **Run self-test** button / `capture_session` service exercises every
   capability and returns the captured session.

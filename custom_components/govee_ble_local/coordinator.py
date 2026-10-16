@@ -45,7 +45,7 @@ from .const import (
     POLL_JITTER_SECONDS,
     UNAVAILABLE_AFTER_FAILURES,
 )
-from .helpers import BLE_ERRORS
+from .helpers import BLE_ERRORS, COMMAND_REJECTED
 
 if TYPE_CHECKING:
     from . import GoveeBleLocalConfigEntry
@@ -253,7 +253,14 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
             except GoveeBleAuthError as err:
                 # Starts HA's reauth flow (config_flow.async_step_reauth); HA stops
                 # scheduling polls until the entry is reloaded with a new secret.
+                # Rejections are logged at WARNING for the diagnostics capture
+                # (capture.LogCapture): the library leaves that to the caller.
+                _LOGGER.warning("%s rejected its secret key: %s", self._address, err)
                 raise ConfigEntryAuthFailed(str(err)) from err
+            except COMMAND_REJECTED as err:
+                _LOGGER.warning("%s rejected a command during a poll: %s", self._address, err)
+                self.total_failures += 1
+                raise self._record_failure(f"Device rejected a command: {err}") from err
             except BLE_ERRORS as err:
                 self.total_failures += 1
                 raise self._record_failure(f"Error communicating with device: {err}") from err

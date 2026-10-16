@@ -6,9 +6,10 @@ import asyncio
 from collections.abc import AsyncGenerator, Generator
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
+import warnings
 
 from bleak.backends.device import BLEDevice
-from govee_ble_local import Device, GoveeBleConnectionError, GoveeBleNotSupported
+from govee_ble_local import Device, GoveeBleConnectionError, GoveeBleNotSupported, cloud
 from govee_ble_local.cloud import CloudDevice, GoveeCloudError
 from homeassistant.config_entries import (
     SOURCE_BLUETOOTH,
@@ -22,7 +23,10 @@ from homeassistant.data_entry_flow import AbortFlow, FlowResult, FlowResultType
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.govee_ble_local.config_flow import GoveeBleLocalConfigFlow
+from custom_components.govee_ble_local.config_flow import (
+    GoveeBleLocalConfigFlow,
+    _requires_secret,
+)
 from custom_components.govee_ble_local.const import (
     CONF_CLEAR_SECRET,
     CONF_SECRET,
@@ -567,6 +571,57 @@ async def test_cloud_secret_login_error(
     assert result["step_id"] == "secret_cloud"
     assert result["errors"] == {"base": "cannot_connect"}
     cloud_account.close.assert_awaited_once()
+
+
+class StandInCloudAuthError(GoveeCloudError):
+    """GoveeCloudAuthError for a library that predates it (1.3.0 and older)."""
+
+
+@pytest.fixture
+def cloud_auth_error() -> Generator[type[GoveeCloudError]]:
+    """The library's GoveeCloudAuthError, as the flow catches it (a stand-in before 1.4)."""
+    real: type[GoveeCloudError] | None = getattr(cloud, "GoveeCloudAuthError", None)
+    if real is not None:
+        yield real
+        return
+    with patch(f"{FLOW}._CLOUD_AUTH_ERRORS", (StandInCloudAuthError,)):
+        yield StandInCloudAuthError
+
+
+async def test_cloud_secret_invalid_auth(
+    hass: HomeAssistant,
+    plug_device: Device,
+    cloud_account: MagicMock,
+    cloud_auth_error: type[GoveeCloudError],
+) -> None:
+    """Rejected credentials are invalid_auth, not cannot_connect, and the session is closed."""
+    cloud_account.get_devices.side_effect = cloud_auth_error("login failed (HTTP 401)")
+    form = await open_cloud_form(hass, plug_device)
+    result = await hass.config_entries.flow.async_configure(form["flow_id"], CREDENTIALS)
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "secret_cloud"
+    assert result["errors"] == {"base": "invalid_auth"}
+    cloud_account.close.assert_awaited_once()
+
+
+async def test_cloud_secret_auth_error_on_an_older_library(
+    hass: HomeAssistant, plug_device: Device, cloud_account: MagicMock
+) -> None:
+    """A library without GoveeCloudAuthError keeps reporting a login failure as cannot_connect."""
+    cloud_account.get_devices.side_effect = StandInCloudAuthError("login failed (HTTP 401)")
+    with patch(f"{FLOW}._CLOUD_AUTH_ERRORS", ()):
+        form = await open_cloud_form(hass, plug_device)
+        result = await hass.config_entries.flow.async_configure(form["flow_id"], CREDENTIALS)
+    assert result["errors"] == {"base": "cannot_connect"}
+
+
+def test_requires_secret_uses_the_current_profile_lookup() -> None:
+    """The secret check uses profile_for: the deprecated device_profile_for would warn."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", DeprecationWarning)
+        assert _requires_secret("H5083") is True
+        assert _requires_secret("H60A6") is False
+        assert _requires_secret("H9999") is False
 
 
 @pytest.mark.parametrize(

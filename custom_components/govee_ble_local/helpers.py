@@ -1,6 +1,9 @@
-"""Small shared helpers: device-info cleaning, unit conversion, secret parsing."""
+"""Small shared helpers: BLE error classes, device-info cleaning, unit conversion, secrets."""
+
+from types import ModuleType
 
 from bleak.exc import BleakError
+import govee_ble_local
 from govee_ble_local import GoveeBleError
 
 # Errors that mean "the BLE operation didn't land" rather than a bug: bleak's own,
@@ -9,6 +12,22 @@ from govee_ble_local import GoveeBleError
 BLE_ERRORS: tuple[type[Exception], ...] = (BleakError, GoveeBleError, TimeoutError)
 
 SECRET_BYTES = 8
+
+
+def optional_errors(module: ModuleType, name: str) -> tuple[type[Exception], ...]:
+    """Return ``(module.<name>,)``, or ``()`` if this library version doesn't define it.
+
+    For exceptions added after the manifest's library floor. ``except ()`` matches
+    nothing, so on an older library the error falls through to the broader clause
+    after it (it subclasses ``GoveeBleError``), as before.
+    """
+    error = getattr(module, name, None)
+    return (error,) if error is not None else ()
+
+
+# The device acknowledged a write with a non-zero status. Added after govee-ble-local
+# 1.3.0, which logged the rejection at ERROR itself and raised a private class.
+COMMAND_REJECTED = optional_errors(govee_ble_local, "GoveeBleCommandRejected")
 
 
 def clean_mac(mac: str | None) -> str | None:
