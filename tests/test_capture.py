@@ -37,6 +37,9 @@ OTHER_ADDRESS = "11:22:33:44:55:66"
 ROOT_LOGGER = "govee_ble_local"
 FRAMES_LOGGER = "govee_ble_local.frames"
 AFTERNOON_CODE = load_scenes("H60A6")["Afternoon"].code
+# Library releases after 1.3.0 give the H61A8 colour temperature and per-segment brightness
+# (the app's 15 01 / 15 02 colour frames); earlier ones have neither.
+H61A8_HAS_CCT = Capability.COLOR_TEMP in make_device("H61A8").capabilities
 
 H60A6_STEPS = [
     "power_on",
@@ -249,9 +252,11 @@ async def test_run_covers_scenes_capped_to_first_three() -> None:
 async def test_h61a8_exercises_gradual_without_color_temp() -> None:
     """A gradual-capable strip toggles the flag and restores it; no colour-temp steps."""
     device = make_device("H61A8")
+    # RGB-only on every library: newer releases give the H61A8 colour temperature.
+    device.profile = replace(
+        device.profile, capabilities=device.profile.capabilities - {Capability.COLOR_TEMP}
+    )
     _prime(device, gradual=False)
-    # The real H61A8 profile has no per-segment brightness: the library raises
-    # GoveeBleNotSupported, which the self-test records as a skipped step.
     report = await async_run_self_test(device)
 
     names = [s["step"] for s in report["steps"]]
@@ -266,15 +271,38 @@ async def test_h61a8_exercises_gradual_without_color_temp() -> None:
         "power_off",
     ]
     assert report["capabilities"] == ["brightness", "power", "rgb", "scenes", "segments"]
-    unsupported = _step(report, "segment_0_brightness")
-    assert unsupported["acked"] is False
-    assert unsupported["skipped"].startswith("not supported:")
-    assert unsupported["ok"] is True
+    segment_brightness = _step(report, "segment_0_brightness")
+    if H61A8_HAS_CCT:
+        # Newer libraries send the app's 15 02 per-segment brightness.
+        assert segment_brightness["acked"] is True
+        assert "skipped" not in segment_brightness
+    else:
+        # 1.2.1 has none: GoveeBleNotSupported, recorded as a skipped step.
+        assert segment_brightness["acked"] is False
+        assert segment_brightness["skipped"].startswith("not supported:")
+    assert segment_brightness["ok"] is True
     assert report["ok"] is True
     assert report["restored"] is True
     # Toggled on for the test, put back to its original value afterwards.
     assert device.set_gradual.await_args_list == [call(True), call(False)]
     assert device.state.gradual is False
+
+
+@pytest.mark.skipif(not H61A8_HAS_CCT, reason="the installed library has no H61A8 colour temp")
+async def test_h61a8_exercises_color_temp_when_the_library_supports_it() -> None:
+    """With the app's 15 01 / 15 02 frames the H61A8 self-test also runs the CCT steps."""
+    device = make_device("H61A8")
+    _prime(device, gradual=False)
+
+    report = await async_run_self_test(device)
+
+    names = [s["step"] for s in report["steps"]]
+    assert {"color_temp", "segment_0_color_temp", "segment_0_brightness"} <= set(names)
+    assert "color_temp" in report["capabilities"]
+    for name in ("color_temp", "segment_0_color_temp", "segment_0_brightness"):
+        assert _step(report, name)["acked"] is True
+    assert report["ok"] is True
+    assert report["restored"] is True
 
 
 async def test_h61a8_self_test_completes_against_real_library() -> None:

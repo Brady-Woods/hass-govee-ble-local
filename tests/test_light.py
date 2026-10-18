@@ -53,6 +53,8 @@ WHITE = (255, 255, 255)
 HAS_RUNTIME_SEGMENT_COUNT = Version(importlib.metadata.version("govee-ble-local")) >= Version(
     "1.3.0"
 )
+# Library releases after 1.3.0 give the H61A8 colour temperature and per-segment brightness.
+H61A8_HAS_CCT = Capability.COLOR_TEMP in make_device("H61A8").capabilities
 
 # Colour-temperature ranges to run the range-dependent tests over: one unlike
 # DEFAULT_MIN/MAX_KELVIN (so the device's own range is told apart from the
@@ -74,11 +76,25 @@ def kelvin_range() -> tuple[int | None, int | None] | None:
 
 
 @pytest.fixture
-def mock_device(mock_device: Device, kelvin_range: tuple[int | None, int | None] | None) -> Device:
-    """The shared test device, with its profile's kelvin range replaced on request."""
+def drop_capabilities() -> frozenset[Capability]:
+    """Capabilities to remove from the device's profile (e.g. to model an RGB-only fixture)."""
+    return frozenset()
+
+
+@pytest.fixture
+def mock_device(
+    mock_device: Device,
+    kelvin_range: tuple[int | None, int | None] | None,
+    drop_capabilities: frozenset[Capability],
+) -> Device:
+    """The shared test device, its profile's kelvin range or capabilities replaced on request."""
     if kelvin_range is not None:
         lo, hi = kelvin_range
         mock_device.profile = dataclasses.replace(mock_device.profile, min_kelvin=lo, max_kelvin=hi)
+    if drop_capabilities:
+        mock_device.profile = dataclasses.replace(
+            mock_device.profile, capabilities=mock_device.profile.capabilities - drop_capabilities
+        )
     return mock_device
 
 
@@ -748,15 +764,41 @@ async def test_unavailable_when_device_vanishes(
 
 
 @pytest.mark.parametrize("device_sku", ["H61A8"])
+@pytest.mark.parametrize("drop_capabilities", [frozenset({Capability.COLOR_TEMP})])
 async def test_color_mode_never_reports_unsupported_color_temp(
     hass: HomeAssistant, entry: MockConfigEntry
 ) -> None:
-    """An RGB-only fixture never reports color_temp, even if a kelvin is in its state."""
+    """An RGB-only fixture never reports color_temp, even if a kelvin is in its state.
+
+    No shipped profile is RGB-only any more (newer libraries give the H61A8 colour
+    temperature), so the H61A8 profile is modelled without it.
+    """
     _seed(entry, is_on=True, color_temp_kelvin=4000, rgb_color=None)
     attrs = hass.states.get(MAIN).attributes
     assert attrs["color_mode"] == "rgb"
     assert attrs["supported_color_modes"] == ["rgb"]
     assert "min_color_temp_kelvin" not in attrs or attrs["min_color_temp_kelvin"] is None
+
+
+@pytest.mark.skipif(not H61A8_HAS_CCT, reason="the installed library has no H61A8 colour temp")
+@pytest.mark.parametrize("device_sku", ["H61A8"])
+async def test_h61a8_offers_color_temp_when_the_library_supports_it(
+    hass: HomeAssistant, enabled_entry: MockConfigEntry, mock_device: Device
+) -> None:
+    """The H61A8's main and segment lights gain colour temp with the library's range."""
+    lo, hi = mock_device.min_kelvin, mock_device.max_kelvin
+    assert (lo, hi) == (2700, 6500)
+    for entity_id in (MAIN, _segment(hass, 0)):
+        attrs = hass.states.get(entity_id).attributes
+        assert set(attrs["supported_color_modes"]) == {"rgb", "color_temp"}
+        assert (attrs["min_color_temp_kelvin"], attrs["max_color_temp_kelvin"]) == (lo, hi)
+
+    await _call(hass, "turn_on", MAIN, color_temp_kelvin=3000)
+    assert mock_device.turn_on.await_args.kwargs["kelvin"] == 3000
+    await _call(hass, "turn_on", _segment(hass, 0), color_temp_kelvin=4000, brightness=128)
+    mock_device.set_segment_color_temp.assert_awaited_once_with([0], 4000)
+    mock_device.set_segment_brightness.assert_awaited_once()
+    assert hass.states.get(_segment(hass, 0)).attributes["color_mode"] == "color_temp"
 
 
 @pytest.mark.parametrize("device_sku", ["H6006"])

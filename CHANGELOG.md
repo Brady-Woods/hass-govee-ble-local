@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **H61A8 colour temperature (with the next library release):** a `govee-ble-local` release after
+  1.3.0 gives the H61A8 colour temperature and per-segment brightness. The main and segment lights
+  then offer colour temperature over the library's range (2700-6500 K), and the self-test runs the
+  colour-temperature steps. Nothing changes with 1.2.1 or 1.3.0.
 - **Wrong Govee password shown as such (needs a future library release):** once a
   `govee-ble-local` release adds `GoveeCloudAuthError` (none has yet: 1.2.1 and 1.3.0 don't have
   it), the cloud secret step says the account rejected the email or password (`invalid_auth`)
