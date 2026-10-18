@@ -10,7 +10,7 @@ does; tests simulate a read-back by mutating ``device.state`` first.
 
 from __future__ import annotations
 
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from datetime import timedelta
 import time
 from types import SimpleNamespace
@@ -73,6 +73,9 @@ class FakeConnection:
         self.error: BaseException | None = None
         self.fail_after: int | None = None
         self.closed = False
+        # The default BLE write size (ATT MTU 23 - 3); newer libraries size
+        # multi-packet uploads to it.
+        self.write_payload_size = 20
 
     def _write(self, frames: list[bytes]) -> None:
         for frame in frames:
@@ -89,8 +92,11 @@ class FakeConnection:
     async def send_many(self, frames: list[bytes]) -> None:
         self._write(list(frames))
 
-    async def send_unacked(self, frames: list[bytes], *, gap: float = 0.03) -> None:
-        self._write(list(frames))
+    async def send_unacked(
+        self, frames: list[bytes] | Callable[[int], list[bytes]], *, gap: float = 0.03
+    ) -> None:
+        # Newer libraries pass a function of the link's write size (MTU-sized uploads).
+        self._write(list(frames(self.write_payload_size) if callable(frames) else frames))
 
     async def query(self, *_args: Any, **_kwargs: Any) -> list[bytes]:
         if self.error is not None:

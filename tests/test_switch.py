@@ -128,7 +128,10 @@ async def test_plug_turn_on_and_off(
     assert mock_device.state.is_on is True
     frames = connection(mock_device).sent
     assert frames[0] == build.switch(True, relay=True)
-    assert len(frames) == 2  # relay frame + the sync-time follow-up that actuates it
+    # The 33 b5 time sync is the library's business: 1.2.1 sends one after each
+    # relay write, later releases once per connection (as the app does).
+    assert all(frame[:2] == bytes([0x33, 0xB5]) for frame in frames[1:])
+    assert len(frames) <= 2
 
     connection(mock_device).sent.clear()
     mock_device.set_power.reset_mock()

@@ -21,8 +21,8 @@ from typing import TYPE_CHECKING, Any
 from govee_ble_local import (
     GoveeBleError,
     create_device,
-    device_profile_for,
     is_supported_sku,
+    profile_for,
 )
 from govee_ble_local.cloud import GoveeCloudAccount, GoveeCloudError
 from govee_ble_local.identify import identify
@@ -95,7 +95,7 @@ def _supported_sku(info: BluetoothServiceInfoBleak) -> str | None:
 
 def _requires_secret(sku: str) -> bool:
     """Return True if this SKU's device profile gates commands behind a secret key."""
-    profile = device_profile_for(sku)
+    profile = profile_for(sku)
     return bool(profile and profile.requires_secret)
 
 
