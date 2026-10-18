@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Wrong Govee password shown as such (needs a future library release):** once a
+  `govee-ble-local` release adds `GoveeCloudAuthError` (none has yet: 1.2.1 and 1.3.0 don't have
+  it), the cloud secret step says the account rejected the email or password (`invalid_auth`)
+  instead of the generic "could not log in or reach the Govee cloud". Until then nothing changes.
+- `capture_session`: every entry for a device that couldn't be tested now carries a stable
+  `reason` code next to the `error` message (`not_loaded`, `self_test_device_not_found`,
+  `self_test_busy`, `secret_rejected`, or `unknown`), so an automation can branch on it. The
+  `error` text is unchanged.
+
 ### Fixed
 - Ready for the next `govee-ble-local` release: the config flow uses `profile_for()` (in the library
   since 1.2.1) instead of `device_profile_for()`, which newer releases deprecate. The tests pass
@@ -54,7 +64,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   publish pattern, the secret-rejected handling and the colour-temperature range each live in one
   place; config-entry setup closes the BLE link through an on-unload job; entities link to the
   device record instead of re-declaring it; platforms use `AddConfigEntryEntitiesCallback`; the
-  config flow keeps the pending device in one shape; formatting follows `ruff format`.
+  config flow keeps the pending device in one shape; formatting follows `ruff format`; the
+  self-test report, its steps and the `capture_session` entries are typed (`TypedDict`), and the
+  self-test read-back checks name the state fields directly instead of looking them up by string.
+- Segment lights and the self-test's segment check read the segment count through one helper: the
+  library's runtime `Device.segment_count` on `govee-ble-local` 1.3.0 and later, else (the 1.2.1
+  floor) the profile's. No entities change yet: segment lights are created at setup, before the
+  first poll has read a device's own count, so they still follow the profile. An H6062, the only
+  model that reports its own count (`aa 41` sectionNum), still gets its profile's 33 segment
+  lights, and the library rejects indices at or above the count it reports (open,
+  `docs/library-review.md` 7.3).
+- The cloud secret step matches an account device only by the BLE MAC the library reports
+  (`deviceSettings.address`, else the last 6 octets of the device id). It no longer falls back to
+  the raw device id, so a device whose id has fewer than 6 colon-separated octets (the library
+  then reports no BLE MAC) now gets "secret not found". Govee's 8-octet ids are unaffected.
+- Tests: the Govee-cloud fixtures match what the library's account parser builds (a device id
+  ending in the Wi-Fi MAC, the BLE MAC from `deviceSettings.address`); a device listed without
+  that address is shown not to match its Wi-Fi MAC.
 - Tests: assertions that couldn't fail now discriminate, and new tests cover the presence timer,
   availability without polling, diagnostics redaction, the logger integration, flow cancellation,
   reauth/reconfigure reloads and the manifest requirement shape.

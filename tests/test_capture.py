@@ -30,7 +30,7 @@ from custom_components.govee_ble_local.capture import (
     session_capture,
 )
 
-from .conftest import make_device
+from .conftest import make_device, runtime_segment_count
 from .const import ADDRESS, PLUG_ADDRESS, PLUG_NAME
 
 OTHER_ADDRESS = "11:22:33:44:55:66"
@@ -449,6 +449,34 @@ async def test_zone_without_segments_is_only_power_cycled() -> None:
 
     zone_steps = [s["step"] for s in report["steps"] if s["step"].startswith("zone_")]
     assert zone_steps == ["zone_power_on:lone", "zone_power_off:lone"]
+    assert report["ok"] is True
+
+
+@pytest.mark.parametrize(
+    ("profile_segments", "runtime_count", "expected"),
+    [
+        (13, 0, []),
+        (0, 13, ["segment_0_rgb", "segment_0_brightness", "segment_0_color_temp"]),
+    ],
+    ids=["runtime_zero_synthetic", "profile_zero_synthetic"],
+)
+async def test_segment_step_gate_reads_the_runtime_segment_count(
+    profile_segments: int, runtime_count: int, expected: list[str]
+) -> None:
+    """The segment-step gate reads ``helpers.segment_count(device)``, not the profile.
+
+    Synthetic: the library never produces either state (a runtime count is 1..56 and
+    every SEGMENTS profile has segments), so for a real device both sources agree. The
+    cases only make the two sources disagree, to pin which one the gate reads.
+    """
+    device = make_device("H60A6")
+    _prime(device)
+    device.profile = replace(device.profile, segments=profile_segments)
+
+    with runtime_segment_count(runtime_count):
+        report = await async_run_self_test(device)
+
+    assert [s["step"] for s in report["steps"] if s["step"].startswith("segment_")] == expected
     assert report["ok"] is True
 
 

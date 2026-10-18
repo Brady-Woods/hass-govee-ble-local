@@ -55,6 +55,17 @@ def is_colour_zone(zone: Zone) -> bool:
     return bool(zone.segments)
 
 
+def segment_count(device: Device) -> int:
+    """Return how many segments the device addresses.
+
+    The library's runtime count (``Device.segment_count``, which can differ from the
+    profile's once the device reports its own) where it has one; the 1.2.1 floor has
+    only the profile's static count.
+    """
+    count: int = getattr(device, "segment_count", device.profile.segments)
+    return count
+
+
 def kelvin_range(device: Device) -> tuple[int, int]:
     """Return the device's colour-temperature range, or the defaults where it gives none."""
     return (device.min_kelvin or DEFAULT_MIN_KELVIN, device.max_kelvin or DEFAULT_MAX_KELVIN)

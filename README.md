@@ -108,10 +108,13 @@ device (each identifying its own address, so results from multiple devices are n
 state (power, brightness, colour, active scene, every zone's power/colour, segment colour, the
 gradual flag) and restores all of it when the test finishes — also when the test fails part-way;
 each report says whether the restore fully succeeded (`restored`, `restore_errors`). Only one
-self-test runs at a time. A device that can't be tested contributes an `{ok: false, error}`
-entry. For secret-gated plugs the raw `wire=` bytes are left out of the captured frames. The same
-capture is stored for the config-entry diagnostics download, with identifiers scrubbed and its hex
-payloads redacted (only the service response carries the raw frames).
+self-test runs at a time. A device that can't be tested contributes an
+`{ok: false, address, reason, error}` entry: `reason` is a stable code for automations to branch
+on (`not_loaded`, `self_test_device_not_found`, `self_test_busy`, `secret_rejected`, or `unknown`)
+and `error` the English message. For secret-gated plugs the raw `wire=` bytes are left out of the
+captured frames. The same capture is stored for the config-entry diagnostics download, with
+identifiers scrubbed and its hex payloads redacted (only the service response carries the raw
+frames).
 
 ## Architecture
 

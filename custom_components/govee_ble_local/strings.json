@@ -49,6 +49,7 @@
     "error": {
       "invalid_secret": "The secret key must be 16 hex characters (8 bytes), e.g. a1b2c3d4e5f60718.",
       "cannot_connect": "Could not log in to the Govee account or reach the Govee cloud. Check your email, password and internet connection, then try again.",
+      "invalid_auth": "The Govee account rejected the email or password. Check them and try again.",
       "secret_not_found": "Logged in, but no secret key was found for this device on the account. Make sure the device is added to this Govee account."
     },
     "abort": {

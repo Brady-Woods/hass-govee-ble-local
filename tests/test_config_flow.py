@@ -8,7 +8,13 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from bleak.backends.device import BLEDevice
-from govee_ble_local import Device, GoveeBleConnectionError, GoveeBleNotSupported
+import govee_ble_local
+from govee_ble_local import (
+    Device,
+    GoveeBleConnectionError,
+    GoveeBleNotSupported,
+    cloud as govee_cloud,
+)
 from govee_ble_local.cloud import CloudDevice, GoveeCloudError
 from homeassistant.config_entries import (
     SOURCE_BLUETOOTH,
@@ -23,6 +29,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from custom_components.govee_ble_local import config_flow
 from custom_components.govee_ble_local.config_flow import GoveeBleLocalConfigFlow
 from custom_components.govee_ble_local.const import (
     CONF_CLEAR_SECRET,
@@ -38,6 +45,21 @@ FLOW = "custom_components.govee_ble_local.config_flow"
 UNSUPPORTED_NAME = "GVH9999ABCD"
 OTHER_SECRET_HEX = "0011223344556677"
 PLUG_NO_COLON = PLUG_ADDRESS.replace(":", "").lower()
+# Govee device ids are 8 octets ending in the Wi-Fi MAC, which is one below the BLE
+# address the device advertises (the library's own example has the same pair).
+PLUG_DEVICE_ID = "86:9D:AA:BB:CC:DD:EE:06"
+PLUG_WIFI_MAC = "AA:BB:CC:DD:EE:06"
+OTHER_DEVICE_ID = "86:9D:98:17:3C:B1:A2:D0"
+OTHER_BLE_MAC = "98:17:3C:B1:A2:D1"
+# The library's GoveeCloudAuthError (rejected credentials), where it has one: from the
+# cloud module the flow reads it from, and from the top-level export (the library's
+# semver-stable API), a source independent of the flow's own lookup.
+LIBRARY_CLOUD_AUTH_ERROR: type[GoveeCloudError] | None = getattr(
+    govee_cloud, "GoveeCloudAuthError", None
+)
+TOP_LEVEL_CLOUD_AUTH_ERROR: type[GoveeCloudError] | None = getattr(
+    govee_ble_local, "GoveeCloudAuthError", None
+)
 
 
 @pytest.fixture
@@ -99,10 +121,17 @@ def plug_entry(**extra: Any) -> MockConfigEntry:
 def cloud_device(
     *,
     secret: bytes | None,
-    ble_mac: str | None,
-    device: str = "98:17:3C:B1:A2:D0:00:11:22:33:44:55",
+    address: str | None,
+    device: str = PLUG_DEVICE_ID,
 ) -> CloudDevice:
-    """Build a cloud account device."""
+    """Build a cloud account device the way the library's account parser fills one.
+
+    ``address`` is the response's ``deviceSettings.address`` (the BLE MAC). Without it
+    the parser takes the last 6 octets of the device id (the Wi-Fi MAC) as ``ble_mac``,
+    and None only for an id with fewer than 6 octets.
+    """
+    octets = device.split(":")
+    fallback = ":".join(octets[-6:]) if len(octets) >= 6 else None
     return CloudDevice(
         sku="H5083",
         device=device,
@@ -111,7 +140,14 @@ def cloud_device(
         pact_type=None,
         pact_code=None,
         goods_type=None,
-        ble_mac=ble_mac,
+        ble_mac=address or fallback,
+    )
+
+
+def other_cloud_device() -> CloudDevice:
+    """Another device on the same account, with a secret of its own."""
+    return cloud_device(
+        secret=bytes.fromhex(OTHER_SECRET_HEX), address=OTHER_BLE_MAC, device=OTHER_DEVICE_ID
     )
 
 
@@ -553,8 +589,8 @@ async def test_cloud_secret_picks_matching_device(
 ) -> None:
     """The secret of the device matching the address wins, not the first with a secret."""
     cloud_account.get_devices.return_value = [
-        cloud_device(secret=bytes.fromhex(OTHER_SECRET_HEX), ble_mac="98:17:3C:B1:A2:D1"),
-        cloud_device(secret=bytes.fromhex(SECRET_HEX), ble_mac=PLUG_ADDRESS),
+        other_cloud_device(),
+        cloud_device(secret=bytes.fromhex(SECRET_HEX), address=PLUG_ADDRESS),
     ]
     form = await open_cloud_form(hass, plug_device)
     result = await hass.config_entries.flow.async_configure(form["flow_id"], CREDENTIALS)
@@ -582,7 +618,7 @@ async def test_cloud_secret_matches_lowercase_ble_mac(
 ) -> None:
     """The BLE MAC match is case- and separator-insensitive."""
     cloud_account.get_devices.return_value = [
-        cloud_device(secret=bytes.fromhex(SECRET_HEX), ble_mac=PLUG_ADDRESS.lower()),
+        cloud_device(secret=bytes.fromhex(SECRET_HEX), address=PLUG_ADDRESS.lower()),
     ]
     form = await open_cloud_form(hass, plug_device)
     result = await hass.config_entries.flow.async_configure(form["flow_id"], CREDENTIALS)
@@ -590,26 +626,21 @@ async def test_cloud_secret_matches_lowercase_ble_mac(
     assert result["data"][CONF_SECRET] == SECRET_HEX
 
 
-async def test_cloud_secret_device_id_fallback(
-    hass: HomeAssistant, plug_device: Device, cloud_account: MagicMock, setup_entry: AsyncMock
+async def test_cloud_secret_without_ble_address_is_not_matched_by_wifi_mac(
+    hass: HomeAssistant, plug_device: Device, cloud_account: MagicMock
 ) -> None:
-    """Without a BLE MAC, the device id's trailing octets identify the device."""
-    cloud_account.get_devices.return_value = [
-        cloud_device(
-            secret=bytes.fromhex(OTHER_SECRET_HEX),
-            ble_mac=None,
-            device="98:17:3C:B1:A2:D0:11:22:33:44:55:66",
-        ),
-        cloud_device(
-            secret=bytes.fromhex(SECRET_HEX),
-            ble_mac=None,
-            device=f"98:17:3C:B1:A2:D0:{PLUG_ADDRESS.lower()}",
-        ),
-    ]
+    """Without deviceSettings.address the fallback MAC is the Wi-Fi MAC, which doesn't match.
+
+    The device id ends in the Wi-Fi MAC, one below the advertised BLE address, so the
+    plug's own secret isn't picked: secret_not_found.
+    """
+    plug = cloud_device(secret=bytes.fromhex(SECRET_HEX), address=None)
+    assert plug.ble_mac == PLUG_WIFI_MAC
+    cloud_account.get_devices.return_value = [other_cloud_device(), plug]
     form = await open_cloud_form(hass, plug_device)
     result = await hass.config_entries.flow.async_configure(form["flow_id"], CREDENTIALS)
-    assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert result["data"][CONF_SECRET] == SECRET_HEX
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {"base": "secret_not_found"}
     cloud_account.close.assert_awaited_once()
 
 
@@ -626,15 +657,61 @@ async def test_cloud_secret_login_error(
     cloud_account.close.assert_awaited_once()
 
 
+def test_cloud_auth_error_is_the_librarys_where_it_has_one() -> None:
+    """Newer libraries' GoveeCloudAuthError is caught; the 1.2.1 floor gets a stand-in.
+
+    The stand-in is private to the flow, so on the floor nothing raises it and every cloud
+    failure stays cannot_connect, as before. Checked against the top-level export first:
+    a library that still has the class but dropped the cloud module's re-export fails
+    here instead of quietly showing cannot_connect for a wrong password again.
+    """
+    if TOP_LEVEL_CLOUD_AUTH_ERROR is not None:
+        assert config_flow._CLOUD_AUTH_ERROR is TOP_LEVEL_CLOUD_AUTH_ERROR
+    elif LIBRARY_CLOUD_AUTH_ERROR is not None:
+        assert config_flow._CLOUD_AUTH_ERROR is LIBRARY_CLOUD_AUTH_ERROR
+    else:
+        assert config_flow._CLOUD_AUTH_ERROR is config_flow._CloudAuthErrorUnavailable
+    assert issubclass(config_flow._CLOUD_AUTH_ERROR, GoveeCloudError)
+
+
+async def test_cloud_secret_rejected_credentials_show_invalid_auth(
+    hass: HomeAssistant, plug_device: Device, cloud_account: MagicMock
+) -> None:
+    """Credentials the account rejects (GoveeCloudAuthError) show invalid_auth.
+
+    The library's own class where it has one; on the floor, the stand-in the flow catches.
+    """
+    auth_error = (
+        TOP_LEVEL_CLOUD_AUTH_ERROR or LIBRARY_CLOUD_AUTH_ERROR or config_flow._CLOUD_AUTH_ERROR
+    )
+    cloud_account.get_devices.side_effect = auth_error("login rejected")
+    form = await open_cloud_form(hass, plug_device)
+    result = await hass.config_entries.flow.async_configure(form["flow_id"], CREDENTIALS)
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "secret_cloud"
+    assert result["errors"] == {"base": "invalid_auth"}
+    cloud_account.close.assert_awaited_once()
+
+
 @pytest.mark.parametrize(
     "devices",
     [
         [],
-        [cloud_device(secret=bytes.fromhex(OTHER_SECRET_HEX), ble_mac="98:17:3C:B1:A2:D1")],
-        [cloud_device(secret=None, ble_mac=PLUG_ADDRESS)],
-        [cloud_device(secret=b"", ble_mac=PLUG_ADDRESS)],
+        [other_cloud_device()],
+        [cloud_device(secret=None, address=PLUG_ADDRESS)],
+        [cloud_device(secret=b"", address=PLUG_ADDRESS)],
+        [cloud_device(secret=bytes.fromhex(SECRET_HEX), address=None, device="AA:BB")],
+        # Only the library's MAC is matched, never the raw id it couldn't split into octets.
+        [cloud_device(secret=bytes.fromhex(SECRET_HEX), address=None, device=PLUG_NO_COLON)],
     ],
-    ids=["empty_account", "other_device_only", "match_without_secret", "match_empty_secret"],
+    ids=[
+        "empty_account",
+        "other_device_only",
+        "match_without_secret",
+        "match_empty_secret",
+        "no_mac_at_all",
+        "unsplit_device_id",
+    ],
 )
 async def test_cloud_secret_not_found(
     hass: HomeAssistant,
@@ -662,7 +739,7 @@ async def test_cloud_secret_retry_after_error(
 
     cloud_account.get_devices.side_effect = None
     cloud_account.get_devices.return_value = [
-        cloud_device(secret=bytes.fromhex(SECRET_HEX), ble_mac=PLUG_ADDRESS)
+        cloud_device(secret=bytes.fromhex(SECRET_HEX), address=PLUG_ADDRESS)
     ]
     result = await hass.config_entries.flow.async_configure(form["flow_id"], CREDENTIALS)
     assert result["type"] is FlowResultType.CREATE_ENTRY
@@ -749,8 +826,8 @@ async def test_reauth_cloud_updates_secret(
 ) -> None:
     """The cloud path replaces the stored secret during reauth."""
     cloud_account.get_devices.return_value = [
-        cloud_device(secret=bytes.fromhex(OTHER_SECRET_HEX), ble_mac="98:17:3C:B1:A2:D1"),
-        cloud_device(secret=bytes.fromhex(SECRET_HEX), ble_mac=PLUG_ADDRESS),
+        other_cloud_device(),
+        cloud_device(secret=bytes.fromhex(SECRET_HEX), address=PLUG_ADDRESS),
     ]
     entry = plug_entry(**{CONF_SECRET: OTHER_SECRET_HEX})
     menu = await start_reauth(hass, entry)

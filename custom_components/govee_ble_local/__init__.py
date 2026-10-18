@@ -6,7 +6,6 @@ import asyncio
 from dataclasses import dataclass, field
 from datetime import timedelta
 import logging
-from typing import Any
 import zlib
 
 from govee_ble_local import Capability, Device, GoveeBleNotSupported, create_device
@@ -28,7 +27,7 @@ from homeassistant.helpers import (
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.typing import UNDEFINED, ConfigType
 
-from .capture import LogCapture
+from .capture import LogCapture, SelfTestReport
 from .const import (
     CONF_SECRET,
     CONF_SKU,
@@ -62,9 +61,9 @@ class GoveeBleLocalRuntimeData:
     coordinator: GoveeBleLocalCoordinator
     log_capture: LogCapture
     # The running (or last) self-test, so an unload can let it restore the device.
-    self_test: asyncio.Task[dict[str, Any]] | None = field(default=None, repr=False)
+    self_test: asyncio.Task[SelfTestReport] | None = field(default=None, repr=False)
     # Most recent self-test report (button / capture_session service), for diagnostics.
-    last_self_test: dict[str, Any] | None = field(default=None, repr=False)
+    last_self_test: SelfTestReport | None = field(default=None, repr=False)
 
 
 type GoveeBleLocalConfigEntry = ConfigEntry[GoveeBleLocalRuntimeData]

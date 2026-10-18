@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import importlib.metadata
 import logging
 from types import SimpleNamespace
 from typing import Any
@@ -27,6 +28,7 @@ from homeassistant.const import STATE_OFF, STATE_ON, STATE_UNAVAILABLE, STATE_UN
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import entity_registry as er
+from packaging.version import Version
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
@@ -36,8 +38,9 @@ from custom_components.govee_ble_local.const import (
     DOMAIN,
     UNAVAILABLE_AFTER_FAILURES,
 )
+from custom_components.govee_ble_local.helpers import segment_count
 
-from .conftest import connection, make_device
+from .conftest import connection, make_device, runtime_segment_count
 from .const import ADDRESS
 
 MAIN = "light.test_ceiling"
@@ -46,6 +49,10 @@ BLACK = (0, 0, 0)
 RED = (255, 0, 0)
 GREEN = (0, 255, 0)
 WHITE = (255, 255, 255)
+# Device.segment_count / set_segment_count arrived in govee-ble-local 1.3.0.
+HAS_RUNTIME_SEGMENT_COUNT = Version(importlib.metadata.version("govee-ble-local")) >= Version(
+    "1.3.0"
+)
 
 # Colour-temperature ranges to run the range-dependent tests over: one unlike
 # DEFAULT_MIN/MAX_KELVIN (so the device's own range is told apart from the
@@ -220,6 +227,46 @@ async def test_h6047_has_ten_segment_lights(hass: HomeAssistant, entry: MockConf
     lights = _lights(hass, entry)
     assert sum("_segment_" in u for u in lights) == 10
     assert len(lights) == 13
+
+
+async def test_segment_lights_follow_a_count_known_at_setup(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_bluetooth: SimpleNamespace
+) -> None:
+    """A runtime segment count already known at platform setup sets the segment lights.
+
+    Today the library only learns a device's own count on a poll, and the first poll
+    runs after platform setup, so this covers only a count given before setup.
+    """
+    device = make_device("H60A6")
+    assert device.profile.segments == 13
+    with runtime_segment_count(10):
+        await _setup_custom(hass, mock_config_entry, device, mock_bluetooth)
+
+    lights = _lights(hass, mock_config_entry)
+    assert {u for u in lights if "_segment_" in u} == {f"{ADDRESS}_segment_{i}" for i in range(10)}
+
+
+@pytest.mark.skipif(
+    not HAS_RUNTIME_SEGMENT_COUNT, reason="Device.segment_count arrived in govee-ble-local 1.3.0"
+)
+async def test_segment_lights_use_the_librarys_set_segment_count(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_bluetooth: SimpleNamespace
+) -> None:
+    """On a library with a runtime count, the real API (not a patch) sets the lights.
+
+    Gated on the installed version rather than ``hasattr``, so a library that renamed or
+    dropped ``Device.segment_count`` fails here instead of the getattr in
+    ``helpers.segment_count`` quietly falling back to the profile count.
+    """
+    assert isinstance(getattr(Device, "segment_count", None), property)
+    device = make_device("H60A6")
+    device.set_segment_count(10)
+    assert segment_count(device) == 10
+
+    await _setup_custom(hass, mock_config_entry, device, mock_bluetooth)
+
+    lights = _lights(hass, mock_config_entry)
+    assert {u for u in lights if "_segment_" in u} == {f"{ADDRESS}_segment_{i}" for i in range(10)}
 
 
 @KELVIN_RANGES

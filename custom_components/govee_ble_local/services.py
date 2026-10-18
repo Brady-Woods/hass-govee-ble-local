@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Literal, TypedDict, cast
 
 from govee_ble_local import GoveeBleAuthError
 from homeassistant.config_entries import ConfigEntryState
@@ -22,17 +22,36 @@ from homeassistant.helpers.service import (
 )
 from homeassistant.util.json import JsonObjectType
 
-from .capture import SelfTestBusyError, async_run_self_test
+from .capture import SelfTestBusyError, SelfTestReport, async_run_self_test
 from .const import DOMAIN, SERVICE_CAPTURE_SESSION
 from .helpers import async_secret_rejected
 
 if TYPE_CHECKING:
     from . import GoveeBleLocalConfigEntry
 
+# Machine-readable ``reason`` of a capture_session entry for a device that couldn't be
+# tested: an unloaded entry, else the translation key of this integration's error that
+# stopped it (self_test_device_not_found, self_test_busy, secret_rejected). Any other
+# error, including another domain's translated one, maps to unknown.
+_REASON_NOT_LOADED = "not_loaded"
+_REASON_UNKNOWN = "unknown"
+
+
+class _CaptureFailure(TypedDict):
+    """The capture_session entry for a device that couldn't be tested."""
+
+    ok: Literal[False]
+    address: str
+    reason: str  # stable code to branch on
+    error: str  # human-readable message (English)
+
+
+type _CaptureResult = SelfTestReport | _CaptureFailure
+
 
 async def async_self_test_entry(
     hass: HomeAssistant, entry: GoveeBleLocalConfigEntry
-) -> dict[str, Any]:
+) -> SelfTestReport:
     """Run the self-test against one entry's device and record the report.
 
     Raises HomeAssistantError (translated) when no connectable scanner sees the
@@ -78,22 +97,39 @@ def async_register_services(hass: HomeAssistant) -> None:
     async def _async_capture_session(call: ServiceCall) -> ServiceResponse:
         """Run the self-test against each targeted device; return the reports.
 
-        A device that can't be tested contributes an ``{ok: False, error}``
-        entry instead of aborting the reports already collected.
+        A device that can't be tested contributes an ``{ok: False, address,
+        reason, error}`` entry instead of aborting the reports already collected.
         """
-        results: list[dict[str, Any]] = []
+        results: list[_CaptureResult] = []
         for entry_id in await async_extract_config_entry_ids(call):
             target = hass.config_entries.async_get_entry(entry_id)
             if target is None or target.domain != DOMAIN:
                 continue  # a device target can pull in other integrations' entries
             address = target.data[CONF_ADDRESS]
             if target.state is not ConfigEntryState.LOADED:
-                results.append({"ok": False, "address": address, "error": "not loaded"})
+                results.append(
+                    {
+                        "ok": False,
+                        "address": address,
+                        "reason": _REASON_NOT_LOADED,
+                        "error": "not loaded",
+                    }
+                )
                 continue
             try:
                 results.append(await async_self_test_entry(hass, target))
             except HomeAssistantError as err:
-                results.append({"ok": False, "address": address, "error": str(err)})
+                reason = _REASON_UNKNOWN
+                if err.translation_domain == DOMAIN and err.translation_key:
+                    reason = err.translation_key
+                results.append(
+                    {
+                        "ok": False,
+                        "address": address,
+                        "reason": reason,
+                        "error": str(err),
+                    }
+                )
         if not results:
             raise ServiceValidationError(
                 translation_domain=DOMAIN, translation_key="no_matching_device"

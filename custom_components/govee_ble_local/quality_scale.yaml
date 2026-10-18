@@ -26,8 +26,9 @@ rules:
     comment: >
       The capture_session service action is registered (admin-only) in
       async_setup, not async_setup_entry, so it exists integration-wide. A
-      targeted device whose entry isn't loaded gets an error entry in the
-      response; no matching device raises a translated ServiceValidationError.
+      targeted device whose entry isn't loaded, or that can't be tested, gets an
+      error entry (with a stable reason code) in the response; no matching
+      device raises a translated ServiceValidationError.
   appropriate-polling: done
   brands:
     status: done
@@ -43,7 +44,8 @@ rules:
     status: done
     comment: >
       Full config-flow coverage (bluetooth discovery, user, secret read/cloud/
-      manual, reauth and reconfigure steps plus the not_supported /
+      manual, reauth and reconfigure steps, the cloud step's invalid_auth /
+      cannot_connect / secret_not_found errors, plus the not_supported /
       already_configured / no_devices_found aborts) via
       pytest-homeassistant-custom-component; see tests/test_config_flow.py.
   dependency-transparency:

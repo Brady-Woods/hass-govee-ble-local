@@ -30,6 +30,7 @@ from .helpers import (
     kelvin_range,
     mid_kelvin,
     pct_to_brightness,
+    segment_count,
 )
 
 if TYPE_CHECKING:
@@ -88,7 +89,7 @@ async def async_setup_entry(
     )
     if Capability.SEGMENTS in device.capabilities:
         entities.extend(
-            GoveeBleLocalSegmentLight(entry, index) for index in range(device.profile.segments)
+            GoveeBleLocalSegmentLight(entry, index) for index in range(segment_count(device))
         )
     async_add_entities(entities)
 

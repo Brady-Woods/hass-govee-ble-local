@@ -26,7 +26,7 @@ from contextlib import contextmanager
 from functools import partial
 import logging
 import re
-from typing import Any, TypedDict
+from typing import NotRequired, TypedDict
 
 from govee_ble_local import (
     Capability,
@@ -38,7 +38,7 @@ from govee_ble_local import (
     Zone,
 )
 
-from .helpers import BLE_ERRORS, mid_kelvin
+from .helpers import BLE_ERRORS, mid_kelvin, segment_count
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -234,7 +234,35 @@ def session_capture(*, maxlen: int = 4000, address: str | None = None) -> Iterat
                 logger.setLevel(previous_level)
 
 
-def _match(actual: Any, expected: Any) -> bool | None:
+class StepResult(TypedDict):
+    """One self-test step, as it appears in the report (plain JSON data)."""
+
+    step: str
+    acked: bool  # the command returned without a BLE error
+    # None: not checked (the device reports nothing to compare, or the command failed or
+    # was skipped)
+    readback_ok: bool | None
+    error: str | None
+    skipped: NotRequired[str]  # why the step was deliberately not run (skipped steps only)
+    ok: bool
+
+
+class SelfTestReport(TypedDict):
+    """The self-test report (plain JSON data: the service returns it as-is)."""
+
+    ok: bool
+    restored: bool
+    restore_errors: list[str]
+    address: str
+    sku: str
+    encryption: str
+    capabilities: list[str]
+    steps: list[StepResult]
+    frames: list[str]
+    log: list[str]
+
+
+def _match(actual: object, expected: object) -> bool | None:
     """Compare a read-back value with what was commanded (tri-state).
 
     None when the device reports nothing (unknown), else whether they match.
@@ -246,6 +274,16 @@ def _match(actual: Any, expected: Any) -> bool | None:
 
 def _segment_at(state: DeviceState, index: int) -> Segment | None:
     return next((s for s in state.segments if s.index == index), None)
+
+
+def _segment_rgb(state: DeviceState, index: int) -> tuple[int, int, int] | None:
+    seg = _segment_at(state, index)
+    return seg.rgb if seg else None
+
+
+def _segment_brightness(state: DeviceState, index: int) -> int | None:
+    seg = _segment_at(state, index)
+    return seg.brightness if seg else None
 
 
 def _zone_colour(state: DeviceState, zone: Zone) -> tuple[int, int, int] | None:
@@ -278,7 +316,6 @@ def _snapshot(device: Device) -> _Snapshot:
     simply skips those (nothing to put back).
     """
     state = device.state
-    segment0 = _segment_at(state, 0)
     zones: tuple[Zone, ...] = device.zones
     return {
         "is_on": state.is_on,
@@ -289,8 +326,8 @@ def _snapshot(device: Device) -> _Snapshot:
         "gradual": state.gradual,
         "zone_power": {zone.name: device.zone_is_on(zone.name) for zone in zones},
         "zone_colour": {zone.name: _zone_colour(state, zone) for zone in zones if zone.segments},
-        "segment0_rgb": segment0.rgb if segment0 else None,
-        "segment0_brightness": segment0.brightness if segment0 else None,
+        "segment0_rgb": _segment_rgb(state, 0),
+        "segment0_brightness": _segment_brightness(state, 0),
     }
 
 
@@ -377,7 +414,7 @@ class _Steps:
 
     def __init__(self, device: Device) -> None:
         self._device = device
-        self.results: list[dict[str, Any]] = []
+        self.results: list[StepResult] = []
 
     async def run(
         self,
@@ -391,10 +428,12 @@ class _Steps:
         device's colour scheme doesn't support is recorded as skipped; any
         other BLE failure is recorded on the step.
         """
-        entry: dict[str, Any] = {"step": name, "acked": False, "readback_ok": None, "error": None}
+        acked = False
+        readback_ok: bool | None = None
+        error: str | None = None
         try:
             await action()
-            entry["acked"] = True
+            acked = True
             try:
                 await self._device.update()
             except GoveeBleAuthError:
@@ -402,16 +441,23 @@ class _Steps:
             except BLE_ERRORS as err:
                 _LOGGER.debug("%s: read-back after %s failed: %s", self._device.address, name, err)
             if verify is not None:
-                entry["readback_ok"] = verify()
+                readback_ok = verify()
         except GoveeBleAuthError:
             raise
         except GoveeBleNotSupported as err:
             self.skip(name, f"not supported: {err}")
             return
         except BLE_ERRORS as err:
-            entry["error"] = str(err)
-        entry["ok"] = entry["acked"] and entry["readback_ok"] is not False
-        self.results.append(entry)
+            error = str(err)
+        self.results.append(
+            {
+                "step": name,
+                "acked": acked,
+                "readback_ok": readback_ok,
+                "error": error,
+                "ok": acked and readback_ok is not False,
+            }
+        )
 
     def skip(self, name: str, reason: str) -> None:
         """Record a step that was deliberately not run."""
@@ -425,15 +471,6 @@ class _Steps:
                 "ok": True,
             }
         )
-
-
-def _state_is(device: Device, attr: str, expected: Any) -> bool | None:
-    return _match(getattr(device.state, attr), expected)
-
-
-def _segment0_is(device: Device, attr: str, expected: Any) -> bool | None:
-    seg = _segment_at(device.state, 0)
-    return _match(getattr(seg, attr) if seg else None, expected)
 
 
 def _scene_is(device: Device, name: str) -> bool | None:
@@ -453,26 +490,28 @@ async def _exercise_fixture(device: Device, steps: _Steps) -> None:
     caps = device.capabilities
     if Capability.POWER in caps:
         await steps.run(
-            "power_on", partial(device.set_power, True), partial(_state_is, device, "is_on", True)
+            "power_on",
+            partial(device.set_power, True),
+            lambda: _match(device.state.is_on, True),
         )
     if Capability.BRIGHTNESS in caps:
         await steps.run(
             "brightness",
             partial(device.set_brightness, _TEST_BRIGHTNESS),
-            partial(_state_is, device, "brightness", _TEST_BRIGHTNESS),
+            lambda: _match(device.state.brightness, _TEST_BRIGHTNESS),
         )
     if Capability.RGB in caps:
         await steps.run(
             "rgb",
             partial(device.set_rgb, _TEST_RGB),
-            partial(_state_is, device, "rgb_color", _TEST_RGB),
+            lambda: _match(device.state.rgb_color, _TEST_RGB),
         )
     if Capability.COLOR_TEMP in caps:
         kelvin = mid_kelvin(device)
         await steps.run(
             "color_temp",
             partial(device.set_color_temp, kelvin),
-            partial(_state_is, device, "color_temp_kelvin", kelvin),
+            lambda: _match(device.state.color_temp_kelvin, kelvin),
         )
     if Capability.SCENES in caps:
         for name in device.scene_names[:_MAX_SCENES]:
@@ -485,17 +524,17 @@ async def _exercise_fixture(device: Device, steps: _Steps) -> None:
 
 async def _exercise_segments(device: Device, steps: _Steps) -> None:
     """Segment 0 colour, brightness and (where supported) colour temperature."""
-    if Capability.SEGMENTS not in device.capabilities or not device.profile.segments:
+    if Capability.SEGMENTS not in device.capabilities or not segment_count(device):
         return
     await steps.run(
         "segment_0_rgb",
         partial(device.set_segment_rgb, [0], _TEST_SEGMENT_RGB),
-        partial(_segment0_is, device, "rgb", _TEST_SEGMENT_RGB),
+        lambda: _match(_segment_rgb(device.state, 0), _TEST_SEGMENT_RGB),
     )
     await steps.run(
         "segment_0_brightness",
         partial(device.set_segment_brightness, [0], _TEST_SEGMENT_BRIGHTNESS),
-        partial(_segment0_is, device, "brightness", _TEST_SEGMENT_BRIGHTNESS),
+        lambda: _match(_segment_brightness(device.state, 0), _TEST_SEGMENT_BRIGHTNESS),
     )
     if Capability.COLOR_TEMP in device.capabilities:
         await steps.run(
@@ -543,7 +582,7 @@ async def _exercise(device: Device, steps: _Steps, *, power_known: bool) -> None
         await steps.run(
             "gradual",
             partial(device.set_gradual, toggled),
-            partial(_state_is, device, "gradual", toggled),
+            lambda: _match(device.state.gradual, toggled),
         )
     if Capability.POWER in device.capabilities:
         if power_known:
@@ -551,7 +590,7 @@ async def _exercise(device: Device, steps: _Steps, *, power_known: bool) -> None
             await steps.run(
                 "power_off",
                 partial(device.set_power, False),
-                partial(_state_is, device, "is_on", False),
+                lambda: _match(device.state.is_on, False),
             )
         else:
             # The original power state is unknown, so it couldn't be restored:
@@ -572,16 +611,17 @@ def _sanitize_frames(lines: list[str], *, requires_secret: bool) -> list[str]:
     return [_WIRE_FIELD.sub("", line) for line in lines if not _NO_PLAINTEXT.search(line)]
 
 
-async def async_run_self_test(device: Device) -> dict[str, Any]:
+async def async_run_self_test(device: Device) -> SelfTestReport:
     """Exercise the device's full capability surface and capture the BLE session.
 
     Returns a report ``{ok, restored, restore_errors, address, sku, encryption,
     capabilities, steps, frames, log}`` - ``address`` identifies which physical
     device this ran against (the ``capture_session`` service can target several
     devices of the same SKU in one call). Each step records ``acked`` (command
-    returned without a BLE error) and ``readback_ok`` (tri-state: None when the
-    device has no read-back). The device's full pre-test state is captured up
-    front and restored at the end, also when a step raises.
+    returned without a BLE error) and ``readback_ok`` (tri-state: None when not
+    checked: no read-back, or the command failed or was skipped). The device's
+    full pre-test state is captured up front and restored at the end, also when
+    a step raises.
 
     Raises SelfTestBusyError if another self-test is running, and
     GoveeBleAuthError if the device rejects its secret key.
@@ -592,7 +632,7 @@ async def async_run_self_test(device: Device) -> dict[str, Any]:
         return await _run_self_test(device)
 
 
-async def _run_self_test(device: Device) -> dict[str, Any]:
+async def _run_self_test(device: Device) -> SelfTestReport:
     caps = device.capabilities
     steps = _Steps(device)
     restore_errors: list[str] = []

@@ -10,12 +10,13 @@ does; tests simulate a read-back by mutating ``device.state`` first.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Generator
+from collections.abc import Callable, Generator, Iterator
+from contextlib import contextmanager
 from datetime import timedelta
 import time
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, PropertyMock, patch
 
 from bleak.backends.device import BLEDevice
 from govee_ble_local import Device, create_device
@@ -133,6 +134,21 @@ def make_device(
 
     device.update = AsyncMock(side_effect=_update)  # type: ignore[method-assign]
     return device
+
+
+@contextmanager
+def runtime_segment_count(count: int) -> Iterator[None]:
+    """Give every Device a runtime segment count other than its profile's.
+
+    Newer libraries have ``Device.segment_count`` (set when a device reports its own
+    count); it is patched on the class, so this works on the 1.2.1 floor too, which has
+    no such attribute. Because ``create=True`` makes the attribute, this can't show the
+    library really has it: tests of the real API call ``Device.set_segment_count``.
+    """
+    with patch.object(
+        Device, "segment_count", new_callable=PropertyMock, return_value=count, create=True
+    ):
+        yield
 
 
 def connection(device: Device) -> FakeConnection:

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from bleak.exc import BleakError
 from govee_ble_local import GoveeBleConnectionError, GoveeBleError
 import pytest
@@ -13,8 +15,10 @@ from custom_components.govee_ble_local.helpers import (
     clean_text,
     parse_secret,
     pct_to_brightness,
+    segment_count,
 )
 
+from .conftest import make_device, runtime_segment_count
 from .const import SECRET_HEX
 
 
@@ -124,3 +128,17 @@ def test_ble_errors_catches_subclasses() -> None:
     """A library subclass is caught by BLE_ERRORS in an except clause."""
     with pytest.raises(BLE_ERRORS):
         raise GoveeBleConnectionError("nope")
+
+
+def test_segment_count_prefers_the_devices_runtime_count() -> None:
+    """The library's runtime count wins over the profile's static one."""
+    device = make_device("H60A6")
+    assert segment_count(device) == device.profile.segments == 13
+    with runtime_segment_count(10):
+        assert segment_count(device) == 10
+
+
+def test_segment_count_falls_back_to_the_profile() -> None:
+    """A library without ``Device.segment_count`` (the 1.2.1 floor) uses the profile's."""
+    device = SimpleNamespace(profile=SimpleNamespace(segments=7))
+    assert segment_count(device) == 7  # type: ignore[arg-type]

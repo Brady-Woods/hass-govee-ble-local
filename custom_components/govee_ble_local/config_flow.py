@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any
 
 from govee_ble_local import (
     GoveeBleError,
+    cloud as govee_cloud,
     create_device,
     is_supported_sku,
     profile_for,
@@ -75,6 +76,18 @@ class _PendingDevice:
     address: str
     sku: str
     title: str
+
+
+class _CloudAuthErrorUnavailable(GoveeCloudError):
+    """Stands in for GoveeCloudAuthError where the library has none; never raised."""
+
+
+# Newer libraries raise GoveeCloudAuthError (a GoveeCloudError) when the account rejects
+# the credentials (HTTP 401/403; any other login failure stays a plain GoveeCloudError);
+# the 1.2.1 floor raises a plain GoveeCloudError for every failure.
+_CLOUD_AUTH_ERROR: type[GoveeCloudError] = getattr(
+    govee_cloud, "GoveeCloudAuthError", _CloudAuthErrorUnavailable
+)
 
 
 class _CloudSecretError(Exception):
@@ -321,21 +334,28 @@ class GoveeBleLocalConfigFlow(ConfigFlow, domain=DOMAIN):
     async def _fetch_cloud_secret(self, address: str, email: str, password: str) -> str:
         """Return the secret (hex) of the account device matching ``address``.
 
-        Raises _CloudSecretError("cannot_connect") when login/listing fails and
+        Raises _CloudSecretError("invalid_auth") when the account rejects the
+        credentials (only libraries that tell that apart; see _CLOUD_AUTH_ERROR),
+        _CloudSecretError("cannot_connect") when login/listing otherwise fails and
         _CloudSecretError("secret_not_found") when no matching device has a key.
         """
         want = address.replace(":", "").lower()
         account = GoveeCloudAccount(email, password, session=async_get_clientsession(self.hass))
         try:
             devices = await account.get_devices()
+        except _CLOUD_AUTH_ERROR as err:
+            _LOGGER.debug("Govee cloud rejected the credentials: %s", err)
+            raise _CloudSecretError("invalid_auth") from err
         except GoveeCloudError as err:
             _LOGGER.debug("Govee cloud login/list failed: %s", err)
             raise _CloudSecretError("cannot_connect") from err
         finally:
             await account.close()
         for dev in devices:
-            # The BLE MAC, else the device id (which embeds a MAC in its last octets).
-            mac = (dev.ble_mac or dev.device).replace(":", "").lower()
+            # The library's best-effort BLE MAC: deviceSettings.address, else the last 6
+            # octets of the device id, which can be the Wi-Fi MAC (one off the advertised
+            # BLE address, so no match). None only for an id with fewer than 6 octets.
+            mac = (dev.ble_mac or "").replace(":", "").lower()
             if mac.endswith(want) and dev.secret:
                 return dev.secret.hex()
         raise _CloudSecretError("secret_not_found")

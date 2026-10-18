@@ -12,7 +12,7 @@ from govee_ble_local import Device, GoveeBleAuthError
 from homeassistant.config_entries import SOURCE_REAUTH, ConfigEntryState
 from homeassistant.const import STATE_ON
 from homeassistant.core import Context, HomeAssistant
-from homeassistant.exceptions import ServiceValidationError, Unauthorized
+from homeassistant.exceptions import HomeAssistantError, ServiceValidationError, Unauthorized
 from homeassistant.helpers import (
     area_registry as ar,
     device_registry as dr,
@@ -236,7 +236,11 @@ async def test_unloaded_entry_reports_not_loaded(
 
     response = await _capture_session(hass, {"device_id": device_id})
 
-    assert response == {"results": [{"ok": False, "address": ADDRESS, "error": "not loaded"}]}
+    assert response == {
+        "results": [
+            {"ok": False, "address": ADDRESS, "reason": "not_loaded", "error": "not loaded"}
+        ]
+    }
     mock_device.set_power.assert_not_awaited()
 
 
@@ -263,8 +267,10 @@ async def test_busy_and_failed_devices_do_not_abort_the_others(
     assert by_address[ADDRESS]["ok"] is True
     busy = by_address[PLUG_ADDRESS]
     assert busy["ok"] is False
+    assert busy["reason"] == "self_test_busy"
     assert "already running" in busy["error"]
     assert "steps" not in busy
+    assert "reason" not in by_address[ADDRESS]
 
 
 async def test_busy_when_another_self_test_is_running(
@@ -277,6 +283,7 @@ async def test_busy_when_another_self_test_is_running(
     [result] = response["results"]
     assert result["ok"] is False
     assert result["address"] == ADDRESS
+    assert result["reason"] == "self_test_busy"
     assert "already running" in result["error"]
     assert setup_integration.runtime_data.last_self_test is None
 
@@ -297,6 +304,7 @@ async def test_device_not_seen_reports_an_error_without_running(
             {
                 "ok": False,
                 "address": ADDRESS,
+                "reason": "self_test_device_not_found",
                 "error": "Cannot run the self-test: no Bluetooth scanner that can connect to "
                 # HA drops a translated message's final full stop.
                 "Test Ceiling currently sees it. Make sure it is powered on and in range",
@@ -329,6 +337,7 @@ async def test_refused_second_run_keeps_the_running_one_tracked(
     assert not running.done()
 
     [busy] = (await _capture_session(hass, target))["results"]
+    assert busy["reason"] == "self_test_busy"
     assert "already running" in busy["error"]
     assert setup_integration.runtime_data.self_test is running
 
@@ -353,6 +362,7 @@ async def test_auth_error_reports_and_starts_reauth(
     [result] = response["results"]
     assert result["ok"] is False
     assert result["address"] == ADDRESS
+    assert result["reason"] == "secret_rejected"
     assert "rejected its secret key" in result["error"]
     assert "Test Ceiling" in result["error"]
     assert setup_integration.runtime_data.last_self_test is None
@@ -360,6 +370,38 @@ async def test_auth_error_reports_and_starts_reauth(
     assert [(f["context"]["source"], f["context"]["entry_id"]) for f in flows] == [
         (SOURCE_REAUTH, setup_integration.entry_id)
     ]
+
+
+async def test_untranslated_error_gets_the_fallback_reason(
+    hass: HomeAssistant, setup_integration: MockConfigEntry
+) -> None:
+    """An error without a translation key still gets a machine-readable reason."""
+    with patch(RUNNER, side_effect=HomeAssistantError("something broke")):
+        response = await _capture_session(hass, {"device_id": _device_id(hass, setup_integration)})
+
+    assert response == {
+        "results": [
+            {"ok": False, "address": ADDRESS, "reason": "unknown", "error": "something broke"}
+        ]
+    }
+
+
+async def test_another_domains_translated_error_gets_the_fallback_reason(
+    hass: HomeAssistant, setup_integration: MockConfigEntry
+) -> None:
+    """Only this integration's translation keys become a reason (the README lists them)."""
+    foreign = HomeAssistantError(
+        translation_domain="homeassistant",
+        translation_key="service_not_found",
+        translation_placeholders={"domain": "light", "service": "nope"},
+    )
+    with patch(RUNNER, side_effect=foreign):
+        response = await _capture_session(hass, {"device_id": _device_id(hass, setup_integration)})
+
+    [result] = response["results"]
+    assert result["ok"] is False
+    assert result["address"] == ADDRESS
+    assert result["reason"] == "unknown"
 
 
 def test_register_services_is_idempotent(hass: HomeAssistant) -> None:
