@@ -72,6 +72,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sent 1-8 s after a poll now opens a new connection instead of reusing the poll's.
 
 ### Changed
+- **Far fewer background connections, driven by what the advertisements show.** A Govee light's
+  advertisement carries its on/off state (nothing else), so while Home Assistant has heard that
+  byte in the last 3 minutes it no longer polls every 2 minutes regardless:
+  - a light that is **off** isn't polled at all, and neither is a **smart plug** (H5083 family),
+    whose relay is its only state;
+  - a light turned **on outside Home Assistant** (Govee app or a remote) is polled once,
+    5 s later, to read the colour or scene it came on in;
+  - a light that is **on** is polled after 2 minutes, then backs off (4, 8, then every 15 minutes)
+    while nothing changes, and returns to 2 minutes when anything does: a poll that reads something
+    new, an advertised on/off change, or a command from Home Assistant. A colour, brightness or
+    scene changed in the Govee app or over Wi-Fi while the light stays on can take up to 15 minutes
+    to show (it was 2).
+
+  An on/off change made outside Home Assistant within seconds of a Home Assistant command or poll
+  (which the library ignores for 15 s) is taken from the repeated advertisement within about a
+  minute. A device whose on/off broadcast isn't heard (an H6006 seen only by a passive scanner), or
+  hasn't been for 3 minutes, or that no connectable Bluetooth adapter or proxy hears, is polled
+  every 2 minutes as before, and so is every H60A6 and H60A1 (a Bluetooth disconnect may end a music
+  or group mode started over Wi-Fi; not yet checked on hardware). Failed polls still back off to 30
+  minutes. It needs a `govee-ble-local` release after 1.3.0 (the advertisement parser that matches
+  the Govee app); with 1.2.1 or 1.3.0 installed nothing changes. The poll interval sensor shows
+  unknown while a device has no background polls, and its diagnostics name the step (`poll_policy`).
+  A light or plug with no background polls goes unavailable as soon as no connectable Bluetooth
+  adapter or proxy hears it, instead of after three missed polls.
 - The RSSI, last seen, last connected and poll interval diagnostic sensors are disabled by default
   for newly added devices (existing ones keep their setting).
 - Poll errors and the rejected-secret error are translated.

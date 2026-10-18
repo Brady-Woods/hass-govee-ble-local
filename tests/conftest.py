@@ -214,16 +214,27 @@ def no_first_poll_stagger() -> Generator[None]:
         yield
 
 
+# ``presence.connectable_service_info`` while the connectable history holds
+# whatever the any-scanner one does (the default).
+SAME_AS_ANY_SCANNER = object()
+
+
 @pytest.fixture(autouse=True)
 def presence() -> Generator[SimpleNamespace]:
     """Control what the Bluetooth stack reports for the device.
 
-    ``connectable``/``any`` drive ``coordinator.async_address_present`` and
-    ``service_info`` drives ``coordinator.async_last_service_info`` (both
-    histories). The isolated test environment has no real scanners, which would
-    otherwise read as "vanished".
+    ``connectable``/``any`` drive ``coordinator.async_address_present``, and
+    ``service_info`` drives ``coordinator.async_last_service_info`` for the
+    any-scanner history. The connectable history holds the same entry unless
+    ``connectable_service_info`` is set (to another entry, or None). The isolated
+    test environment has no real scanners, which would otherwise read as "vanished".
     """
-    state = SimpleNamespace(connectable=True, any=True, service_info=make_service_info())
+    state = SimpleNamespace(
+        connectable=True,
+        any=True,
+        service_info=make_service_info(),
+        connectable_service_info=SAME_AS_ANY_SCANNER,
+    )
 
     def _present(self: GoveeBleLocalCoordinator, *, connectable: bool = True) -> bool:
         return bool(state.connectable if connectable else state.any)
@@ -231,6 +242,8 @@ def presence() -> Generator[SimpleNamespace]:
     def _last(
         self: GoveeBleLocalCoordinator, *, connectable: bool = True
     ) -> BluetoothServiceInfoBleak | None:
+        if connectable and state.connectable_service_info is not SAME_AS_ANY_SCANNER:
+            return state.connectable_service_info  # type: ignore[no-any-return]
         return state.service_info  # type: ignore[no-any-return]
 
     with (

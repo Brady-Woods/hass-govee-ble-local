@@ -2,16 +2,17 @@
 
 These are read-only diagnostics (no BLE I/O of their own) that read values the
 coordinator already tracks: advertisement RSSI, the cumulative connection-failure
-count, the current (adaptive-backoff) poll interval (unknown while no polls are
-scheduled), last seen / last connected, and which connectable scanner (adapter
-or proxy) Home Assistant currently prefers for reaching the device (unknown
-while no connectable scanner hears it). They attach to the same device as the
-light/switch entities. All except RSSI stay available even when the device
-can't be reached (that's the interesting case); RSSI is unavailable while no
-scanner hears the device, so stale values don't pollute statistics. RSSI, poll
-interval, last seen and last connected are disabled by default: most users never
-look at them, and RSSI / last seen (every minute) and last connected (every
-poll) would otherwise add recorder rows for every device that often.
+count, the current (backed-off) background poll interval (unknown while no
+background polls are scheduled), last seen / last connected, and which
+connectable scanner (adapter or proxy) Home Assistant currently prefers for
+reaching the device (unknown while no connectable scanner hears it). They
+attach to the same device as the light/switch entities. All except RSSI stay
+available even when the device can't be reached (that's the interesting case);
+RSSI is unavailable while no scanner hears the device, so stale values don't
+pollute statistics. RSSI, poll interval, last seen and last connected are
+disabled by default: most users never look at them, and RSSI / last seen (every
+minute) and last connected (every poll) would otherwise add recorder rows for
+every device that often.
 """
 
 from __future__ import annotations
@@ -47,10 +48,12 @@ def _connection_source(coordinator: GoveeBleLocalCoordinator) -> str | None:
 
 
 def _poll_interval(coordinator: GoveeBleLocalCoordinator) -> int | None:
-    if not coordinator.polls_scheduled:  # polling disabled, or halted by a rejected secret
-        return None
-    # The interval before jitter: the jittered one is a new random value every poll.
-    return int(coordinator.nominal_interval.total_seconds())
+    # The interval before jitter: the jittered one is a new random value every
+    # poll. None (unknown) while no background polls are scheduled: polling
+    # disabled, halted by a rejected secret, or off under the advertisement
+    # policy (a light that is off, or a relay plug, followed by its advertisements).
+    interval = coordinator.scheduled_interval
+    return None if interval is None else int(interval.total_seconds())
 
 
 @dataclass(frozen=True, kw_only=True)

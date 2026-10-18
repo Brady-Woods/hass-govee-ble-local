@@ -96,6 +96,7 @@ async def async_get_config_entry_diagnostics(
         "coordinator": {
             "last_update_success": coordinator.last_update_success,
             "update_interval": str(coordinator.update_interval),
+            "poll_policy": coordinator.poll_policy.value,
             "consecutive_failures": coordinator.consecutive_failures,
             "total_failures": coordinator.total_failures,
             "device_available": coordinator.device_available,

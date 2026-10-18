@@ -29,7 +29,33 @@ rules:
       targeted device whose entry isn't loaded, or that can't be tested, gets an
       error entry (with a stable reason code) in the response; no matching
       device raises a translated ServiceValidationError.
-  appropriate-polling: done
+  appropriate-polling:
+    status: done
+    comment: >
+      Each background poll holds one of the adapter's or proxy's few
+      connection slots, and the advertisement already carries on/off (and
+      nothing else), so one per-device policy keeps polls to what
+      advertisements can't show. While Home Assistant has heard the device's
+      on/off byte in the last 180 s: a light that is off and a relay plug get
+      no background polls; a light turned on outside Home Assistant is polled
+      once 5 s later; a light that is on is polled every 120 s, doubling
+      after each poll that read nothing new up to 15 min (a colour,
+      brightness or scene changed in the Govee app or over Wi-Fi while it
+      stays on reaches Home Assistant only by polling, so this bounds how
+      stale that gets) and back to 120 s on any change. HA calls back only
+      when an advertisement's content changes, so the minute presence tick
+      offers its newest one to the library again once it was received outside
+      the library's 15 s window after HA's own poll or command: an outside
+      on/off change made just after one isn't lost while polls are off.
+      Everything else is polled every 120 s plus jitter: a device whose byte
+      isn't heard or has gone stale (re-checked every minute), one no
+      connectable scanner sees, the H60A6 and H60A1 (a disconnect may end a
+      music or group mode started over Wi-Fi; static finding, not yet
+      bench-checked), and every device on a govee-ble-local without the
+      app-matching advertisement parser (the 1.2.1 floor and 1.3.0). Failed
+      polls back off exponentially to 30 min; no more than two background
+      polls run at once integration-wide; the first poll after a restart is
+      staggered per device.
   brands:
     status: done
     comment: >
@@ -109,8 +135,10 @@ rules:
       device's advertisements), not last-poll success: an advertising device
       stays controllable through transient poll failures; a vanished one goes
       unavailable after UNAVAILABLE_AFTER_FAILURES failed polls, or as soon as
-      it vanishes when no polls are scheduled to count them (polling disabled
-      in the entry's system options, or halted by a rejected secret).
+      it vanishes when no background polls are scheduled to count them
+      (polling disabled in the entry's system options, halted by a rejected
+      secret, or off under the advertisement poll policy), and stays so if
+      polls resume before it is heard again.
   integration-owner: done
   log-when-unavailable: done
   parallel-updates: done

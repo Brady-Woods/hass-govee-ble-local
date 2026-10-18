@@ -3,8 +3,22 @@
 ``Device.update()`` connects and reads back real state for devices that support
 it (profile ``readback`` of ``status``/``polled``/``plug``) and otherwise returns
 the device's best-known (optimistic) :class:`DeviceState`. This coordinator runs
-that poll on a slow, jittered cadence with capped exponential backoff; on/off is
-also tracked passively from advertisements (no connection).
+that poll in the background on a jittered cadence with capped exponential
+backoff on failure; on/off is also tracked passively from advertisements (no
+connection).
+
+How often a device is polled in the background is decided per device by one
+policy (``_async_policy_step``). While Home Assistant keeps hearing a device's
+advertised on/off byte, a light that is off and a relay plug get no background
+polls, a light turned on outside Home Assistant gets one poll shortly after,
+and a light that is on is polled with a backoff while polls find nothing new.
+A device whose byte isn't heard, one no connectable scanner sees, an excluded
+model, or an install whose library predates the app-matching advertisement
+parser keeps the fixed cadence. Because HA calls back only when an
+advertisement's content changes, the presence tick re-offers HA's newest
+advertisement to the library (``_async_reoffer_advertisement``), so an on/off
+change the library ignored right after HA's own I/O isn't lost while polls are
+off.
 
 Availability is driven by *reachability* (is any connectable scanner currently
 seeing the device's advertisements?), not by whether the last poll succeeded: a
@@ -23,25 +37,33 @@ advertisement callback only fires when an advertisement's content changes.
 from __future__ import annotations
 
 import asyncio
+from dataclasses import asdict
 from datetime import datetime, timedelta
+from enum import StrEnum
 import logging
 import math
 import random
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from govee_ble_local import Device, DeviceState, GoveeBleAuthError
+from govee_ble_local import Device, DeviceState, GoveeBleAuthError, const as lib_const
+from govee_ble_local.identify import parse_broadcast_onoff
 from homeassistant.components import bluetooth
 from homeassistant.const import CONF_ADDRESS
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 from homeassistant.util.hass_dict import HassKey
 
 from .const import (
+    ADVERT_FLIP_POLL_DELAY_SECONDS,
+    ADVERT_POWER_FRESH_SECONDS,
     DOMAIN,
+    EXCLUDED_FROM_ADVERT_POLICY,
     MAX_CONCURRENT_POLLS,
     MAX_POLL_INTERVAL_SECONDS,
+    ON_POLL_MAX_INTERVAL_SECONDS,
     POLL_INTERVAL_SECONDS,
     POLL_JITTER_SECONDS,
     UNAVAILABLE_AFTER_FAILURES,
@@ -57,9 +79,34 @@ _POLL_SEMAPHORE: HassKey[asyncio.Semaphore] = HassKey(f"{DOMAIN}_poll_semaphore"
 
 _BASE_INTERVAL = timedelta(seconds=POLL_INTERVAL_SECONDS)
 _MAX_INTERVAL = timedelta(seconds=MAX_POLL_INTERVAL_SECONDS)
-# Backoff doubles per consecutive failure until it reaches the cap; more
-# doublings than that only risk overflowing timedelta.
+_ON_MAX_INTERVAL = timedelta(seconds=ON_POLL_MAX_INTERVAL_SECONDS)
+# Each backoff doubles per step until it reaches its cap; more doublings than
+# that only risk overflowing timedelta.
 _MAX_BACKOFF_STEPS = math.ceil(math.log2(_MAX_INTERVAL / _BASE_INTERVAL))
+_MAX_ON_BACKOFF_STEPS = math.ceil(math.log2(_ON_MAX_INTERVAL / _BASE_INTERVAL))
+# How long the library ignores advertisements after a command or a read that
+# returned power. govee_ble_local.const has it on the libraries the
+# advertisement policy runs with; the 1.2.1 floor keeps the same 15 s elsewhere.
+_ADVERT_SUPPRESS_SECONDS = float(getattr(lib_const, "ADVERT_SUPPRESS_SECONDS", 15.0))
+
+
+class PollPolicy(StrEnum):
+    """How a device is polled in the background (see ``_async_policy_step``)."""
+
+    # POLL_INTERVAL_SECONDS plus jitter: the cadence of a device the
+    # advertisement policy doesn't cover.
+    FIXED = "fixed"
+    # A light that is on, followed by its advertisements: backs off from
+    # POLL_INTERVAL_SECONDS while polls find nothing new.
+    ON = "on"
+    # A light that is off, followed by its advertisements: no background polls.
+    OFF = "off"
+    # A relay plug followed by its advertisements: no background polls.
+    RELAY = "relay"
+
+
+# The steps with no background polls.
+_UNPOLLED = frozenset({PollPolicy.OFF, PollPolicy.RELAY})
 
 
 def _poll_semaphore(hass: HomeAssistant) -> asyncio.Semaphore:
@@ -73,6 +120,26 @@ def _poll_semaphore(hass: HomeAssistant) -> asyncio.Semaphore:
     if (semaphore := hass.data.get(_POLL_SEMAPHORE)) is None:
         semaphore = hass.data[_POLL_SEMAPHORE] = asyncio.Semaphore(MAX_CONCURRENT_POLLS)
     return semaphore
+
+
+def has_app_advert_parser(device: Device) -> bool:
+    """Return whether the library reads the advertised on/off byte the way the Govee app does.
+
+    The libraries with ``DeviceProfile.advert_on_mask`` trust only a broadcast
+    whose header says it carries a switch state, as the app does, and decode a
+    plug's byte with the plug's mask (added after 1.3.0). Older ones (the 1.2.1
+    floor, 1.3.0) read the byte after the pact fields of any Govee broadcast,
+    which may not be a switch state, so the advertisement policy stays off there
+    and every device keeps the fixed cadence.
+    """
+    return hasattr(device.profile, "advert_on_mask")
+
+
+def _polled_state(state: DeviceState) -> dict[str, Any]:
+    """Return a copy of what a poll read, to tell whether the next one found anything new."""
+    polled = asdict(state)
+    polled.pop("optimistic", None)  # bookkeeping, not device state
+    return polled
 
 
 @callback
@@ -115,9 +182,10 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         # Read-only diagnostics surfaced by the sensor/binary_sensor platforms.
         self.rssi: int | None = None
         self.total_failures = 0
-        # The poll interval before jitter (base or backed off): what the
-        # diagnostics show, so they only change when the cadence does.
-        self.nominal_interval = _BASE_INTERVAL
+        # The poll interval before jitter (base or backed off; None while the
+        # advertisement policy has background polls off): what the diagnostics
+        # show, so they only change when the cadence does.
+        self.nominal_interval: timedelta | None = _BASE_INTERVAL
         # "Last seen" = most recent advertisement any scanner heard (passive, no
         # connection); "last connected" = most recent poll that read real state
         # back. They answer different questions: reachability vs. successful control.
@@ -136,6 +204,30 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         self._auth_failed = False
         # A command already dropped the backoff during this failure streak.
         self._command_reset_used = False
+        # Whether the advertisement policy covers this device at all: never an
+        # excluded model, nor with a library whose parser doesn't match the app's.
+        self._advert_policy = (
+            has_app_advert_parser(device) and device.sku not in EXCLUDED_FROM_ADVERT_POLICY
+        )
+        # The policy's current step (in the diagnostics).
+        self.poll_policy = PollPolicy.FIXED
+        # Doublings of a light's on-backoff (polls in a row that found nothing new).
+        self._on_backoff_steps = 0
+        # What the last successful poll read (None before the first).
+        self._last_polled: dict[str, Any] | None = None
+        # The pending poll after an advertised turn-on.
+        self._unsub_flip_poll: CALLBACK_TYPE | None = None
+        # The device dropped out of reach while it had no background polls (so
+        # its absence alone made it unavailable) and they have resumed since:
+        # it stays unavailable until it is heard again, instead of getting the
+        # grace of UNAVAILABLE_AFTER_FAILURES failed polls.
+        self._lost_while_unpolled = False
+        # Bluetooth monotonic time HA last talked to the device (a poll, a
+        # command or a self-test); None before the first time.
+        self._io_at: float | None = None
+        # The manufacturer data a re-offered advertisement last changed on/off
+        # from (see _async_reoffer_advertisement).
+        self._reoffered: dict[int, bytes] | None = None
 
     # -- reachability -------------------------------------------------------
 
@@ -152,14 +244,25 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         return bluetooth.async_last_service_info(self.hass, self._address, connectable=connectable)
 
     @property
-    def polls_scheduled(self) -> bool:
-        """Return whether HA schedules polls for this device.
-
-        It doesn't while polling is disabled in the entry's system options, or
-        after a rejected secret until a poll runs again (a reload with a new
-        secret, or a manual refresh).
-        """
+    def _polls_enabled(self) -> bool:
+        """Return False while polling is disabled in system options or halted by the secret."""
         return not (self.config_entry.pref_disable_polling or self._auth_failed)
+
+    @property
+    def scheduled_interval(self) -> timedelta | None:
+        """Return the nominal interval of HA's background polls; None while HA schedules none.
+
+        HA schedules none while polling is disabled in the entry's system
+        options, after a rejected secret until a poll runs again (a reload with
+        a new secret, or a manual refresh), or while the advertisement policy
+        has background polls off (``PollPolicy.OFF`` / ``RELAY``).
+        """
+        return self.nominal_interval if self._polls_enabled else None
+
+    @property
+    def polls_scheduled(self) -> bool:
+        """Return whether HA schedules background polls (see ``scheduled_interval``)."""
+        return self.scheduled_interval is not None
 
     @property
     def device_available(self) -> bool:
@@ -168,12 +271,13 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         A device that is advertising stays available through transient poll
         failures (commands can still reach it); one that has vanished from every
         connectable scanner goes unavailable once polls have also failed (or
-        been skipped) a few times - or at once when no polls are scheduled to
-        count those failures (see ``polls_scheduled``).
+        been skipped) a few times - or at once when no background polls are
+        scheduled to count those failures (see ``polls_scheduled``), and it
+        stays so when they resume before it is heard again.
         """
         if self.async_address_present():
             return True
-        if not self.polls_scheduled:
+        if not self.polls_scheduled or self._lost_while_unpolled:
             return False
         return self.consecutive_failures < UNAVAILABLE_AFTER_FAILURES
 
@@ -224,11 +328,14 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
     def async_publish_device_state(self) -> None:
         """Publish the device's (in-place mutated) state to every entity.
 
-        Unlike ``async_set_updated_data`` this neither reschedules the poll
-        timer nor marks a failing poll as successful: passive advertisement
-        changes must not postpone the next poll or re-arm HA's log-once gate.
+        Unlike ``async_set_updated_data`` this doesn't mark a failing poll as
+        successful, and it leaves the poll timer alone unless the new state
+        moves the advertisement policy to another step (a light turned off
+        stops its background polls): passive advertisement changes must not
+        postpone the next poll or re-arm HA's log-once gate.
         """
         self.data = self._device.state
+        self._async_apply_policy()
         self.async_update_listeners()
 
     @callback
@@ -249,32 +356,96 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         changed, not for each repeat: last seen / RSSI therefore come from the
         history on a timer (``async_refresh_presence``), except when the device
         is heard again after no scanner did. Only pushes to the entities when
-        something they show actually changed.
+        something they show actually changed. Each call re-checks the poll
+        policy too.
         """
         if service_info.connectable:
             # Keep the freshest BLEDevice (best scanner/proxy path) for the next
             # connection; a passive scanner's can't be connected through.
             self._device.update_ble_device(service_info.device)
+        # New content: HA offers it once itself.
+        self._reoffered = None
 
+        return_poll = False
         if self._skipped_absent and self.async_address_present():
             # Back after polls were skipped for its absence: drop the backoff and
             # reconcile the rich state now instead of up to MAX_POLL_INTERVAL later.
             self._skipped_absent = False
-            self._set_poll_interval(_BASE_INTERVAL)
+            if self.poll_policy not in _UNPOLLED:
+                self._set_poll_interval(_BASE_INTERVAL)
             self.config_entry.async_create_background_task(
                 self.hass, self.async_request_refresh(), name=f"{self.name}_return_poll"
             )
+            return_poll = True
 
         # Heard again after no scanner did: show it now, not at the next refresh.
         heard_again = False
         if self.rssi is None:
             heard_again = self._take_presence(service_info)
+        was_on = self._device.state.is_on
         if self._device.ingest_advertisement(service_info.advertisement):
+            # The return poll already reads what a turn-on poll would.
+            self._async_handle_power_flip(was_on, schedule_poll=not return_poll)
             self.async_publish_device_state()
-        elif self.device_available != self._published_available:
-            self.async_update_listeners()
+        elif self._async_apply_policy() or self.device_available != self._published_available:
+            self._async_publish_status()
         elif heard_again:
             self.async_update_diagnostics()
+
+    @callback
+    def _async_handle_power_flip(self, was_on: bool | None, *, schedule_poll: bool = True) -> None:
+        """React to an advertised on/off change the library took.
+
+        The change came from outside HA: the library ignores advertisements for
+        ADVERT_SUPPRESS_SECONDS after HA's own commands and reads. It starts a
+        light's on-backoff over, and a light the policy follows that was just
+        turned on is polled once ADVERT_FLIP_POLL_DELAY_SECONDS later (a newer
+        change replaces a pending poll), unless ``schedule_poll`` is False (a
+        return poll is already running). A first on/off from unknown (the
+        history HA replays at setup) isn't a turn-on: the first poll is due anyway.
+        """
+        self._async_cancel_flip_poll()
+        self._async_apply_policy()
+        self._async_restart_on_backoff()
+        if was_on is False and self.poll_policy is PollPolicy.ON:
+            # The poll after a turn-on reads the light as it came on: a change,
+            # even if it matches the poll from before it went off (so the next
+            # poll comes at the base cadence, not a doubled one).
+            self._last_polled = None
+            if schedule_poll:
+                self._unsub_flip_poll = async_call_later(
+                    self.hass, ADVERT_FLIP_POLL_DELAY_SECONDS, self._async_flip_poll_due
+                )
+
+    @callback
+    def _async_flip_poll_due(self, _now: datetime) -> None:
+        """Run the poll scheduled after an advertised turn-on.
+
+        Checked when it fires, not when it was scheduled: HA's stop doesn't
+        cancel an async_call_later timer and a refresh it didn't schedule isn't
+        refused while stopping, so this would poll a link the stop listener is
+        closing. Nor does it poll after a rejected secret or with polling
+        disabled since (halted polls stay halted), or while no entity listens
+        (like HA's own timer).
+        """
+        self._unsub_flip_poll = None
+        if not (self.hass.is_running and self._polls_enabled and self._listeners):
+            return
+        self.config_entry.async_create_background_task(
+            self.hass, self.async_request_refresh(), name=f"{self.name}_turn_on_poll"
+        )
+
+    @callback
+    def _async_cancel_flip_poll(self) -> None:
+        """Drop a pending poll after an advertised turn-on, if any."""
+        if self._unsub_flip_poll is not None:
+            self._unsub_flip_poll()
+            self._unsub_flip_poll = None
+
+    async def async_shutdown(self) -> None:
+        """Also drop a pending turn-on poll (HA calls this when the entry unloads)."""
+        self._async_cancel_flip_poll()
+        await super().async_shutdown()
 
     @callback
     def async_refresh_presence(self, _now: datetime | None = None) -> None:
@@ -282,11 +453,70 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
 
         Runs every LAST_SEEN_RESOLUTION_SECONDS (see __init__): HA's history
         records every advertisement, while the advertisement callback fires once
-        for a device that keeps repeating the same one.
+        for a device that keeps repeating the same one. It re-offers that
+        advertisement to the library (``_async_reoffer_advertisement``) and
+        re-checks the poll policy too, so a device whose on/off byte goes stale
+        is back on the fixed cadence within one tick (its first poll follows one
+        POLL_INTERVAL_SECONDS, plus jitter, later).
         """
         info = self.async_last_service_info(connectable=False)
-        if info is not None and self._take_presence(info):
+        took = info is not None and self._take_presence(info)
+        if info is not None and self._async_reoffer_advertisement(info):
+            return  # published to every entity
+        if self._async_apply_policy():
+            self._async_publish_status()
+        elif took:
             self.async_update_diagnostics()
+
+    @callback
+    def _async_reoffer_advertisement(self, info: bluetooth.BluetoothServiceInfoBleak) -> bool:
+        """Offer HA's newest advertisement to the library again; return True if on/off flipped.
+
+        HA calls ``async_handle_advertisement`` only when an advertisement's
+        content changes, so two on/off changes would otherwise never reach the
+        library while the device keeps repeating them: one it ignored because
+        it came within ADVERT_SUPPRESS_SECONDS of HA's own command or read, and
+        one whose advertisement matches what HA heard before a command (the
+        device doesn't advertise while HA holds the link). With background
+        polls off nothing else would correct them.
+
+        So the presence tick offers the newest advertisement again if HA
+        received it more than that window after it last talked to the device:
+        one the library would have taken had HA called back for it. One from
+        before that (still the newest while the link stays up after a command)
+        is never offered again, so the stale flip-back the window prevents
+        can't come back this way. The library still folds and deduplicates it:
+        on/off still comes from its state.
+
+        Only for devices the policy covers, with a fresh byte, and once HA has
+        talked to the device (before that, every content change reached the
+        library through the callback). Like the callback, it takes a change
+        from each content once: a poll that then reads the opposite (a byte
+        that doesn't follow the device, or an older one an H6006 leaves in HA's
+        merged entry when a scanner misses its scan response) isn't overridden
+        every tick, only after the content changes or HA's next command.
+        """
+        if not (
+            self._advert_policy
+            and self._io_at is not None
+            and info.time > self._io_at + _ADVERT_SUPPRESS_SECONDS
+            and info.manufacturer_data != self._reoffered
+            and self._async_advert_power_fresh()
+        ):
+            return False
+        was_on = self._device.state.is_on
+        if not self._device.ingest_advertisement(info.advertisement):
+            return False
+        self._reoffered = dict(info.manufacturer_data)
+        _LOGGER.debug(
+            "%s: on/off %s -> %s from the repeated advertisement",
+            self.name,
+            was_on,
+            self._device.state.is_on,
+        )
+        self._async_handle_power_flip(was_on)
+        self.async_publish_device_state()
+        return True
 
     def _take_presence(self, service_info: bluetooth.BluetoothServiceInfoBleak) -> bool:
         """Take last seen / RSSI from an advertisement; False if it was already taken."""
@@ -306,36 +536,192 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         if not connectable:
             # No scanner at all sees it any more: the last RSSI is meaningless.
             self.rssi = None
+        self._async_apply_policy()
         # HA drops both histories in one sweep, and usually only the diagnostics
         # change (connectivity, RSSI, connection source): push to everyone only
         # when availability flipped.
         self._async_publish_status()
 
     @callback
+    def async_note_device_io(self) -> None:
+        """Note that HA just talked to the device: a command (landed or not) or a self-test.
+
+        Polls note themselves. The library ignores advertisements for a while
+        after that, and HA's history may still hold one from before it; see
+        ``_async_reoffer_advertisement``. A command may have changed the
+        device's state, so a repeated advertisement may be offered again.
+        """
+        self._io_at = bluetooth.MONOTONIC_TIME()
+        self._reoffered = None
+
+    @callback
     def async_handle_command_success(self) -> None:
         """Drop the poll backoff: an entity command just reached the device.
 
-        The link demonstrably works again, so the next poll comes at the base
-        cadence instead of up to MAX_POLL_INTERVAL_SECONDS later. Only a
-        backed-off interval is reset, so a stream of commands can't keep
-        postponing the poll; the failure count is left for that poll to reset,
-        so availability and the diagnostics stay driven by polls. The reset
-        happens once per failure streak: when polls keep failing although
-        commands land (a read-back that keeps failing), repeated commands must
-        not hold the device at the base cadence. Nothing is re-armed while no
-        polls are scheduled (``polls_scheduled``).
+        A command is a change, so a light that is on starts its on-backoff
+        over. After failed polls the link demonstrably works again, so the next
+        poll comes at the base cadence instead of up to MAX_POLL_INTERVAL_SECONDS
+        later. Only a backed-off interval is reset, so a stream of commands
+        can't keep postponing the poll; the failure count is left for that poll
+        to reset, so availability and the diagnostics stay driven by polls. The
+        failure-backoff reset happens once per failure streak: when polls keep
+        failing although commands land (a read-back that keeps failing),
+        repeated commands must not hold the device at the base cadence. Nothing
+        is re-armed while no polls are scheduled (``polls_scheduled``), and the
+        policy is re-checked first (a command that turns a light off stops its
+        background polls).
         """
+        rescheduled = self._async_apply_policy()
+        rescheduled = self._async_restart_on_backoff() or rescheduled
+        interval = self.scheduled_interval
         if (
-            not self.polls_scheduled
-            or self._command_reset_used
-            or self.nominal_interval <= _BASE_INTERVAL
+            self.consecutive_failures
+            and not self._command_reset_used
+            and interval is not None
+            and interval > _BASE_INTERVAL
         ):
-            return
-        self._command_reset_used = True
+            self._command_reset_used = True
+            self._set_poll_interval(_BASE_INTERVAL)
+            # HA armed the poll timer with the backed-off interval: re-arm it.
+            self._schedule_refresh()
+            rescheduled = True
+        if rescheduled:
+            self.async_update_diagnostics()
+
+    # -- poll policy ----------------------------------------------------------
+
+    @callback
+    def _async_advert_power_fresh(self) -> bool:
+        """Return whether HA has recently heard this device's advertised on/off byte.
+
+        The newest advertisement any scanner heard must carry the byte (read
+        with the library's parser; only whether it is there matters, its value
+        comes from the library's folded state) and be younger than
+        ADVERT_POWER_FRESH_SECONDS. An H6006 sends the byte only in its scan
+        response, which a passive scanner never asks for: heard that way it
+        never counts as fresh and keeps the fixed cadence.
+
+        HA merges each scanner's advertisement data with what that scanner
+        heard before, so a byte from an earlier packet can stay in the entry
+        after newer packets without manufacturer data (an advertisement
+        without its scan response). The entry's receive time bounds that: the
+        byte is only trusted while that scanner still hears the device.
+        """
+        info = self.async_last_service_info(connectable=False)
+        return (
+            info is not None
+            and bluetooth.MONOTONIC_TIME() - info.time < ADVERT_POWER_FRESH_SECONDS
+            and parse_broadcast_onoff(info.manufacturer_data) is not None
+        )
+
+    @callback
+    def _async_policy_step(self) -> PollPolicy:
+        """Decide how this device is polled in the background: the policy's one decision.
+
+        Background polls stop only for a device HA otherwise follows: one the
+        policy covers (a library with the app's advertisement parser, a model
+        not excluded), that HA polls at all (not disabled in system options,
+        no rejected secret), that a connectable scanner currently sees (an
+        absent device keeps the skip, count and return-poll handling of the
+        fixed cadence), and whose on/off byte is fresh. Then a relay plug
+        (whose relay is its only state) and a light the library's state says is
+        off get none, and a light that is on backs off. On/off comes from the
+        library's state, which folds the advertised byte in (and ignores it for
+        a while after HA's own commands and reads), never from the raw byte.
+        Anything else keeps the fixed cadence.
+        """
+        if not (
+            self._advert_policy
+            and self._polls_enabled
+            and self.async_address_present()
+            and self._async_advert_power_fresh()
+        ):
+            return PollPolicy.FIXED
+        if self._device.profile.relay:
+            return PollPolicy.RELAY
+        is_on = self._device.state.is_on
+        if is_on is None:
+            return PollPolicy.FIXED
+        return PollPolicy.ON if is_on else PollPolicy.OFF
+
+    @callback
+    def _async_set_policy(self, step: PollPolicy) -> bool:
+        """Move to ``step``; return True if it is a different step."""
+        if step is self.poll_policy:
+            return False
+        _LOGGER.debug("%s: background poll policy %s -> %s", self.name, self.poll_policy, step)
+        self.poll_policy = step
+        self._on_backoff_steps = 0
+        if step in _UNPOLLED:
+            self._async_cancel_flip_poll()
+        return True
+
+    @callback
+    def _async_apply_policy(self) -> bool:
+        """Re-check the policy between polls; return True if it moved to another step.
+
+        HA's poll timer is re-armed only when the interval changes, so checking
+        on every advertisement and presence tick never postpones a poll. While
+        polls fail, a change between the polled steps keeps the failure backoff.
+        """
+        present = self.async_address_present()
+        if present:
+            self._lost_while_unpolled = False
+        previous = self.nominal_interval
+        if not self._async_set_policy(self._async_policy_step()):
+            return False
+        if self.poll_policy in _UNPOLLED:
+            self._async_clear_poll_interval()
+            return True
+        if previous is None:  # background polls resume
+            self._async_note_polls_resume()
+            nominal = self._failure_interval() if self.consecutive_failures else _BASE_INTERVAL
+        elif self.consecutive_failures:
+            return True
+        else:
+            nominal = _BASE_INTERVAL  # the on-backoff starts over
+        if nominal != previous:
+            self._set_poll_interval(nominal)
+            # Never arm a timer HA wouldn't keep: none while polling is
+            # disabled or halted, nor while no entity listens.
+            if self._polls_enabled and self._listeners:
+                self._schedule_refresh()
+        return True
+
+    @callback
+    def _async_restart_on_backoff(self) -> bool:
+        """Start a light's on-backoff over after a change; return True if the timer was re-armed.
+
+        Only a backed-off interval is cut back, so repeated changes can't keep
+        postponing the poll.
+        """
+        self._on_backoff_steps = 0
+        interval = self.scheduled_interval
+        if (
+            self.poll_policy is not PollPolicy.ON
+            or self.consecutive_failures
+            or interval is None
+            or interval <= _BASE_INTERVAL
+        ):
+            return False
         self._set_poll_interval(_BASE_INTERVAL)
-        # HA armed the poll timer with the backed-off interval: re-arm it.
         self._schedule_refresh()
-        self.async_update_diagnostics()
+        return True
+
+    def _healthy_interval(self) -> timedelta:
+        """Return the interval after a successful poll: the on-backoff, or the base cadence."""
+        if self.poll_policy is PollPolicy.ON:
+            return min(_BASE_INTERVAL * (1 << self._on_backoff_steps), _ON_MAX_INTERVAL)
+        return _BASE_INTERVAL
+
+    def _failure_interval(self) -> timedelta:
+        """Return the failure backoff for the current streak of failed (or skipped) polls.
+
+        The first failure keeps the base cadence (grace for a transient blip),
+        then it doubles up to the cap.
+        """
+        steps = min(max(0, self.consecutive_failures - 1), _MAX_BACKOFF_STEPS)
+        return min(_BASE_INTERVAL * (1 << steps), _MAX_INTERVAL)
 
     # -- polling ------------------------------------------------------------
 
@@ -379,19 +765,50 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
                 self.total_failures += 1
                 self._async_note_failure()
                 raise self._update_failed("poll_failed", error=repr(err)) from err
+            finally:
+                # Even a failed poll may have read power before it failed.
+                self._io_at = bluetooth.MONOTONIC_TIME()
         if not data.optimistic:
             self.last_connected = dt_util.utcnow()
         self.consecutive_failures = 0
         self._skipped_absent = False
         self._command_reset_used = False
-        self._set_poll_interval(_BASE_INTERVAL)
+        self._lost_while_unpolled = False
+        self._async_note_success(data)
         return data
+
+    @callback
+    def _async_note_success(self, state: DeviceState) -> None:
+        """Pick the interval after a successful poll (HA re-arms its timer with it).
+
+        A light that is on doubles its interval when the poll read the same as
+        the one before, and starts over when it read something else.
+        """
+        polled = _polled_state(state)
+        changed = polled != self._last_polled
+        self._last_polled = polled
+        if self._async_set_policy(self._async_policy_step()) or changed:
+            self._on_backoff_steps = 0
+        elif self.poll_policy is PollPolicy.ON:
+            self._on_backoff_steps = min(self._on_backoff_steps + 1, _MAX_ON_BACKOFF_STEPS)
+        if self.poll_policy in _UNPOLLED:
+            self._async_clear_poll_interval()
+        else:
+            self._async_note_polls_resume()
+            self._set_poll_interval(self._healthy_interval())
 
     @callback
     def _async_note_failure(self) -> None:
         """Count a failed (or skipped) poll, back off, and publish the new status."""
         self.consecutive_failures += 1
-        self._apply_backoff()
+        self._async_set_policy(self._async_policy_step())
+        if self.poll_policy in _UNPOLLED:
+            # A failed one-off poll (a manual refresh) of a device the policy
+            # has no background polls for doesn't start them.
+            self._async_clear_poll_interval()
+        else:
+            self._async_note_polls_resume()
+            self._apply_backoff()
         # DataUpdateCoordinator only notifies listeners when a failure *changes*
         # last_update_success; push explicitly so the diagnostic entities
         # (failure count, poll interval) and availability track an ongoing outage.
@@ -425,15 +842,37 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         self.update_interval = interval
         return interval
 
+    @callback
+    def _async_note_polls_resume(self) -> None:
+        """Note background polls resuming, before their interval is set.
+
+        With none scheduled, a device no connectable scanner sees was
+        unavailable for its absence alone: it stays so until it is heard again
+        (``_lost_while_unpolled``) instead of getting the grace of
+        UNAVAILABLE_AFTER_FAILURES failed polls.
+        """
+        if self.nominal_interval is None and not self.async_address_present():
+            self._lost_while_unpolled = True
+
+    @callback
+    def _async_clear_poll_interval(self) -> None:
+        """Schedule no background polls, and cancel a timer already armed.
+
+        HA arms no timer while the interval is None, but at the end of a poll
+        it returns before cancelling one: a timer armed while the poll ran (the
+        policy moving to a polled step meanwhile) would otherwise still fire.
+        """
+        self.nominal_interval = None
+        self.update_interval = None
+        self._async_unsub_refresh()
+
     def _apply_backoff(self) -> None:
         """Lengthen the poll interval after consecutive failures.
 
-        The first failure keeps the base cadence (grace for a transient blip),
-        then it doubles up to the cap. Jitter is added after capping so devices
+        See ``_failure_interval``. Jitter is added after capping so devices
         sitting at the cap still don't poll in lockstep. Reset on success.
         """
-        steps = min(max(0, self.consecutive_failures - 1), _MAX_BACKOFF_STEPS)
-        interval = self._set_poll_interval(min(_BASE_INTERVAL * (2**steps), _MAX_INTERVAL))
+        interval = self._set_poll_interval(self._failure_interval())
         _LOGGER.debug(
             "%s: %d consecutive failures, next poll in %ds",
             self.name,

@@ -28,14 +28,58 @@ DEFAULT_MAX_KELVIN = 6500
 # each poll briefly holds one of the adapter/proxy's scarce connection slots.
 # on/off is also tracked PASSIVELY from advertisements (no slot), so this poll
 # can be slow — it reconciles the richer fields and catches external changes.
+# It is the fixed cadence of a device the advertisement policy below doesn't
+# cover, and where a light that is on starts its backoff.
 POLL_INTERVAL_SECONDS = 120
+
+# Advertisement-driven polling (coordinator._async_policy_step). A Govee light's
+# advertisement carries its on/off state and nothing else (no brightness,
+# colour, colour temperature, scene, segments or zones), and the library folds
+# that byte into its state (Device.ingest_advertisement). So while Home
+# Assistant keeps hearing the byte, a light that is off needs no background
+# poll (it shows nothing a poll would read, and turning it on shows in the
+# advertisement), and neither does a relay plug, whose relay is its only state.
+# A light that is on is still polled, with a backoff: a colour, brightness or
+# scene changed in the Govee app or over Wi-Fi while it stays on reaches Home
+# Assistant only through a poll.
+#
+# The on-backoff doubles from POLL_INTERVAL_SECONDS after each poll that found
+# nothing new (120, 240, 480, then 900 s) and starts over on any change. 15 min,
+# not the failure backoff's 30, bounds how stale such an outside change can get
+# and still cuts a steady light's connections by about 85 % against 120 s.
+ON_POLL_MAX_INTERVAL_SECONDS = 900
+
+# A light turned on outside Home Assistant (the advertisement flipped to on) is
+# polled once this long after, so the colour or scene it was turned on in, or
+# picked right after, is read too. A newer on/off change restarts the wait.
+ADVERT_FLIP_POLL_DELAY_SECONDS = 5
+
+# How long after Home Assistant received it (BluetoothServiceInfoBleak.time) an
+# advertised on/off byte counts as fresh. Background polls stop only for a
+# device with a fresh byte; without one it keeps the fixed cadence. Just under
+# the 195 s after which Home Assistant's Bluetooth stack treats a connectable
+# device's advertisements as stale (habluetooth's
+# CONNECTABLE_FALLBACK_MAXIMUM_STALE_ADVERTISEMENT_SECONDS, 195 in both 5.6.4
+# and 7.1.2, the versions Home Assistant 2025.10.0 and 2026.10.0 pin; re-exported
+# by homeassistant/components/bluetooth/const.py).
+ADVERT_POWER_FRESH_SECONDS = 180
+
+# Models that keep the fixed POLL_INTERVAL_SECONDS cadence (with its jitter and
+# failure backoff) whatever their advertisements say. A static reading of the
+# H60A6 firmware (not yet checked on the bench) found that a BLE disconnect
+# ends a music or group mode started over Wi-Fi, so a poll's disconnect may end
+# one; H60A1 is the same family and unchecked. The policy's turn-on poll would
+# land seconds after the light comes on, just when such a session is started,
+# so until a bench check settles it they keep today's behaviour exactly.
+EXCLUDED_FROM_ADVERT_POLICY: frozenset[str] = frozenset({"H60A1", "H60A6"})
 
 # Ceiling for the coordinator's adaptive backoff. A device that repeatedly fails
 # to connect (out of range / no free slot) launches a ~30-40s connection-retry
 # storm on every poll; on a single adapter shared by ~18 devices that steals
 # radio time from the healthy ones. After consecutive failures the coordinator
 # doubles that device's poll interval up to this cap, resetting on the first
-# success. on/off still updates live from advertisements regardless.
+# success. on/off still updates live from advertisements regardless. Failed
+# polls back off this way under the advertisement policy too.
 MAX_POLL_INTERVAL_SECONDS = 1800
 
 # Integration-wide cap on simultaneous background polls. HA's Bluetooth manager

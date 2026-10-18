@@ -100,6 +100,7 @@ async def test_diagnostics_structure(
     assert coordinator["consecutive_failures"] == 0
     assert coordinator["total_failures"] == 0
     assert coordinator["device_available"] is True
+    assert coordinator["poll_policy"] == "fixed"  # H60A6 is excluded from the advert policy
     assert coordinator["update_interval"] == str(
         setup_integration.runtime_data.coordinator.update_interval
     )
