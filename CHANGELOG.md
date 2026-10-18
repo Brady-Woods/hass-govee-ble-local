@@ -11,6 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Ready for the next `govee-ble-local` release: the config flow uses `profile_for()` (in the library
   since 1.2.1) instead of `device_profile_for()`, which newer releases deprecate. The tests pass
   against both the 1.2.1 floor and the refactored library.
+- Self-test reports for secret-gated devices drop every frame line without a plaintext view. Newer
+  libraries label frames captured before the session is ready `withheld` instead of `cipher`, and
+  those lines were passing through.
 - **Last seen and RSSI froze** for a device that keeps advertising the same thing (a light left in
   one state): Home Assistant only calls the advertisement callback when an advertisement changes,
   so these diagnostics now come from Home Assistant's advertisement history every minute. After a

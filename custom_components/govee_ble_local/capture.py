@@ -61,6 +61,10 @@ _TEST_ZONE_RGB = (0, 255, 0)
 _SELF_TEST_LOCK = asyncio.Lock()
 
 _WIRE_FIELD = re.compile(r" wire=[0-9a-f]*", re.IGNORECASE)
+# A frame line with an empty plaintext view: a handshake frame, or one that
+# arrived before the session was ready (labelled "cipher", or "withheld" by
+# newer libraries).
+_NO_PLAINTEXT = re.compile(r" plain=(?: |$)")
 
 
 class SelfTestBusyError(Exception):
@@ -560,11 +564,12 @@ def _sanitize_frames(lines: list[str], *, requires_secret: bool) -> list[str]:
 
     Defence in depth on top of the library's own masking: for secret-gated
     devices, keep only the decrypted (masked) ``plain=`` view - no ``wire=``
-    ciphertext and no raw handshake lines.
+    ciphertext and no line without a plaintext view (handshake frames and any
+    frame captured before the session was ready).
     """
     if not requires_secret:
         return lines
-    return [_WIRE_FIELD.sub("", line) for line in lines if " cipher plain=" not in line]
+    return [_WIRE_FIELD.sub("", line) for line in lines if not _NO_PLAINTEXT.search(line)]
 
 
 async def async_run_self_test(device: Device) -> dict[str, Any]:

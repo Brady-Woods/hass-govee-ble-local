@@ -722,6 +722,7 @@ def _frame_lines(address: str) -> Callable[..., Any]:
         frames = logging.getLogger(FRAMES_LOGGER)
         frames.debug("%s tx power plain=3301 wire=deadbeef enc=none", address)
         frames.debug("%s tx cipher plain= wire=abcd enc=e7", address)
+        frames.debug("%s rx withheld plain= wire=ffff enc=rc4", address)
         frames.debug("%s rx status plain=aa wire=0f0f enc=none", OTHER_ADDRESS)
         return DEFAULT
 
@@ -737,7 +738,7 @@ async def test_secret_device_frames_drop_wire_and_handshake_lines() -> None:
     report = await async_run_self_test(device)
 
     assert report["frames"]
-    assert not [f for f in report["frames"] if " wire=" in f or "cipher plain=" in f]
+    assert not [f for f in report["frames"] if " wire=" in f or " plain= " in f]
     assert set(report["frames"]) == {f"{PLUG_ADDRESS} tx power plain=3301 enc=none"}
 
 
@@ -751,6 +752,7 @@ async def test_plain_device_frames_keep_wire_field() -> None:
 
     assert f"{ADDRESS} tx power plain=3301 wire=deadbeef enc=none" in report["frames"]
     assert f"{ADDRESS} tx cipher plain= wire=abcd enc=e7" in report["frames"]
+    assert f"{ADDRESS} rx withheld plain= wire=ffff enc=rc4" in report["frames"]
     assert not [f for f in report["frames"] if OTHER_ADDRESS in f]
 
 
@@ -777,11 +779,13 @@ async def test_log_lines_are_separate_from_frames_and_address_scoped() -> None:
 
 
 def test_sanitize_frames_unit() -> None:
-    """Secret-gated lines lose wire= and handshake lines; others pass through untouched."""
+    """Secret-gated lines lose wire= and every line without plaintext; others pass untouched."""
     lines = [
         "A tx power plain=3301 wire=deadbeef enc=none",
         "A tx cipher plain= wire=abcd enc=e7",
+        "A rx withheld plain= wire=ffff enc=rc4",
         "A rx status plain=aa wire= enc=none",
+        "A rx withheld plain=",
     ]
     assert _sanitize_frames(lines, requires_secret=False) == lines
     assert _sanitize_frames(lines, requires_secret=True) == [
