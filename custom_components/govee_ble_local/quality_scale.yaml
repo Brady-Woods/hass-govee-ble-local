@@ -9,9 +9,11 @@
 #
 # Every Bronze/Silver/Gold rule is done or legitimately exempt.
 # dependency-transparency depends on govee-ble-local being published to PyPI by
-# the library's trusted-publishing release workflow (.github/workflows/release.yml);
-# the manifest requires `govee-ble-local==1.1.0`, so the integration cannot even
-# install until that release exists - publish the library first.
+# the library's trusted-publishing release workflow (.github/workflows/release.yml).
+# The manifest requires a semver range `govee-ble-local>=<floor>,<<next major>`
+# (see manifest.json), never an exact pin (CLAUDE.md): the floor rises only when
+# the integration starts using newer library API, and the upper bound moves only
+# for a new library major.
 # Platinum's own three rules (async-dependency, inject-websession, strict-typing)
 # are also met.
 # Also outstanding for a core submission (not a rule failure): the bundled brand
@@ -30,9 +32,11 @@ rules:
   brands:
     status: done
     comment: >
-      Bundled under custom_components/govee_ble_local/brand/ (served by HA's
-      brands component for custom integrations). Generic placeholder artwork
-      with no Govee trademarks; replace with final art before any submission.
+      Bundled under custom_components/govee_ble_local/brand/, which HA's
+      brands component serves for custom integrations from HA 2026.3 on (older
+      supported releases only use the home-assistant/brands CDN, which has no
+      images for this integration). Generic placeholder artwork with no Govee
+      trademarks; replace with final art before any submission.
   common-modules: done
   config-flow: done
   config-flow-test-coverage:
@@ -47,7 +51,9 @@ rules:
     comment: >
       The sole dependency (govee-ble-local) is MIT, source on GitHub, and
       released to PyPI with CI-built wheels by its trusted-publishing workflow;
-      the manifest pins `govee-ble-local==1.1.0`.
+      the manifest requires a semver range
+      `govee-ble-local>=<floor>,<<next major>` (see manifest.json), never an
+      exact pin.
   docs-actions:
     status: done
     comment: >
@@ -70,7 +76,8 @@ rules:
     status: done
     comment: >
       Setup raises ConfigEntryNotReady unless a connectable scanner currently
-      sees the device and its SKU is known/supported. A device that is
+      sees the device and its SKU is known (an unsupported model is a
+      permanent ConfigEntryError instead). A device that is
       advertising is accepted without a live connect+handshake (avoids a
       startup connect storm across many devices sharing scarce connection
       slots); the first poll runs in the background with backoff.
@@ -78,7 +85,14 @@ rules:
 
   # ------------------------------------------------------------------ Silver
   action-exceptions: done
-  config-entry-unloading: done
+  config-entry-unloading:
+    status: done
+    comment: >
+      Unload removes the platforms and gives a running self-test a bounded
+      wait to restore the device; the on-unload jobs then shut the coordinator
+      down and close the BLE link. HA cancels a background poll still in
+      flight, but not a command or manual refresh still using the link; it
+      waits up to 10 s for the close, which can then finish after the unload.
   docs-configuration-parameters:
     status: exempt
     comment: The integration has no configuration parameters.
@@ -88,7 +102,9 @@ rules:
       Availability follows reachability (a connectable scanner sees the
       device's advertisements), not last-poll success: an advertising device
       stays controllable through transient poll failures; a vanished one goes
-      unavailable after UNAVAILABLE_AFTER_FAILURES failed polls.
+      unavailable after UNAVAILABLE_AFTER_FAILURES failed polls, or as soon as
+      it vanishes when no polls are scheduled to count them (polling disabled
+      in the entry's system options, or halted by a rejected secret).
   integration-owner: done
   log-when-unavailable: done
   parallel-updates: done
@@ -102,10 +118,11 @@ rules:
   test-coverage:
     status: done
     comment: >
-      >95% line coverage of the HA-facing layer, enforced by scripts/check.sh,
-      against the Home Assistant release pinned in requirements_test.txt. The
-      BLE transport/protocol layers are tested in the govee-ble-local library,
-      including a fake-peripheral harness reproducing live failure modes.
+      At least 95% statement+branch coverage of the HA-facing layer, enforced
+      by scripts/check.sh, against the Home Assistant release pinned in
+      requirements_test.txt. The BLE transport/protocol layers are tested in
+      the govee-ble-local library, including a fake-peripheral harness
+      reproducing live failure modes.
 
   # -------------------------------------------------------------------- Gold
   devices: done
@@ -125,16 +142,24 @@ rules:
   entity-category:
     status: done
     comment: >
-      RSSI, connection-failures, poll-interval, last-seen and last-connected
-      sensors, the connectivity binary_sensor, and the self-test button are all
-      EntityCategory.DIAGNOSTIC; the light/switch controls are primary.
+      RSSI, connection-failures, poll-interval, last-seen, last-connected and
+      connection-source sensors, the connectivity binary_sensor, and the
+      self-test button are all EntityCategory.DIAGNOSTIC; the light/switch
+      controls are primary.
   entity-device-class:
     status: done
     comment: >
       Diagnostic entities use signal_strength / duration / timestamp /
       connectivity device classes; the light and zone on/off switches have no
       applicable class.
-  entity-disabled-by-default: done
+  entity-disabled-by-default:
+    status: done
+    comment: >
+      The segment lights and the RSSI, poll-interval, last-seen and
+      last-connected diagnostic sensors are disabled by default (RSSI and last
+      seen refresh every minute, last connected every poll). The connectivity,
+      connection-failure and connection-source diagnostics, which change
+      rarely, stay enabled.
   entity-translations: done
   exception-translations: done
   icon-translations: done

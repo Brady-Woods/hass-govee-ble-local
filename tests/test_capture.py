@@ -154,6 +154,54 @@ def root_log(lib_logger: logging.Logger) -> Generator[_Collector]:
     root.removeHandler(collector)
 
 
+class _PinnedLogger(logging.Logger):
+    """Home Assistant's ``HassLogger``, for a logger the user configured."""
+
+    def setLevel(self, level: int | str) -> None:
+        """Ignore the change, as ``HassLogger`` does for an overridden logger."""
+
+    def orig_setLevel(self, level: int | str) -> None:
+        super().setLevel(level)
+
+
+@pytest.fixture
+def pinned_lib_logger(lib_logger: logging.Logger) -> Generator[logging.Logger]:
+    """The library logger with its level pinned by Home Assistant's logger integration."""
+    original = type(lib_logger)
+    lib_logger.__class__ = _PinnedLogger
+    yield lib_logger
+    lib_logger.__class__ = original
+
+
+@pytest.fixture
+def pin_lib_logger(lib_logger: logging.Logger) -> Generator[Callable[[int], None]]:
+    """Pin the library logger's level later on, as Home Assistant's logger integration does."""
+    original = type(lib_logger)
+
+    def _pin(level: int) -> None:
+        lib_logger.__class__ = _PinnedLogger
+        assert isinstance(lib_logger, _PinnedLogger)
+        lib_logger.orig_setLevel(level)
+
+    yield _pin
+    lib_logger.__class__ = original
+
+
+@pytest.fixture
+def child_levels() -> Generator[Callable[[str, int], None]]:
+    """Set library child logger levels for one test; the old levels come back afterwards."""
+    saved: dict[str, int] = {}
+
+    def _set(name: str, level: int) -> None:
+        logger = logging.getLogger(name)
+        saved.setdefault(name, logger.level)
+        logger.setLevel(level)
+
+    yield _set
+    for name, level in saved.items():
+        logging.getLogger(name).setLevel(level)
+
+
 # -- full-surface runs ------------------------------------------------------
 
 
@@ -563,6 +611,31 @@ async def test_unexpected_error_propagates_after_restore() -> None:
     assert not capture._SELF_TEST_LOCK.locked()
 
 
+async def test_restore_failure_is_logged_when_an_unexpected_error_propagates(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """With no report to carry them, failed restore actions are still logged at WARNING."""
+    device = make_device("H60A6")
+    _prime(device)
+    device.set_brightness.side_effect = RuntimeError("bug")
+    # power_on (exercise), then the restore's set_power(True) is the second call.
+    _fail_on_call(device.set_power, 2, GoveeBleConnectionError("link lost"))
+
+    with (
+        caplog.at_level(logging.WARNING, logger=capture.__name__),
+        pytest.raises(RuntimeError, match="bug"),
+    ):
+        await async_run_self_test(device)
+
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    message = warnings[0].getMessage()
+    assert ADDRESS in message
+    assert "could not fully restore" in message
+    assert "power: link lost" in message
+    assert not capture._SELF_TEST_LOCK.locked()
+
+
 async def test_auth_error_aborts_without_restore() -> None:
     """A rejected secret is re-raised and nothing more is sent (restore would be futile)."""
     device = make_device("H60A6")
@@ -782,6 +855,77 @@ async def test_session_capture_filters_by_address_and_bounds_buffer(
         child.debug("%s three", ADDRESS)
 
     assert [r["message"] for r in ring.buffer] == [f"{ADDRESS} two", f"{ADDRESS} three"]
+
+
+async def test_session_capture_raises_a_level_pinned_by_ha_logger(
+    pinned_lib_logger: logging.Logger,
+) -> None:
+    """The level gets past ``HassLogger``'s override guard and is put back the same way."""
+    frames = logging.getLogger(FRAMES_LOGGER)
+    pinned_lib_logger.setLevel(logging.DEBUG)  # a plain setLevel does nothing here
+    assert pinned_lib_logger.level == logging.WARNING
+
+    with session_capture() as ring:
+        assert pinned_lib_logger.level == logging.DEBUG
+        frames.debug("A tx power plain=3301 enc=none")
+
+    assert [r["message"] for r in ring.buffer] == ["A tx power plain=3301 enc=none"]
+    assert pinned_lib_logger.level == logging.WARNING
+
+
+async def test_session_capture_keeps_a_pin_made_during_the_capture(
+    lib_logger: logging.Logger, pin_lib_logger: Callable[[int], None]
+) -> None:
+    """Debug logging switched on mid-capture (HA pins the logger) survives the restore."""
+    with session_capture():
+        pin_lib_logger(logging.DEBUG)  # e.g. the integration's debug-logging toggle
+
+    assert lib_logger.level == logging.DEBUG
+
+
+async def test_session_capture_keeps_chattier_child_loggers_in_ha_log(
+    lib_logger: logging.Logger,
+    root_log: _Collector,
+    child_levels: Callable[[str, int], None],
+) -> None:
+    """Each record reaches HA's log if its own logger's level would have let it through."""
+    child_levels(FRAMES_LOGGER, logging.DEBUG)
+    child_levels("govee_ble_local.devices", logging.INFO)
+    frames = logging.getLogger(FRAMES_LOGGER)
+    device_log = logging.getLogger("govee_ble_local.devices.device")  # inherits INFO
+    session = logging.getLogger("govee_ble_local.session")  # inherits WARNING
+
+    with session_capture() as ring:
+        frames.debug("frame")
+        device_log.info("device info")
+        device_log.debug("device debug")
+        session.info("session info")
+        session.warning("session warning")
+
+    assert root_log.lines == ["DEBUG frame", "INFO device info", "WARNING session warning"]
+    # A child's own level also bounds what is captured from it.
+    assert [r["message"] for r in ring.buffer] == [
+        "frame",
+        "device info",
+        "session info",
+        "session warning",
+    ]
+
+
+async def test_session_capture_forwards_nothing_without_prior_propagation(
+    lib_logger: logging.Logger, root_log: _Collector
+) -> None:
+    """A library logger that didn't propagate before the capture doesn't reach HA's log in one."""
+    lib_logger.propagate = False
+    handlers_before = list(lib_logger.handlers)
+
+    with session_capture() as ring:
+        logging.getLogger("govee_ble_local.session").warning("loud")
+
+    assert [r["message"] for r in ring.buffer] == ["loud"]
+    assert root_log.lines == []
+    assert lib_logger.propagate is False
+    assert lib_logger.handlers == handlers_before
 
 
 # -- LogCapture -------------------------------------------------------------

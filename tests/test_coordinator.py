@@ -21,17 +21,17 @@ from govee_ble_local import (
 )
 from homeassistant.components.bluetooth import BluetoothChange
 from homeassistant.components.light import DATA_COMPONENT as LIGHT_DATA
-from homeassistant.const import STATE_UNAVAILABLE
+from homeassistant.const import STATE_OFF, STATE_UNAVAILABLE
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.update_coordinator import UpdateFailed
 from homeassistant.util import dt as dt_util
 import pytest
-from pytest_homeassistant_custom_component.common import (
-    MockConfigEntry,
-    async_fire_time_changed,
-)
+from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.govee_ble_local.const import (
+    CONF_SKU,
     DOMAIN,
     LAST_SEEN_RESOLUTION_SECONDS,
     MAX_CONCURRENT_POLLS,
@@ -41,12 +41,15 @@ from custom_components.govee_ble_local.const import (
 from custom_components.govee_ble_local.coordinator import GoveeBleLocalCoordinator
 
 from .conftest import (
+    advance,
     advertisement_callback,
     allow_adverts,
+    connection,
     make_device,
     make_service_info,
+    unavailable_callback,
 )
-from .const import ADDRESS
+from .const import ADDRESS, TITLE
 
 MAIN_LIGHT = "light.test_ceiling"
 JITTER_TARGET = "custom_components.govee_ble_local.coordinator.random.uniform"
@@ -54,8 +57,8 @@ BASE = POLL_INTERVAL_SECONDS
 BACKOFF_SEQUENCE = [BASE, BASE * 2, BASE * 4, BASE * 8, 1800, 1800]
 
 # The conftest ``presence`` fixture replaces these on the class for every test.
-REAL_ADDRESS_PRESENT = GoveeBleLocalCoordinator.address_present
-REAL_LAST_SERVICE_INFO = GoveeBleLocalCoordinator.last_service_info
+REAL_ADDRESS_PRESENT = GoveeBleLocalCoordinator.async_address_present
+REAL_LAST_SERVICE_INFO = GoveeBleLocalCoordinator.async_last_service_info
 
 ERRORS: list[Callable[[], BaseException]] = [
     lambda: GoveeBleConnectionError("no slot"),
@@ -102,12 +105,6 @@ def interval(coordinator: GoveeBleLocalCoordinator) -> float:
     """Return the coordinator's current poll interval in seconds."""
     assert coordinator.update_interval is not None
     return coordinator.update_interval.total_seconds()
-
-
-async def advance(hass: HomeAssistant, seconds: float) -> None:
-    """Fire the timers due ``seconds`` from now and let the resulting work finish."""
-    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=seconds))
-    await hass.async_block_till_done()
 
 
 def light_entity(hass: HomeAssistant, entity_id: str = MAIN_LIGHT) -> Any:
@@ -157,7 +154,7 @@ async def test_optimistic_state_does_not_count_as_connected(
     succeed(mock_device, optimistic=True)
     mock_config_entry.add_to_hass(hass)
     assert await hass.config_entries.async_setup(mock_config_entry.entry_id)
-    await hass.async_block_till_done()
+    await hass.async_block_till_done(wait_background_tasks=True)
 
     coordinator = mock_config_entry.runtime_data.coordinator
     mock_device.update.assert_awaited_once()  # type: ignore[attr-defined]
@@ -241,7 +238,47 @@ async def test_unexpected_error_still_backs_off_and_logs_traceback(
     assert isinstance(records[0].exc_info[1], ValueError)
     assert (coordinator.consecutive_failures, coordinator.total_failures) == (2, 2)
     assert interval(coordinator) == BASE * 2
-    assert "boom" in str(coordinator.last_exception)
+    error = coordinator.last_exception
+    assert isinstance(error, UpdateFailed)
+    assert error.translation_key == "poll_failed"
+    assert error.translation_placeholders == {"address": ADDRESS, "error": "ValueError('boom')"}
+    assert "boom" in str(error)
+
+
+@pytest.mark.parametrize(
+    ("error", "message"),
+    [(GoveeBleConnectionError("no slot"), "no slot"), (TimeoutError(), "TimeoutError")],
+    ids=["library", "bare_timeout"],
+)
+async def test_failed_poll_error_is_translated(
+    coordinator: GoveeBleLocalCoordinator,
+    mock_device: Device,
+    error: BaseException,
+    message: str,
+) -> None:
+    """A failed poll raises a translated UpdateFailed naming the device and the error."""
+    fail(mock_device, error)
+    await coordinator.async_refresh()
+
+    last = coordinator.last_exception
+    assert isinstance(last, UpdateFailed)
+    assert (last.translation_domain, last.translation_key) == (DOMAIN, "poll_failed")
+    assert last.translation_placeholders == {"address": ADDRESS, "error": message}
+    assert str(last) == f"Could not poll {ADDRESS}: {message}"
+
+
+async def test_skipped_poll_error_is_translated(
+    coordinator: GoveeBleLocalCoordinator, presence: SimpleNamespace
+) -> None:
+    """A poll skipped for absence raises a translated UpdateFailed."""
+    presence.connectable = False
+    await coordinator.async_refresh()
+
+    last = coordinator.last_exception
+    assert isinstance(last, UpdateFailed)
+    assert (last.translation_domain, last.translation_key) == (DOMAIN, "poll_skipped_absent")
+    assert last.translation_placeholders == {"address": ADDRESS}
+    assert str(last) == f"{ADDRESS} is not advertising; poll skipped"
 
 
 async def test_auth_error_starts_reauth_and_stops_polling(
@@ -263,10 +300,65 @@ async def test_auth_error_starts_reauth_and_stops_polling(
     )
     assert (coordinator.consecutive_failures, coordinator.total_failures) == (0, 0)
     assert not coordinator.last_update_success
+    error = coordinator.last_exception
+    assert isinstance(error, ConfigEntryAuthFailed)
+    assert (error.translation_domain, error.translation_key) == (DOMAIN, "secret_rejected")
+    assert error.translation_placeholders == {"device_name": TITLE}
 
     mock_device.update.reset_mock()  # type: ignore[attr-defined]
     await advance(hass, 3 * 3600)
     mock_device.update.assert_not_awaited()  # type: ignore[attr-defined]
+
+
+async def test_vanishing_after_auth_failure_makes_the_device_unavailable(
+    hass: HomeAssistant,
+    coordinator: GoveeBleLocalCoordinator,
+    mock_device: Device,
+    mock_bluetooth: SimpleNamespace,
+    presence: SimpleNamespace,
+) -> None:
+    """With polls halted by a rejected secret, leaving range is enough to go unavailable."""
+    fail(mock_device, GoveeBleAuthError("secret rejected"))
+    await coordinator.async_refresh()
+    assert hass.states.get(MAIN_LIGHT).state != STATE_UNAVAILABLE  # still advertising
+
+    presence.connectable = presence.any = False
+    unavailable_callback(mock_bluetooth, connectable=True)(make_service_info())
+    assert hass.states.get(MAIN_LIGHT).state == STATE_UNAVAILABLE
+
+    # A poll that does run again (here a manual refresh) re-arms polling, and with
+    # it the usual grace of a few failed polls.
+    await coordinator.async_refresh()
+    assert coordinator.consecutive_failures == 1
+    assert coordinator.device_available
+
+
+async def test_vanishing_with_polling_disabled_makes_the_device_unavailable(
+    hass: HomeAssistant,
+    mock_device: Device,
+    mock_bluetooth: SimpleNamespace,
+    presence: SimpleNamespace,
+) -> None:
+    """With polling turned off nothing counts failures: absence alone decides availability."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title=TITLE,
+        unique_id=ADDRESS,
+        data={"address": ADDRESS, CONF_SKU: "H60A6"},
+        pref_disable_polling=True,
+    )
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert hass.states.get(MAIN_LIGHT).state != STATE_UNAVAILABLE
+
+    presence.connectable = presence.any = False
+    unavailable_callback(mock_bluetooth, connectable=True)(make_service_info())
+    assert hass.states.get(MAIN_LIGHT).state == STATE_UNAVAILABLE
+
+    presence.connectable = presence.any = True
+    advertisement_callback(mock_bluetooth)(make_service_info(), BluetoothChange.ADVERTISEMENT)
+    assert hass.states.get(MAIN_LIGHT).state != STATE_UNAVAILABLE
 
 
 # -- reachability ---------------------------------------------------------------
@@ -370,6 +462,113 @@ async def test_return_seen_only_by_non_connectable_scanner_does_not_poll(
     mock_device.update.reset_mock()  # type: ignore[attr-defined]
     advertisement_callback(mock_bluetooth)(make_service_info(), BluetoothChange.ADVERTISEMENT)
     await hass.async_block_till_done()
+    mock_device.update.assert_not_awaited()  # type: ignore[attr-defined]
+
+
+async def _turn_on(hass: HomeAssistant) -> None:
+    await hass.services.async_call("light", "turn_on", {"entity_id": MAIN_LIGHT}, blocking=True)
+
+
+@pytest.mark.usefixtures("entity_registry_enabled_by_default")
+async def test_successful_command_drops_the_poll_backoff(
+    hass: HomeAssistant,
+    coordinator: GoveeBleLocalCoordinator,
+    mock_device: Device,
+) -> None:
+    """A command that lands brings a backed-off poll forward to the base cadence."""
+    interval_id = er.async_get(hass).async_get_entity_id(
+        "sensor", DOMAIN, f"{ADDRESS}_poll_interval"
+    )
+    fail(mock_device, GoveeBleConnectionError("no slot"))
+    for _ in range(5):
+        await coordinator.async_refresh()
+    assert interval(coordinator) == 1800
+    succeed(mock_device)
+    mock_device.update.reset_mock()  # type: ignore[attr-defined]
+
+    await _turn_on(hass)
+    assert interval(coordinator) == BASE
+    assert hass.states.get(interval_id).state == str(BASE)
+    mock_device.update.assert_not_awaited()  # type: ignore[attr-defined]  # no extra poll
+    assert coordinator.consecutive_failures == 5  # left for the poll to reset
+
+    await advance(hass, BASE + 10)
+    mock_device.update.assert_awaited_once()  # type: ignore[attr-defined]
+    assert coordinator.consecutive_failures == 0
+
+
+async def test_failed_or_repeated_commands_leave_the_poll_schedule_alone(
+    hass: HomeAssistant,
+    coordinator: GoveeBleLocalCoordinator,
+    mock_device: Device,
+    jitter: MagicMock,
+) -> None:
+    """A failed command keeps the backoff; once reset, further commands don't re-arm the poll."""
+    jitter.return_value = 30
+    fail(mock_device, GoveeBleConnectionError("no slot"))
+    for _ in range(5):
+        await coordinator.async_refresh()
+    connection(mock_device).error = GoveeBleConnectionError("link down")
+    with pytest.raises(HomeAssistantError):
+        await _turn_on(hass)
+    assert interval(coordinator) == 1800 + 30
+
+    connection(mock_device).error = None
+    await _turn_on(hass)
+    # The jitter on top of the base cadence isn't mistaken for a backoff.
+    assert interval(coordinator) == BASE + 30
+    with patch.object(coordinator, "_schedule_refresh") as schedule:
+        await _turn_on(hass)  # would otherwise keep postponing the poll
+    schedule.assert_not_called()
+
+
+async def test_commands_drop_the_backoff_once_per_failure_streak(
+    hass: HomeAssistant,
+    coordinator: GoveeBleLocalCoordinator,
+    mock_device: Device,
+) -> None:
+    """Polls that keep failing while commands land aren't held at the base cadence."""
+    fail(mock_device, GoveeBleConnectionError("read-back failed"))
+    for _ in range(5):
+        await coordinator.async_refresh()
+    await _turn_on(hass)
+    assert interval(coordinator) == BASE
+    await advance(hass, BASE + 10)  # the poll brought forward fails again
+    assert interval(coordinator) == 1800
+
+    with patch.object(coordinator, "_schedule_refresh") as schedule:
+        await _turn_on(hass)
+    schedule.assert_not_called()
+    assert interval(coordinator) == 1800
+
+    # A successful poll ends the streak, so the next one can be cut short again.
+    succeed(mock_device)
+    await coordinator.async_refresh()
+    fail(mock_device, GoveeBleConnectionError("read-back failed"))
+    for _ in range(5):
+        await coordinator.async_refresh()
+    assert interval(coordinator) == 1800
+    await _turn_on(hass)
+    assert interval(coordinator) == BASE
+
+
+async def test_command_after_a_rejected_secret_does_not_restart_polling(
+    hass: HomeAssistant,
+    coordinator: GoveeBleLocalCoordinator,
+    mock_device: Device,
+) -> None:
+    """HA stops polling on a rejected secret; a command that lands doesn't re-arm the timer."""
+    fail(mock_device, GoveeBleConnectionError("no slot"))
+    for _ in range(3):
+        await coordinator.async_refresh()
+    assert interval(coordinator) == BASE * 4
+    fail(mock_device, GoveeBleAuthError("secret rejected"))
+    await coordinator.async_refresh()
+    assert not coordinator.polls_scheduled
+
+    mock_device.update.reset_mock()  # type: ignore[attr-defined]
+    await _turn_on(hass)
+    await advance(hass, 3 * 3600)
     mock_device.update.assert_not_awaited()  # type: ignore[attr-defined]
 
 
@@ -489,58 +688,96 @@ async def test_publish_device_state_updates_entities_without_touching_the_poll_t
     assert hass.states.get(MAIN_LIGHT).state == "off"
 
 
-async def test_unchanged_advertisement_does_not_rewrite_main_light(
+async def test_unchanged_advertisement_rewrites_nothing(
     hass: HomeAssistant,
     coordinator: GoveeBleLocalCoordinator,
     mock_device: Device,
     mock_bluetooth: SimpleNamespace,
-    freezer: Any,
 ) -> None:
-    """An unchanged on/off never rewrites the light; diagnostics follow a 60 s cadence."""
+    """An advertisement with unchanged on/off rewrites neither the light nor the diagnostics."""
     allow_adverts(mock_device)
     callback = advertisement_callback(mock_bluetooth)
     callback(make_service_info(on=True, rssi=-70), BluetoothChange.ADVERTISEMENT)
     assert hass.states.get(MAIN_LIGHT).state == "on"
+
+    with (
+        patch.object(light_entity(hass), "async_write_ha_state") as write,
+        patch.object(coordinator, "async_update_diagnostics") as diagnostics,
+    ):
+        callback(make_service_info(on=True, rssi=-80), BluetoothChange.ADVERTISEMENT)
+    write.assert_not_called()
+    diagnostics.assert_not_called()
+    # Last seen / RSSI come from the history refresh, not the callback.
+    assert coordinator.rssi == -60
+
+
+@pytest.mark.usefixtures("entity_registry_enabled_by_default")
+async def test_diagnostics_keep_publishing_during_a_steady_advertisement_stream(
+    hass: HomeAssistant,
+    monotonic: SimpleNamespace,
+    coordinator: GoveeBleLocalCoordinator,
+    presence: SimpleNamespace,
+    freezer: Any,
+) -> None:
+    """A device repeating one advertisement still refreshes last seen / RSSI every minute.
+
+    HA calls the advertisement callback only when the content changes, so here
+    it is never called: only the history (which records every repeat) moves on.
+    """
     registry = er.async_get(hass)
     rssi_id = registry.async_get_entity_id("sensor", DOMAIN, f"{ADDRESS}_rssi")
-    assert hass.states.get(rssi_id).state == "-70"
-
-    with patch.object(light_entity(hass), "async_write_ha_state") as write:
-        freezer.tick(timedelta(seconds=5))
-        callback(make_service_info(on=True, rssi=-80), BluetoothChange.ADVERTISEMENT)
-        write.assert_not_called()
-        # Inside the resolution window the diagnostics aren't republished either.
-        assert hass.states.get(rssi_id).state == "-70"
-        assert coordinator.rssi == -80  # but the coordinator tracks it
-
-        freezer.tick(timedelta(seconds=LAST_SEEN_RESOLUTION_SECONDS + 1))
-        callback(make_service_info(on=True, rssi=-85), BluetoothChange.ADVERTISEMENT)
-        write.assert_not_called()  # the light is still not rewritten...
-    assert hass.states.get(rssi_id).state == "-85"  # ...but the diagnostics are
     last_seen_id = registry.async_get_entity_id("sensor", DOMAIN, f"{ADDRESS}_last_seen")
-    assert dt_util.parse_datetime(hass.states.get(last_seen_id).state) == dt_util.utcnow().replace(
-        microsecond=0
-    )
+    assert hass.states.get(rssi_id).state == "-60"
+    for rssi in (-70, -90):
+        freezer.tick(timedelta(seconds=LAST_SEEN_RESOLUTION_SECONDS))
+        monotonic.now += LAST_SEEN_RESOLUTION_SECONDS
+        presence.service_info = make_service_info(rssi=rssi, seen_at=monotonic.now - 3)
+        await advance(hass, 0)
+        assert hass.states.get(rssi_id).state == str(rssi)
+        seen = dt_util.utcnow() - timedelta(seconds=3)
+        assert dt_util.parse_datetime(hass.states.get(last_seen_id).state) == seen.replace(
+            microsecond=0
+        )
 
 
-async def test_diagnostics_keep_publishing_during_a_steady_advertisement_stream(
+async def test_presence_refresh_skips_an_advertisement_already_taken(
+    hass: HomeAssistant, coordinator: GoveeBleLocalCoordinator, presence: SimpleNamespace
+) -> None:
+    """Nothing new in the history (or nothing at all) publishes nothing."""
+    with patch.object(coordinator, "async_update_diagnostics") as diagnostics:
+        await advance(hass, LAST_SEEN_RESOLUTION_SECONDS)  # the entry taken at setup
+        presence.service_info = None
+        await advance(hass, LAST_SEEN_RESOLUTION_SECONDS)
+    diagnostics.assert_not_called()
+
+
+async def test_advertisement_after_silence_refreshes_presence_at_once(
     hass: HomeAssistant,
     coordinator: GoveeBleLocalCoordinator,
     mock_device: Device,
     mock_bluetooth: SimpleNamespace,
-    freezer: Any,
+    presence: SimpleNamespace,
 ) -> None:
-    """A device advertising every 20 s still refreshes last seen / RSSI roughly once a minute."""
+    """Heard again after no scanner did, the diagnostics update without waiting for the timer."""
     allow_adverts(mock_device)
     callback = advertisement_callback(mock_bluetooth)
-    registry = er.async_get(hass)
-    rssi_id = registry.async_get_entity_id("sensor", DOMAIN, f"{ADDRESS}_rssi")
-    callback(make_service_info(rssi=-70), BluetoothChange.ADVERTISEMENT)
-    assert hass.states.get(rssi_id).state == "-70"
-    for _ in range(4):  # 80 s of adverts, each well inside the 60 s resolution
-        freezer.tick(timedelta(seconds=20))
-        callback(make_service_info(rssi=-90), BluetoothChange.ADVERTISEMENT)
-    assert hass.states.get(rssi_id).state == "-90"
+    callback(make_service_info(on=True), BluetoothChange.ADVERTISEMENT)
+    presence.connectable = presence.any = False
+    unavailable_callback(mock_bluetooth, connectable=False)(make_service_info())
+    assert coordinator.rssi is None
+
+    presence.connectable = presence.any = True
+    with (
+        patch.object(light_entity(hass), "async_write_ha_state") as write,
+        patch.object(
+            coordinator, "async_update_diagnostics", wraps=coordinator.async_update_diagnostics
+        ) as diagnostics,
+    ):
+        callback(make_service_info(on=True, rssi=-77), BluetoothChange.ADVERTISEMENT)
+    write.assert_not_called()  # on/off and availability are unchanged
+    diagnostics.assert_called_once()
+    assert coordinator.rssi == -77
+    assert coordinator.last_seen is not None
 
 
 async def test_on_off_change_from_advertisement_rewrites_main_light(
@@ -598,12 +835,14 @@ async def test_availability_flip_pushes_to_every_entity(
     )
     assert all(hass.states.get(e).state != STATE_UNAVAILABLE for e in entities)
     assert coordinator.consecutive_failures == UNAVAILABLE_AFTER_FAILURES  # poll still in flight
+    assert coordinator.nominal_interval == timedelta(seconds=BASE)  # the backoff is dropped
 
     gate.set()
-    await hass.async_block_till_done()
+    await hass.async_block_till_done(wait_background_tasks=True)
     assert coordinator.consecutive_failures == 0
 
 
+@pytest.mark.usefixtures("entity_registry_enabled_by_default")
 async def test_failed_poll_with_unchanged_availability_notifies_diagnostics_only(
     hass: HomeAssistant,
     coordinator: GoveeBleLocalCoordinator,
@@ -625,6 +864,36 @@ async def test_failed_poll_with_unchanged_availability_notifies_diagnostics_only
     assert hass.states.get(interval_id).state == str(BASE * 4)
 
 
+async def test_failing_state_listener_does_not_cost_the_entities_their_update(
+    hass: HomeAssistant,
+    coordinator: GoveeBleLocalCoordinator,
+    mock_device: Device,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A state listener that raises is logged; entities and the other listeners still update."""
+    seen: list[str] = []
+    mock_device.state.is_on = True
+    coordinator.async_publish_device_state()
+    assert hass.states.get(MAIN_LIGHT).state == "on"
+
+    def _broken() -> None:
+        raise RuntimeError("registry write failed")
+
+    unsubscribes = [
+        coordinator.async_add_state_listener(_broken),
+        coordinator.async_add_state_listener(lambda: seen.append("next")),
+    ]
+    mock_device.state.is_on = False
+    coordinator.async_publish_device_state()
+    for unsubscribe in unsubscribes:
+        unsubscribe()
+
+    assert hass.states.get(MAIN_LIGHT).state == STATE_OFF
+    assert seen == ["next"]
+    assert "Unexpected error updating state listener" in caplog.text
+    assert "registry write failed" in caplog.text
+
+
 async def test_diagnostic_listener_unsubscribe(coordinator: GoveeBleLocalCoordinator) -> None:
     """The unsubscribe callback stops further diagnostic notifications."""
     seen: list[str] = []
@@ -638,6 +907,25 @@ async def test_diagnostic_listener_unsubscribe(coordinator: GoveeBleLocalCoordin
     unsubscribe()
     coordinator.async_update_diagnostics()
     assert (seen, other) == (["a"], ["b", "b"])
+
+
+async def test_unavailable_with_unchanged_availability_pushes_diagnostics_only(
+    hass: HomeAssistant,
+    coordinator: GoveeBleLocalCoordinator,
+    mock_bluetooth: SimpleNamespace,
+    presence: SimpleNamespace,
+) -> None:
+    """Dropping out of both histories while still available rewrites only the diagnostics."""
+    connectivity_id = er.async_get(hass).async_get_entity_id(
+        "binary_sensor", DOMAIN, f"{ADDRESS}_connectivity"
+    )
+    presence.connectable = presence.any = False
+    with patch.object(light_entity(hass), "async_write_ha_state") as write:
+        unavailable_callback(mock_bluetooth, connectable=True)(make_service_info())
+        unavailable_callback(mock_bluetooth, connectable=False)(make_service_info())
+    write.assert_not_called()  # no failed polls yet: still available
+    assert hass.states.get(connectivity_id).state == STATE_OFF
+    assert coordinator.rssi is None
 
 
 async def test_unavailable_callback_clears_rssi_only_when_nothing_hears_it(
@@ -657,10 +945,12 @@ async def test_real_bluetooth_helpers_defer_to_the_stack(
     """Without the presence fixture the coordinator asks the Bluetooth stack directly."""
     coordinator = setup_integration.runtime_data.coordinator
     with (
-        patch.object(GoveeBleLocalCoordinator, "address_present", REAL_ADDRESS_PRESENT),
-        patch.object(GoveeBleLocalCoordinator, "last_service_info", REAL_LAST_SERVICE_INFO),
+        patch.object(GoveeBleLocalCoordinator, "async_address_present", REAL_ADDRESS_PRESENT),
+        patch.object(GoveeBleLocalCoordinator, "async_last_service_info", REAL_LAST_SERVICE_INFO),
     ):
-        assert coordinator.address_present() is False  # no scanner has seen it
-        assert coordinator.address_present(connectable=False) is False
-        assert coordinator.last_service_info() is mock_bluetooth.last_info.return_value
-    assert mock_bluetooth.last_info.call_args.kwargs == {"connectable": True}
+        assert coordinator.async_address_present() is False  # no scanner has seen it
+        assert coordinator.async_address_present(connectable=False) is False
+        assert coordinator.async_last_service_info() is mock_bluetooth.last_info.return_value
+        assert mock_bluetooth.last_info.call_args.kwargs == {"connectable": True}
+        coordinator.async_last_service_info(connectable=False)
+        assert mock_bluetooth.last_info.call_args.kwargs == {"connectable": False}

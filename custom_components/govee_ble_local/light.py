@@ -19,11 +19,18 @@ from homeassistant.components.light import (
 )
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ServiceValidationError
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
-from .const import DEFAULT_MAX_KELVIN, DEFAULT_MIN_KELVIN, DOMAIN
+from .const import DOMAIN
 from .entity import GoveeBleLocalEntity
-from .helpers import brightness_to_pct, pct_to_brightness
+from .helpers import (
+    brightness_to_pct,
+    has_fixture_light,
+    is_colour_zone,
+    kelvin_range,
+    mid_kelvin,
+    pct_to_brightness,
+)
 
 if TYPE_CHECKING:
     from . import GoveeBleLocalConfigEntry
@@ -39,13 +46,9 @@ WHITE = (255, 255, 255)
 _COLOUR_KWARGS = {ATTR_BRIGHTNESS, ATTR_RGB_COLOR, ATTR_COLOR_TEMP_KELVIN, ATTR_EFFECT}
 
 
-def _kelvin_range(device: Device) -> tuple[int, int]:
-    return (device.min_kelvin or DEFAULT_MIN_KELVIN, device.max_kelvin or DEFAULT_MAX_KELVIN)
-
-
 def _clamp_kelvin(device: Device, kelvin: int) -> int:
     """Clamp a requested colour temperature into the device's supported range."""
-    lo, hi = _kelvin_range(device)
+    lo, hi = kelvin_range(device)
     return max(lo, min(hi, kelvin))
 
 
@@ -64,7 +67,7 @@ def _sub_light_modes(device: Device) -> set[ColorMode]:
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: GoveeBleLocalConfigEntry,
-    async_add_entities: AddEntitiesCallback,
+    async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
     """Set up the light entities for a device.
 
@@ -76,15 +79,14 @@ async def async_setup_entry(
     A device with no light-relevant capability (e.g. a smart plug) gets none.
     """
     device = entry.runtime_data.device
-    caps = device.capabilities
 
     entities: list[LightEntity] = []
-    if caps & {Capability.BRIGHTNESS, Capability.RGB, Capability.COLOR_TEMP}:
+    if has_fixture_light(device):
         entities.append(GoveeBleLocalLight(entry))
     entities.extend(
-        GoveeBleLocalZoneLight(entry, zone.name) for zone in device.zones if zone.segments
+        GoveeBleLocalZoneLight(entry, zone.name) for zone in device.zones if is_colour_zone(zone)
     )
-    if Capability.SEGMENTS in caps:
+    if Capability.SEGMENTS in device.capabilities:
         entities.extend(
             GoveeBleLocalSegmentLight(entry, index) for index in range(device.profile.segments)
         )
@@ -102,13 +104,10 @@ class _SubLight(GoveeBleLocalEntity, LightEntity):
         super().__init__(entry, key)
         self._attr_supported_color_modes = _sub_light_modes(self._device)
         if ColorMode.COLOR_TEMP in self._attr_supported_color_modes:
-            self._attr_min_color_temp_kelvin, self._attr_max_color_temp_kelvin = _kelvin_range(
+            self._attr_min_color_temp_kelvin, self._attr_max_color_temp_kelvin = kelvin_range(
                 self._device
             )
         self._attr_color_mode = ColorMode.RGB  # updated on command
-        self._attr_rgb_color: tuple[int, int, int] | None = None
-        self._attr_color_temp_kelvin: int | None = None
-        self._attr_brightness: int | None = None
 
     @abstractmethod
     def _sync_from_readback(self) -> None:
@@ -141,7 +140,7 @@ class GoveeBleLocalLight(GoveeBleLocalEntity, LightEntity):
             modes.add(ColorMode.RGB)
         if Capability.COLOR_TEMP in caps:
             modes.add(ColorMode.COLOR_TEMP)
-            self._attr_min_color_temp_kelvin, self._attr_max_color_temp_kelvin = _kelvin_range(
+            self._attr_min_color_temp_kelvin, self._attr_max_color_temp_kelvin = kelvin_range(
                 self._device
             )
         if not modes:
@@ -159,8 +158,9 @@ class GoveeBleLocalLight(GoveeBleLocalEntity, LightEntity):
             self._default_color_mode = ColorMode.RGB
         else:
             self._default_color_mode = next(iter(modes))
-        # The scene we last activated, for devices that don't report the active one.
-        self._attr_effect: str | None = None
+        # The scene we last activated, for devices that don't report the active
+        # one. Not ``_attr_effect``: ``effect`` prefers the device's own report.
+        self._optimistic_effect: str | None = None
 
     @property
     def is_on(self) -> bool | None:
@@ -193,7 +193,7 @@ class GoveeBleLocalLight(GoveeBleLocalEntity, LightEntity):
         """
         if not (self.supported_features & LightEntityFeature.EFFECT):
             return None
-        return self._device.active_scene or self._attr_effect or EFFECT_OFF
+        return self._device.active_scene or self._optimistic_effect or EFFECT_OFF
 
     @property
     def color_mode(self) -> ColorMode:
@@ -211,7 +211,7 @@ class GoveeBleLocalLight(GoveeBleLocalEntity, LightEntity):
         # A poll showing a solid colour/temp means the fixture left our scene.
         data = self.coordinator.data
         if data.rgb_color is not None or data.color_temp_kelvin is not None:
-            self._attr_effect = None
+            self._optimistic_effect = None
         super()._handle_coordinator_update()
 
     def _exit_scene_colour(self) -> tuple[tuple[int, int, int] | None, int | None]:
@@ -221,8 +221,7 @@ class GoveeBleLocalLight(GoveeBleLocalEntity, LightEntity):
         if Capability.RGB not in caps or (
             data.color_temp_kelvin is not None and Capability.COLOR_TEMP in caps
         ):
-            lo, hi = _kelvin_range(self._device)
-            return None, data.color_temp_kelvin or (lo + hi) // 2
+            return None, data.color_temp_kelvin or mid_kelvin(self._device)
         return data.rgb_color or WHITE, None
 
     async def async_turn_on(self, **kwargs: Any) -> None:
@@ -258,7 +257,7 @@ class GoveeBleLocalLight(GoveeBleLocalEntity, LightEntity):
         power = Capability.POWER in self._device.capabilities and (
             plain or data.is_on is not True or (data.optimistic and not self._device.zones)
         )
-        try:
+        async with self._command():
             # Power + brightness + colour go out as ONE batched device operation
             # (one lock, one connection, each frame ack-verified, power first).
             if power or brightness is not None or rgb is not None or kelvin is not None:
@@ -266,20 +265,15 @@ class GoveeBleLocalLight(GoveeBleLocalEntity, LightEntity):
                     self._device.turn_on(power=power, brightness=brightness, rgb=rgb, kelvin=kelvin)
                 )
                 if rgb is not None or kelvin is not None:
-                    self._attr_effect = None
+                    self._optimistic_effect = None
             if effect is not None:
                 await self._run_client_command(self._device.set_scene_by_name(effect))
-                self._attr_effect = effect
-        finally:
-            # Also after a partial failure: the library already applied what landed.
-            self._async_publish_command_state()
+                self._optimistic_effect = effect
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn the whole fixture off."""
-        try:
+        async with self._command():
             await self._run_client_command(self._device.turn_off())
-        finally:
-            self._async_publish_command_state()
 
 
 class GoveeBleLocalSegmentLight(_SubLight):
@@ -301,7 +295,6 @@ class GoveeBleLocalSegmentLight(_SubLight):
         super().__init__(entry, f"segment_{index}")
         self._index = index
         self._attr_translation_placeholders = {"number": str(index + 1)}
-        self._attr_is_on: bool | None = None
         # Last non-black colour: what "turn on" restores after a black-out "off".
         self._last_color: tuple[int, int, int] | None = None
         self._sync_from_readback()
@@ -329,10 +322,15 @@ class GoveeBleLocalSegmentLight(_SubLight):
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Light the segment, optionally with a colour/temperature/brightness."""
-        try:
+        async with self._command():
             if ATTR_COLOR_TEMP_KELVIN in kwargs:
                 kelvin = _clamp_kelvin(self._device, kwargs[ATTR_COLOR_TEMP_KELVIN])
-                _LOGGER.debug("Setting segment %d colour temp to %dK", self._index, kelvin)
+                _LOGGER.debug(
+                    "Setting segment %d of %s colour temp to %dK",
+                    self._index + 1,
+                    self._address,
+                    kelvin,
+                )
                 await self._run_client_command(
                     self._device.set_segment_color_temp([self._index], kelvin)
                 )
@@ -344,7 +342,9 @@ class GoveeBleLocalSegmentLight(_SubLight):
                 # its last real colour (white if it never had one).
                 rgb = self._last_color or WHITE
             if rgb is not None:
-                _LOGGER.debug("Setting segment %d RGB to %s", self._index, rgb)
+                _LOGGER.debug(
+                    "Setting segment %d of %s RGB to %s", self._index + 1, self._address, rgb
+                )
                 await self._run_client_command(self._device.set_segment_rgb([self._index], rgb))
                 self._attr_rgb_color = rgb
                 self._attr_color_mode = ColorMode.RGB
@@ -352,24 +352,25 @@ class GoveeBleLocalSegmentLight(_SubLight):
                     self._last_color = rgb
             if ATTR_BRIGHTNESS in kwargs:
                 pct = brightness_to_pct(kwargs[ATTR_BRIGHTNESS])
-                _LOGGER.debug("Setting segment %d brightness to %d%%", self._index, pct)
+                _LOGGER.debug(
+                    "Setting segment %d of %s brightness to %d%%",
+                    self._index + 1,
+                    self._address,
+                    pct,
+                )
                 await self._run_client_command(
                     self._device.set_segment_brightness([self._index], pct)
                 )
                 self._attr_brightness = kwargs[ATTR_BRIGHTNESS]
             self._attr_is_on = True
-        finally:
-            self._async_publish_command_state()
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Black the segment out (there is no per-segment power command)."""
-        try:
+        async with self._command():
             await self._run_client_command(self._device.set_segment_rgb([self._index], BLACK))
             self._attr_rgb_color = BLACK
             self._attr_color_mode = ColorMode.RGB
             self._attr_is_on = False
-        finally:
-            self._async_publish_command_state()
 
 
 class GoveeBleLocalZoneLight(_SubLight):
@@ -414,10 +415,15 @@ class GoveeBleLocalZoneLight(_SubLight):
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Power the zone on, optionally setting colour/temperature/brightness."""
-        try:
+        async with self._command():
             if ATTR_COLOR_TEMP_KELVIN in kwargs:
                 kelvin = _clamp_kelvin(self._device, kwargs[ATTR_COLOR_TEMP_KELVIN])
-                _LOGGER.debug("Setting zone %s colour temp to %dK", self._zone_name, kelvin)
+                _LOGGER.debug(
+                    "Setting zone %s of %s colour temp to %dK",
+                    self._zone_name,
+                    self._address,
+                    kelvin,
+                )
                 await self._run_client_command(
                     self._device.set_zone_color_temp(self._zone_name, kelvin)
                 )
@@ -425,24 +431,27 @@ class GoveeBleLocalZoneLight(_SubLight):
                 self._attr_color_mode = ColorMode.COLOR_TEMP
             if ATTR_RGB_COLOR in kwargs:
                 rgb = kwargs[ATTR_RGB_COLOR]
-                _LOGGER.debug("Setting zone %s RGB to %s", self._zone_name, rgb)
+                _LOGGER.debug(
+                    "Setting zone %s of %s RGB to %s", self._zone_name, self._address, rgb
+                )
                 await self._run_client_command(self._device.set_zone_rgb(self._zone_name, rgb))
                 self._attr_rgb_color = rgb
                 self._attr_color_mode = ColorMode.RGB
             if ATTR_BRIGHTNESS in kwargs:
                 pct = brightness_to_pct(kwargs[ATTR_BRIGHTNESS])
-                _LOGGER.debug("Setting zone %s brightness to %d%%", self._zone_name, pct)
+                _LOGGER.debug(
+                    "Setting zone %s of %s brightness to %d%%",
+                    self._zone_name,
+                    self._address,
+                    pct,
+                )
                 await self._run_client_command(
                     self._device.set_segment_brightness(list(self._segments), pct)
                 )
                 self._attr_brightness = kwargs[ATTR_BRIGHTNESS]
             await self._run_client_command(self._device.set_zone_power(self._zone_name, True))
-        finally:
-            self._async_publish_command_state()
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Power the zone off."""
-        try:
+        async with self._command():
             await self._run_client_command(self._device.set_zone_power(self._zone_name, False))
-        finally:
-            self._async_publish_command_state()

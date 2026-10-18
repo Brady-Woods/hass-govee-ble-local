@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Generator
 import dataclasses
+import logging
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
@@ -31,6 +31,8 @@ import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.govee_ble_local.const import (
+    DEFAULT_MAX_KELVIN,
+    DEFAULT_MIN_KELVIN,
     DOMAIN,
     UNAVAILABLE_AFTER_FAILURES,
 )
@@ -45,26 +47,32 @@ RED = (255, 0, 0)
 GREEN = (0, 255, 0)
 WHITE = (255, 255, 255)
 
+# Colour-temperature ranges to run the range-dependent tests over: one unlike
+# DEFAULT_MIN/MAX_KELVIN (so the device's own range is told apart from the
+# fallback), and a profile that gives none (so the fallback is what applies).
+KELVIN_RANGES = pytest.mark.parametrize(
+    ("kelvin_range", "lo", "hi"),
+    [((2200, 7000), 2200, 7000), ((None, None), DEFAULT_MIN_KELVIN, DEFAULT_MAX_KELVIN)],
+    ids=["device_range", "fallback_range"],
+)
+
 
 # -- helpers --------------------------------------------------------------------------
 
 
 @pytest.fixture
-async def entry(setup_integration: MockConfigEntry) -> MockConfigEntry:
-    """The loaded entry, with the (background) first poll already finished."""
-    if (task := setup_integration.runtime_data.first_poll) is not None:
-        await task
-    return setup_integration
+def kelvin_range() -> tuple[int | None, int | None] | None:
+    """The (min, max) kelvin to give the device's profile; None keeps the library's."""
+    return None
 
 
 @pytest.fixture
-def entity_registry_enabled_by_default() -> Generator[None]:
-    """Register entities that default to disabled (segment lights) as enabled."""
-    with patch(
-        "homeassistant.helpers.entity.Entity.entity_registry_enabled_default",
-        return_value=True,
-    ):
-        yield
+def mock_device(mock_device: Device, kelvin_range: tuple[int | None, int | None] | None) -> Device:
+    """The shared test device, with its profile's kelvin range replaced on request."""
+    if kelvin_range is not None:
+        lo, hi = kelvin_range
+        mock_device.profile = dataclasses.replace(mock_device.profile, min_kelvin=lo, max_kelvin=hi)
+    return mock_device
 
 
 @pytest.fixture
@@ -135,9 +143,7 @@ async def _setup_custom(
     entry.add_to_hass(hass)
     with patch("custom_components.govee_ble_local.create_device", return_value=device):
         assert await hass.config_entries.async_setup(entry.entry_id)
-        await hass.async_block_till_done()
-    if (task := entry.runtime_data.first_poll) is not None:
-        await task
+        await hass.async_block_till_done(wait_background_tasks=True)
     return entry
 
 
@@ -216,14 +222,20 @@ async def test_h6047_has_ten_segment_lights(hass: HomeAssistant, entry: MockConf
     assert len(lights) == 13
 
 
-async def test_main_light_supported_features(hass: HomeAssistant, entry: MockConfigEntry) -> None:
+@KELVIN_RANGES
+async def test_main_light_supported_features(
+    hass: HomeAssistant, entry: MockConfigEntry, lo: int, hi: int
+) -> None:
     """The main light advertises RGB + colour temp, the device's kelvin range and effects."""
     _seed(entry, is_on=True)
     attrs = hass.states.get(MAIN).attributes
     assert set(attrs["supported_color_modes"]) == {"rgb", "color_temp"}
-    assert (attrs["min_color_temp_kelvin"], attrs["max_color_temp_kelvin"]) == (2700, 6500)
+    assert (attrs["min_color_temp_kelvin"], attrs["max_color_temp_kelvin"]) == (lo, hi)
     assert attrs["effect_list"][0] == "off"
     assert "Aurora" in attrs["effect_list"]
+    # The zone lights advertise the same range.
+    zone = hass.states.get(_zone(hass, "main")).attributes
+    assert (zone["min_color_temp_kelvin"], zone["max_color_temp_kelvin"]) == (lo, hi)
 
 
 # -- 2. main light power logic --------------------------------------------------------
@@ -348,15 +360,19 @@ async def test_colour_temp_state(hass: HomeAssistant, entry: MockConfigEntry) ->
     assert entry.runtime_data.device.state.rgb_color is None
 
 
-@pytest.mark.parametrize(("requested", "expected"), [(9000, 6500), (1000, 2700), (3500, 3500)])
+@KELVIN_RANGES
+@pytest.mark.parametrize("requested", [9000, 1000, 3500])
 async def test_kelvin_is_clamped_to_device_range(
     hass: HomeAssistant,
     entry: MockConfigEntry,
     mock_device: Device,
+    *,
+    lo: int,
+    hi: int,
     requested: int,
-    expected: int,
 ) -> None:
     """Out-of-range kelvin is clamped to the device's range before it is sent."""
+    expected = {9000: hi, 1000: lo, 3500: 3500}[requested]
     _seed(entry, is_on=True)
     await _call(hass, "turn_on", MAIN, color_temp_kelvin=requested)
     assert mock_device.turn_on.await_args.kwargs["kelvin"] == expected
@@ -747,13 +763,15 @@ async def test_effect_off_on_colour_temp_only_fixture(
         capabilities=frozenset(
             {Capability.POWER, Capability.BRIGHTNESS, Capability.COLOR_TEMP, Capability.SCENES}
         ),
+        min_kelvin=2200,
+        max_kelvin=7000,
     )
     entry = await _setup_custom(hass, mock_config_entry, device, mock_bluetooth)
     _seed(entry, is_on=True, optimistic=False)
     assert hass.states.get(MAIN).attributes["supported_color_modes"] == ["color_temp"]
     await _call(hass, "turn_on", MAIN, effect="off")
-    assert device.turn_on.await_args.kwargs["kelvin"] == (2000 + 9000) // 2
-    assert hass.states.get(MAIN).attributes["color_temp_kelvin"] == 5500
+    assert device.turn_on.await_args.kwargs["kelvin"] == (2200 + 7000) // 2
+    assert hass.states.get(MAIN).attributes["color_temp_kelvin"] == 4600
 
 
 @pytest.mark.parametrize("device_sku", ["H6006"])
@@ -918,14 +936,17 @@ async def test_segment_colour_temp_stays_on_after_poll(
     assert state.attributes["brightness"] == 204  # brightness is still adopted
 
 
+@KELVIN_RANGES
 async def test_segment_colour_temp_is_clamped(
-    hass: HomeAssistant, enabled_entry: MockConfigEntry, mock_device: Device
+    hass: HomeAssistant, enabled_entry: MockConfigEntry, mock_device: Device, lo: int, hi: int
 ) -> None:
     """Segment colour temperature is clamped into the device range."""
     seg = _segment(hass, SEG)
+    attrs = hass.states.get(seg).attributes
+    assert (attrs["min_color_temp_kelvin"], attrs["max_color_temp_kelvin"]) == (lo, hi)
     await _call(hass, "turn_on", seg, color_temp_kelvin=9000)
-    mock_device.set_segment_color_temp.assert_awaited_once_with([SEG], 6500)
-    assert hass.states.get(seg).attributes["color_temp_kelvin"] == 6500
+    mock_device.set_segment_color_temp.assert_awaited_once_with([SEG], hi)
+    assert hass.states.get(seg).attributes["color_temp_kelvin"] == hi
 
 
 async def test_segment_colour_after_colour_temp_returns_to_rgb(
@@ -1102,21 +1123,22 @@ async def test_zone_turn_on_with_rgb_and_brightness(
     assert state.attributes["color_mode"] == "rgb"
 
 
+@KELVIN_RANGES
 async def test_zone_turn_on_with_colour_temp(
-    hass: HomeAssistant, enabled_entry: MockConfigEntry, mock_device: Device
+    hass: HomeAssistant, enabled_entry: MockConfigEntry, mock_device: Device, lo: int, hi: int
 ) -> None:
     """Zone colour temperature is clamped, sent for the zone, and reported as color_temp."""
     zone = _zone(hass, "background")
     _seed(enabled_entry, is_on=True, zone_power={0: True, 1: False})
     await _call(hass, "turn_on", zone, color_temp_kelvin=9000)
 
-    mock_device.set_zone_color_temp.assert_awaited_once_with("background", 6500)
+    mock_device.set_zone_color_temp.assert_awaited_once_with("background", hi)
     mock_device.set_zone_power.assert_awaited_once_with("background", True)
     mock_device.set_zone_rgb.assert_not_awaited()
     state = hass.states.get(zone)
     assert state.state == STATE_ON
     assert state.attributes["color_mode"] == "color_temp"
-    assert state.attributes["color_temp_kelvin"] == 6500
+    assert state.attributes["color_temp_kelvin"] == hi
 
 
 async def test_zone_brightness_targets_all_zone_segments(
@@ -1179,6 +1201,36 @@ async def test_zone_readback_adopts_colour_and_brightness(
     assert hass.states.get(main).attributes["brightness"] == 255
     assert hass.states.get(background).attributes["rgb_color"] == (1, 2, 3)
     assert hass.states.get(background).attributes["brightness"] == 102
+
+
+async def test_out_of_range_readback_brightness_is_clamped(
+    hass: HomeAssistant, enabled_entry: MockConfigEntry
+) -> None:
+    """A read-back brightness above 100 % shows as full brightness, never above 255."""
+    _seed(
+        enabled_entry,
+        is_on=True,
+        brightness=150,
+        zone_power={0: True, 1: True},
+        segments=[
+            Segment(index=SEG, rgb=RED, brightness=200),
+            Segment(index=12, rgb=RED, brightness=200),
+        ],
+    )
+    assert hass.states.get(MAIN).attributes["brightness"] == 255
+    assert hass.states.get(_segment(hass, SEG)).attributes["brightness"] == 255
+    assert hass.states.get(_zone(hass, "main")).attributes["brightness"] == 255
+
+
+async def test_sub_light_debug_logs_name_the_device(
+    hass: HomeAssistant, enabled_entry: MockConfigEntry, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Segment/zone command logs carry the device address and the segment's shown number."""
+    caplog.set_level(logging.DEBUG, logger="custom_components.govee_ble_local.light")
+    await _call(hass, "turn_on", _segment(hass, SEG), rgb_color=RED)
+    await _call(hass, "turn_on", _zone(hass, "main"), rgb_color=RED)
+    assert f"Setting segment {SEG + 1} of {ADDRESS} RGB to (255, 0, 0)" in caplog.text
+    assert f"Setting zone main of {ADDRESS} RGB to (255, 0, 0)" in caplog.text
 
 
 async def test_zone_readback_without_matching_segments_or_values(

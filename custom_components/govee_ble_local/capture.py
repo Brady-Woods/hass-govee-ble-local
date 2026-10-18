@@ -38,8 +38,7 @@ from govee_ble_local import (
     Zone,
 )
 
-from .const import DEFAULT_MAX_KELVIN, DEFAULT_MIN_KELVIN
-from .helpers import BLE_ERRORS
+from .helpers import BLE_ERRORS, mid_kelvin
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -145,46 +144,90 @@ class _RingHandler(logging.Handler):
 
 
 class _PassThroughHandler(logging.Handler):
-    """Forward records at or above ``threshold`` to the root handlers.
+    """Forward to the root handlers the records Home Assistant's log would get anyway.
 
-    While capturing, the library logger runs at DEBUG with propagation off; this
-    keeps everything the user would normally see flowing to Home Assistant's log
-    without flooding it with the debug stream of every device.
+    While capturing, the library logger runs at DEBUG with propagation off. A
+    record goes on only if it would have without the capture: at or above the
+    level of its own logger or, if that sets none, of the nearest ancestor below
+    ``govee_ble_local`` that does (so a child the user made chattier keeps its
+    lines in the log); otherwise at or above ``threshold``, the library logger's
+    pre-capture effective level. The debug stream of every device stays out of
+    the log.
     """
 
+    def __init__(self, threshold: int) -> None:
+        super().__init__(logging.NOTSET)
+        self.threshold = threshold
+
+    def _threshold_for(self, name: str) -> int:
+        logger: logging.Logger | None = logging.getLogger(name)
+        while logger is not None and logger.name != _ROOT_LOGGER:
+            if logger.level != logging.NOTSET:
+                return logger.level
+            logger = logger.parent
+        return self.threshold
+
     def emit(self, record: logging.LogRecord) -> None:
-        logging.getLogger().handle(record)
+        if record.levelno >= self._threshold_for(record.name):
+            logging.getLogger().handle(record)
+
+
+def _set_level(logger: logging.Logger, level: int) -> None:
+    """Set ``logger``'s level, also when Home Assistant's logger integration pins it.
+
+    ``HassLogger.setLevel`` ignores any logger the user configured (in YAML, with
+    ``logger.set_level`` or the debug-logging toggle); Home Assistant's own logger
+    helper goes through ``orig_setLevel`` the same way. Used only for a logger
+    already pinned when the capture started: restoring any other this way would
+    undo a pin the user made during the capture.
+    """
+    getattr(logger, "orig_setLevel", logger.setLevel)(level)
 
 
 @contextmanager
-def session_capture(
-    *, maxlen: int = 4000, address: str | None = None
-) -> Iterator[_RingHandler]:
+def session_capture(*, maxlen: int = 4000, address: str | None = None) -> Iterator[_RingHandler]:
     """Temporarily capture the full ``govee_ble_local`` flow + frame stream.
 
     Raises the ``govee_ble_local`` logger to DEBUG (the child ``.frames`` logger
     inherits it, so its ``isEnabledFor`` guard opens and frames propagate up) and
-    attaches a fresh ring buffer. Records the user wouldn't normally see stay out
-    of Home Assistant's log. Level, propagation and handlers are restored on exit
-    - the level only if nobody changed it meanwhile.
+    attaches a fresh ring buffer. A child logger with a level of its own keeps it,
+    so one set above DEBUG is captured only from that level up. Records the user
+    wouldn't normally see stay out of Home Assistant's log. Level, propagation
+    and handlers are restored on exit - the level only if nobody changed it
+    meanwhile, and past Home Assistant's pin only if the logger was pinned
+    before the capture: one the user pins during the capture (say with the
+    debug-logging toggle) keeps that level. A logger already pinned that is
+    re-pinned to DEBUG during the capture still gets its old pin back (telling
+    the two apart would take the logger integration's internal override map).
     """
     logger = logging.getLogger(_ROOT_LOGGER)
     handler = _RingHandler(maxlen, address)
-    passthrough = _PassThroughHandler(logger.getEffectiveLevel())
     previous_level = logger.level
     previous_propagate = logger.propagate
+    # Without propagation beforehand, nothing reached the root handlers to keep.
+    passthrough = _PassThroughHandler(logger.getEffectiveLevel()) if previous_propagate else None
     logger.setLevel(logging.DEBUG)
+    # HassLogger ignored the plain setter: Home Assistant pins this logger.
+    pinned = logger.level != logging.DEBUG
+    if pinned:
+        _set_level(logger, logging.DEBUG)
     logger.propagate = False
     logger.addHandler(handler)
-    logger.addHandler(passthrough)
+    if passthrough is not None:
+        logger.addHandler(passthrough)
     try:
         yield handler
     finally:
         logger.removeHandler(handler)
-        logger.removeHandler(passthrough)
+        if passthrough is not None:
+            logger.removeHandler(passthrough)
         logger.propagate = previous_propagate
         if logger.level == logging.DEBUG:
-            logger.setLevel(previous_level)
+            if pinned:
+                _set_level(logger, previous_level)
+            else:
+                # HassLogger ignores this for a logger pinned during the capture.
+                logger.setLevel(previous_level)
 
 
 def _match(actual: Any, expected: Any) -> bool | None:
@@ -205,16 +248,10 @@ def _zone_colour(state: DeviceState, zone: Zone) -> tuple[int, int, int] | None:
     """Return a representative colour for a zone.
 
     Read from whichever of its segments the device reported (the same lookup
-    `light.py`'s zone light uses).
+    ``light.py``'s zone light uses).
     """
     seg = next((s for s in state.segments if s.index in zone.segments), None)
     return seg.rgb if seg else None
-
-
-def _mid_kelvin(device: Device) -> int:
-    lo = device.min_kelvin or DEFAULT_MIN_KELVIN
-    hi = device.max_kelvin or DEFAULT_MAX_KELVIN
-    return (lo + hi) // 2
 
 
 class _Snapshot(TypedDict):
@@ -233,7 +270,7 @@ class _Snapshot(TypedDict):
 def _snapshot(device: Device) -> _Snapshot:
     """Capture everything the self-test might change, so it can be restored.
 
-    Fields are None where the device has no read-back for them - `_restore`
+    Fields are None where the device has no read-back for them - ``_restore``
     simply skips those (nothing to put back).
     """
     state = device.state
@@ -427,7 +464,7 @@ async def _exercise_fixture(device: Device, steps: _Steps) -> None:
             partial(_state_is, device, "rgb_color", _TEST_RGB),
         )
     if Capability.COLOR_TEMP in caps:
-        kelvin = _mid_kelvin(device)
+        kelvin = mid_kelvin(device)
         await steps.run(
             "color_temp",
             partial(device.set_color_temp, kelvin),
@@ -459,7 +496,7 @@ async def _exercise_segments(device: Device, steps: _Steps) -> None:
     if Capability.COLOR_TEMP in device.capabilities:
         await steps.run(
             "segment_0_color_temp",
-            partial(device.set_segment_color_temp, [0], _mid_kelvin(device)),
+            partial(device.set_segment_color_temp, [0], mid_kelvin(device)),
         )
 
 
@@ -483,7 +520,7 @@ async def _exercise_zones(device: Device, steps: _Steps) -> None:
             if Capability.COLOR_TEMP in device.capabilities:
                 await steps.run(
                     f"zone_color_temp:{zone.name}",
-                    partial(device.set_zone_color_temp, zone.name, _mid_kelvin(device)),
+                    partial(device.set_zone_color_temp, zone.name, mid_kelvin(device)),
                 )
         await steps.run(
             f"zone_power_off:{zone.name}",
@@ -573,20 +610,19 @@ async def _run_self_test(device: Device) -> dict[str, Any]:
         finally:
             if not auth_failed:
                 restore_errors = await _restore(device, snap)
-        if restore_errors:
-            _LOGGER.warning(
-                "%s: self-test could not fully restore the device state: %s",
-                device.address,
-                "; ".join(restore_errors),
-            )
+                # Logged here, as an exception escaping the exercise skips the report.
+                if restore_errors:
+                    _LOGGER.warning(
+                        "%s: self-test could not fully restore the device state: %s",
+                        device.address,
+                        "; ".join(restore_errors),
+                    )
 
     frames = _sanitize_frames(
         [r["message"] for r in capture.buffer if r["logger"] == _FRAMES_LOGGER],
         requires_secret=device.profile.requires_secret,
     )
-    log = [
-        f"{r['level']} {r['message']}" for r in capture.buffer if r["logger"] != _FRAMES_LOGGER
-    ]
+    log = [f"{r['level']} {r['message']}" for r in capture.buffer if r["logger"] != _FRAMES_LOGGER]
     return {
         "ok": all(s["ok"] for s in steps.results),
         "restored": not restore_errors,

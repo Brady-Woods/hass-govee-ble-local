@@ -24,7 +24,7 @@ profile's capabilities:
 | Zone switches | `switch` | one per on/off-only zone |
 | Segment lights | `light` | one per addressable segment, **disabled by default** |
 | Power switch | `switch` | only for a power-only device (smart plug) |
-| Diagnostics | `sensor`/`binary_sensor`/`button` | RSSI, connectivity, failures, poll interval, last seen/connected, connection source, self-test |
+| Diagnostics | `sensor`/`binary_sensor`/`button` | RSSI, connectivity, failures, poll interval, last seen/connected, connection source, self-test; RSSI, poll interval and last seen/connected are **disabled by default** |
 
 ## Architecture
 
@@ -38,16 +38,21 @@ profile's capabilities:
    background**, staggered by `crc32(address) % 30` s — a full connect +
    handshake for every device on every restart is what exhausts connection
    slots.
-4. Register a passive advertisement callback: keeps the library's `BLEDevice`
-   fresh (best proxy path for the next connection) and updates on/off and RSSI
-   from the advertisement. Device state goes to every entity only when it
-   changed; last-seen/RSSI go to the diagnostic entities at most once a minute.
-   Passive updates never reschedule the poll. Loss of the connectable and of
-   the any-scanner history are tracked separately.
+4. Register a passive advertisement callback for any scanner (connectable or
+   not): updates on/off from the advertisement and, from a connectable scanner,
+   keeps the library's `BLEDevice` fresh (best proxy path for the next
+   connection). Device state goes to every entity only when it changed. HA
+   calls it only when an advertisement's content changes, so last-seen/RSSI
+   are read from HA's advertisement history once a minute instead (and at
+   once when the device is heard again after no scanner did). Passive updates
+   never reschedule the poll. Loss of the connectable and of the any-scanner
+   history are tracked separately.
 
 ### Polling (`coordinator.py`)
 - `Device.update()` every `POLL_INTERVAL_SECONDS` (120 s) + jitter; capped
-  exponential backoff on failure (`MAX_POLL_INTERVAL_SECONDS`).
+  exponential backoff on failure (`MAX_POLL_INTERVAL_SECONDS`). The poll
+  interval sensor shows the interval without the jitter, and is unknown while
+  no polls are scheduled (polling turned off, or halted by a rejected key).
 - A device no connectable scanner can see is **not connected to** (the poll
   fails fast instead of spending ~1 min on hopeless retries).
 - At most `MAX_CONCURRENT_POLLS` polls run at once, integration-wide. HA's
@@ -55,9 +60,11 @@ profile's capabilities:
   slot; this only stops our own polling from causing a connect storm.
 - **Availability = reachability**: an entity stays available while the device
   is advertising, regardless of poll failures (commands can still reach it).
-  A device that vanished from every scanner goes unavailable after
-  `UNAVAILABLE_AFTER_FAILURES` failed polls. When it starts advertising
-  again it is polled at once and the backoff is reset.
+  A device that vanished from every connectable scanner goes unavailable
+  after `UNAVAILABLE_AFTER_FAILURES` failed polls, or as soon as it vanishes
+  when no polls are scheduled (polling turned off in the entry's system
+  options, or halted by a rejected key). When it starts advertising again it
+  is polled at once and the backoff is reset.
 - A rejected secret key (`GoveeBleAuthError`) starts the re-auth flow, and
   polling stops until the entry is reloaded with a new key.
 
@@ -68,6 +75,10 @@ profile's capabilities:
   (global switch, per-zone frames on H60A6, one combined frame on H6047).
 - After every command all of the device's entities are refreshed together
   (whole-fixture off also updates the zone lights/switches).
+- A command that lands drops any poll backoff: the link works again, so the
+  next poll comes at the base cadence. This happens once per failure streak,
+  so polls that keep failing while commands land still back off, and never
+  while no polls are scheduled.
 - Library and bleak errors become a translated `HomeAssistantError`.
 
 ## Data updates
@@ -96,13 +107,16 @@ automatically, fetched from your Govee account (credentials used once, not
 stored), or entered manually. **Reconfigure** replaces the key (a blank field
 keeps the stored one; a checkbox removes it) and reloads; **diagnostics** are
 downloadable per device (MACs, serial and secret redacted by key and scrubbed
-from all free text).
+from all free text in either byte order; the entry title is redacted too, and
+so is every hex run of 8+ characters in the stored self-test report and the
+recent warnings, so an identifier split across frame chunks can't leak).
 
 ## Troubleshooting
 
 - Enable `govee_ble_local.frames: debug` to log every TX/RX frame; the
   **Run self-test** button / `capture_session` service exercises every
   capability and returns the captured session.
-- The **Connection source** sensor shows which adapter/proxy last heard the
-  device; a proxy that drops offline shifts all traffic to the remaining
-  scanners.
+- The **Connection source** sensor shows which connectable adapter/proxy Home
+  Assistant currently prefers for reaching the device (unknown while no
+  connectable scanner hears it); a proxy that drops offline shifts all traffic
+  to the remaining scanners.

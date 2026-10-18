@@ -4,11 +4,17 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import patch
+from typing import Any
+from unittest.mock import DEFAULT, patch
 import zlib
 
 from govee_ble_local import Device, GoveeBleConnectionError, GoveeBleNotSupported
-from homeassistant.components.bluetooth import BluetoothChange, BluetoothScanningMode
+from homeassistant.components.bluetooth import (
+    BluetoothChange,
+    BluetoothScanningMode,
+    BluetoothServiceInfoBleak,
+)
+from homeassistant.components.light import DATA_COMPONENT as LIGHT_DATA
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.const import STATE_OFF, STATE_ON, STATE_UNAVAILABLE
 from homeassistant.core import HomeAssistant
@@ -17,9 +23,16 @@ import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.govee_ble_local import capture
-from custom_components.govee_ble_local.const import CONF_SECRET, DOMAIN
+from custom_components.govee_ble_local.const import (
+    CONF_SECRET,
+    DOMAIN,
+    LAST_SEEN_RESOLUTION_SECONDS,
+    MAX_POLL_INTERVAL_SECONDS,
+)
+from custom_components.govee_ble_local.coordinator import GoveeBleLocalCoordinator
 
 from .conftest import (
+    advance,
     advertisement_callback,
     allow_adverts,
     connection,
@@ -30,43 +43,156 @@ from .conftest import (
 from .const import ADDRESS, SECRET_HEX, TITLE
 
 MAIN_LIGHT = "light.test_ceiling"
+SELF_TEST_BUTTON = "button.test_ceiling_run_self_test"
+FIRST_POLL_TASK = f"{DOMAIN}_first_poll_{ADDRESS}"
+
+
+def _first_poll_task() -> asyncio.Task[Any]:
+    """Return the entry's background first-poll task."""
+    [task] = [t for t in asyncio.all_tasks() if t.get_name() == FIRST_POLL_TASK]
+    return task
 
 
 async def test_setup_and_unload(
     hass: HomeAssistant, setup_integration: MockConfigEntry, mock_device: Device
 ) -> None:
-    """Setup loads every platform; unload stops polling then closes the link."""
+    """Setup loads every platform; unload stops polling and closes the link."""
     entry = setup_integration
     assert entry.state is ConfigEntryState.LOADED
     assert hass.states.get(MAIN_LIGHT) is not None
 
-    coordinator = entry.runtime_data.coordinator
-    with patch.object(coordinator, "async_shutdown", wraps=coordinator.async_shutdown) as shutdown:
-        assert await hass.config_entries.async_unload(entry.entry_id)
-        await hass.async_block_till_done()
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
     assert entry.state is ConfigEntryState.NOT_LOADED
-    shutdown.assert_awaited()
     mock_device.stop.assert_awaited_once()
     assert connection(mock_device).closed
 
+    mock_device.update.reset_mock()  # type: ignore[attr-defined]
+    await advance(hass, 2 * MAX_POLL_INTERVAL_SECONDS)
+    mock_device.update.assert_not_awaited()  # type: ignore[attr-defined]
+
 
 async def test_unload_closes_link_after_polling_stops(
-    hass: HomeAssistant, setup_integration: MockConfigEntry, mock_device: Device
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_device: Device,
+    mock_bluetooth: SimpleNamespace,
 ) -> None:
     """The coordinator is shut down BEFORE the device link is closed."""
-    entry = setup_integration
     order: list[str] = []
-    coordinator = entry.runtime_data.coordinator
-    real_shutdown = coordinator.async_shutdown
+    real_shutdown = GoveeBleLocalCoordinator.async_shutdown
 
-    async def _shutdown() -> None:
+    async def _shutdown(self: GoveeBleLocalCoordinator) -> None:
         order.append("shutdown")
-        await real_shutdown()
+        await real_shutdown(self)
 
     mock_device.stop.side_effect = lambda: order.append("stop")  # type: ignore[attr-defined]
-    with patch.object(coordinator, "async_shutdown", _shutdown):
-        assert await hass.config_entries.async_unload(entry.entry_id)
-    assert order[:2] == ["shutdown", "stop"]
+    # Patched before setup: the coordinator registers its shutdown when it is built.
+    with patch.object(GoveeBleLocalCoordinator, "async_shutdown", _shutdown):
+        mock_config_entry.add_to_hass(hass)
+        assert await hass.config_entries.async_setup(mock_config_entry.entry_id)
+        await hass.async_block_till_done(wait_background_tasks=True)
+        assert await hass.config_entries.async_unload(mock_config_entry.entry_id)
+    assert order == ["shutdown", "stop"]
+
+
+async def test_unload_does_not_wait_for_an_inflight_poll(
+    hass: HomeAssistant, setup_integration: MockConfigEntry, mock_device: Device
+) -> None:
+    """A poll still in flight is cancelled on unload instead of stalling the link close.
+
+    The library's close waits for the operation holding the connection; ``stop``
+    models that here by waiting for the poll to end.
+    """
+    poll_ended = asyncio.Event()
+
+    async def _hung_update() -> Any:
+        try:
+            await asyncio.Event().wait()
+        finally:
+            poll_ended.set()
+
+    async def _stop() -> None:
+        await poll_ended.wait()
+
+    mock_device.update.side_effect = _hung_update  # type: ignore[attr-defined]
+    mock_device.stop.side_effect = _stop  # type: ignore[attr-defined]
+    coordinator = setup_integration.runtime_data.coordinator
+    # The way the coordinator runs its interval polls: as an entry background task.
+    poll = setup_integration.async_create_background_task(
+        hass, coordinator.async_refresh(), "interval_poll"
+    )
+    await asyncio.sleep(0)
+    assert not poll.done()
+
+    async with asyncio.timeout(5):
+        assert await hass.config_entries.async_unload(setup_integration.entry_id)
+    assert poll.cancelled()
+    mock_device.stop.assert_awaited_once()  # type: ignore[attr-defined]
+
+
+async def test_unload_waits_for_a_running_self_test(
+    hass: HomeAssistant, setup_integration: MockConfigEntry, mock_device: Device
+) -> None:
+    """Unloading mid self-test lets it finish its restore before the link is closed."""
+    mock_device.state.is_on = True
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _slow_rgb(*_args: Any) -> Any:
+        started.set()
+        await release.wait()
+        return DEFAULT
+
+    mock_device.set_rgb.side_effect = _slow_rgb  # type: ignore[attr-defined]
+    data = setup_integration.runtime_data
+    stopped_with: list[bool] = []
+    mock_device.stop.side_effect = lambda: stopped_with.append(  # type: ignore[attr-defined]
+        data.self_test is not None and data.self_test.done()
+    )
+    press = hass.async_create_task(
+        hass.services.async_call("button", "press", {"entity_id": SELF_TEST_BUTTON}, blocking=True)
+    )
+    await started.wait()
+    unload = hass.async_create_task(hass.config_entries.async_unload(setup_integration.entry_id))
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert not unload.done()
+    mock_device.stop.assert_not_awaited()  # type: ignore[attr-defined]
+
+    release.set()
+    assert await unload
+    await press
+    assert stopped_with == [True]
+    report = data.last_self_test
+    assert report is not None
+    assert (report["ok"], report["restored"]) == (True, True)
+
+
+async def test_unload_wait_for_a_self_test_is_bounded(
+    hass: HomeAssistant, setup_integration: MockConfigEntry, mock_device: Device
+) -> None:
+    """A self-test that doesn't finish in time no longer holds the unload up."""
+    mock_device.state.is_on = True
+    started = asyncio.Event()
+    link_closed = asyncio.Event()
+
+    async def _stuck_rgb(*_args: Any) -> Any:
+        started.set()
+        await link_closed.wait()
+        return DEFAULT
+
+    mock_device.set_rgb.side_effect = _stuck_rgb  # type: ignore[attr-defined]
+    mock_device.stop.side_effect = link_closed.set  # type: ignore[attr-defined]
+    press = hass.async_create_task(
+        hass.services.async_call("button", "press", {"entity_id": SELF_TEST_BUTTON}, blocking=True)
+    )
+    await started.wait()
+    with patch("custom_components.govee_ble_local.SELF_TEST_UNLOAD_TIMEOUT_SECONDS", 0.01):
+        async with asyncio.timeout(5):
+            assert await hass.config_entries.async_unload(setup_integration.entry_id)
+    mock_device.stop.assert_awaited_once()  # type: ignore[attr-defined]
+    await press
 
 
 # The failed unload leaves the entry (and its poll timer) loaded on purpose.
@@ -102,11 +228,13 @@ async def test_setup_publishes_passive_state_before_first_poll(
     assert mock_config_entry.state is ConfigEntryState.LOADED
     assert hass.states.get(MAIN_LIGHT).state != STATE_UNAVAILABLE
     mock_device.update.assert_awaited_once()  # type: ignore[attr-defined]
+    coordinator = mock_config_entry.runtime_data.coordinator
+    assert coordinator.last_connected is None
 
     release.set()
-    await hass.async_block_till_done()
-    coordinator = mock_config_entry.runtime_data.coordinator
-    assert coordinator.consecutive_failures == 0
+    await hass.async_block_till_done(wait_background_tasks=True)
+    mock_device.update.assert_awaited_once()  # type: ignore[attr-defined]
+    assert coordinator.last_update_success
     assert coordinator.last_connected is not None
 
 
@@ -120,7 +248,7 @@ async def test_first_poll_failure_is_backoff_not_setup_failure(
     mock_device.update.side_effect = GoveeBleConnectionError("no slot")  # type: ignore[attr-defined]
     mock_config_entry.add_to_hass(hass)
     assert await hass.config_entries.async_setup(mock_config_entry.entry_id)
-    await hass.async_block_till_done()
+    await hass.async_block_till_done(wait_background_tasks=True)
 
     assert mock_config_entry.state is ConfigEntryState.LOADED
     coordinator = mock_config_entry.runtime_data.coordinator
@@ -139,8 +267,11 @@ async def test_first_poll_is_staggered(
     sleeps: list[float] = []
     real_sleep = asyncio.sleep
 
+    # The patch replaces asyncio.sleep process-wide: record only the first poll's.
     async def _sleep(delay: float) -> None:
-        sleeps.append(delay)
+        task = asyncio.current_task()
+        if task is not None and task.get_name() == FIRST_POLL_TASK:
+            sleeps.append(delay)
         await real_sleep(0)
 
     with (
@@ -149,8 +280,8 @@ async def test_first_poll_is_staggered(
     ):
         mock_config_entry.add_to_hass(hass)
         assert await hass.config_entries.async_setup(mock_config_entry.entry_id)
-        await hass.async_block_till_done()
-    assert sleeps[0] == zlib.crc32(ADDRESS.encode()) % 30
+        await hass.async_block_till_done(wait_background_tasks=True)
+    assert sleeps == [zlib.crc32(ADDRESS.encode()) % 30]
     mock_device.update.assert_awaited_once()  # type: ignore[attr-defined]
 
 
@@ -186,11 +317,19 @@ async def test_setup_sku_from_advertisement(
     assert create.call_args.kwargs == {"secret": None}
 
 
+@pytest.mark.parametrize(
+    "service_info",
+    [None, make_service_info(name="Other"), make_service_info(name="", manufacturer_data={})],
+    ids=["no_advertisement", "foreign_name", "no_name"],
+)
 async def test_setup_retries_when_sku_unknown(
-    hass: HomeAssistant, mock_device: Device, mock_bluetooth: SimpleNamespace
+    hass: HomeAssistant,
+    mock_device: Device,
+    mock_bluetooth: SimpleNamespace,
+    service_info: BluetoothServiceInfoBleak | None,
 ) -> None:
-    """No stored SKU and no advertisement to identify it from: retry later."""
-    mock_bluetooth.last_info.return_value = None
+    """No stored SKU and no advertisement that identifies it: retry later."""
+    mock_bluetooth.last_info.return_value = service_info
     entry = MockConfigEntry(
         domain=DOMAIN, title=TITLE, unique_id=ADDRESS, data={"address": ADDRESS}
     )
@@ -250,22 +389,33 @@ async def test_malformed_stored_secret_starts_reauth(
 
 
 async def test_bluetooth_callbacks_registered_and_released(
-    hass: HomeAssistant, setup_integration: MockConfigEntry, mock_bluetooth: SimpleNamespace
+    hass: HomeAssistant,
+    setup_integration: MockConfigEntry,
+    mock_bluetooth: SimpleNamespace,
+    presence: SimpleNamespace,
 ) -> None:
-    """Passive advertisements and both unavailability histories are tracked, then released."""
+    """Advertisements, presence and both unavailability histories are tracked, then released."""
     register = mock_bluetooth.register
     matcher, mode = register.call_args.args[2], register.call_args.args[3]
-    assert matcher == {"address": ADDRESS}
+    # Any scanner, connectable or not: passive ones report on/off and presence too.
+    assert matcher == {"address": ADDRESS, "connectable": False}
     assert mode is BluetoothScanningMode.PASSIVE
     assert mock_bluetooth.ble_lookup.call_args.kwargs == {"connectable": True}
     connectable_flags = sorted(
         call.kwargs["connectable"] for call in mock_bluetooth.track_unavailable.call_args_list
     )
     assert connectable_flags == [False, True]
+    coordinator = setup_integration.runtime_data.coordinator
+    presence.service_info = make_service_info(rssi=-81)
+    await advance(hass, LAST_SEEN_RESOLUTION_SECONDS)
+    assert coordinator.rssi == -81  # the presence refresh runs on a timer
 
     assert await hass.config_entries.async_unload(setup_integration.entry_id)
     register.return_value.assert_called_once()
     assert mock_bluetooth.track_unavailable.return_value.call_count == 2
+    presence.service_info = make_service_info(rssi=-50)
+    await advance(hass, LAST_SEEN_RESOLUTION_SECONDS)
+    assert coordinator.rssi == -81  # ...which stops with the entry
 
 
 async def test_log_capture_detached_on_unload(
@@ -286,13 +436,16 @@ async def test_passive_advertisement_updates_on_off(
 ) -> None:
     """A real advertisement's on/off byte drives the light without a connection."""
     allow_adverts(mock_device)
+    connection(mock_device).sent.clear()
+    mock_device.update.reset_mock()  # type: ignore[attr-defined]
     callback = advertisement_callback(mock_bluetooth)
     callback(make_service_info(on=True), BluetoothChange.ADVERTISEMENT)
     assert hass.states.get(MAIN_LIGHT).state == STATE_ON
     callback(make_service_info(on=False), BluetoothChange.ADVERTISEMENT)
     assert hass.states.get(MAIN_LIGHT).state == STATE_OFF
-    connection(mock_device).sent.clear()
-    assert not connection(mock_device).sent  # purely passive
+    # Purely passive: no frames sent, and no poll started.
+    assert not connection(mock_device).sent
+    mock_device.update.assert_not_called()  # type: ignore[attr-defined]
 
 
 async def test_passive_advertisement_does_not_reschedule_poll(
@@ -313,18 +466,24 @@ async def test_passive_advertisement_does_not_reschedule_poll(
     assert coordinator.last_update_success is False
 
 
-async def test_advertisement_updates_rssi_and_ble_device(
+async def test_only_connectable_advertisements_refresh_the_ble_device(
     hass: HomeAssistant,
     setup_integration: MockConfigEntry,
     mock_device: Device,
     mock_bluetooth: SimpleNamespace,
 ) -> None:
-    """Each advertisement refreshes RSSI and the BLEDevice used for the next connect."""
-    info = make_service_info(rssi=-71)
-    advertisement_callback(mock_bluetooth)(info, BluetoothChange.ADVERTISEMENT)
-    coordinator = setup_integration.runtime_data.coordinator
-    assert coordinator.rssi == -71
-    assert mock_device._ble_device is info.device
+    """Any scanner's advertisement drives on/off; only a connectable one supplies the BLEDevice."""
+    allow_adverts(mock_device)
+    callback = advertisement_callback(mock_bluetooth)
+    connectable = make_service_info(on=True)
+    callback(connectable, BluetoothChange.ADVERTISEMENT)
+    assert mock_device._ble_device is connectable.device
+    assert hass.states.get(MAIN_LIGHT).state == STATE_ON
+
+    passive = make_service_info(on=False, source="passive-proxy", connectable=False)
+    callback(passive, BluetoothChange.ADVERTISEMENT)
+    assert hass.states.get(MAIN_LIGHT).state == STATE_OFF  # its on/off counts...
+    assert mock_device._ble_device is connectable.device  # ...but it can't be connected through
 
 
 async def test_unavailable_tracking_flips_availability(
@@ -395,11 +554,62 @@ async def test_device_registry_enriched_without_clearing(
     )
     assert (dr.CONNECTION_NETWORK_MAC, "11:22:33:44:55:66") in entry.connections
 
-    # A reload starts from an empty state; the registry keeps what it knew.
-    await hass.config_entries.async_reload(setup_integration.entry_id)
-    await hass.async_block_till_done()
+    # A restart starts from a new, empty device state; the registry keeps what it knew.
+    with patch("custom_components.govee_ble_local.create_device", return_value=make_device()):
+        await hass.config_entries.async_reload(setup_integration.entry_id)
+        await hass.async_block_till_done(wait_background_tasks=True)
+    assert setup_integration.runtime_data.device.state.firmware_version is None
     entry = registry.async_get_device_by_identifier((DOMAIN, ADDRESS), setup_integration.entry_id)
-    assert entry.sw_version == "1.02.03"
+    assert (entry.sw_version, entry.hw_version, entry.serial_number) == (
+        "1.02.03",
+        "3.01.01",
+        "SN123456",
+    )
+
+
+async def test_registry_sync_does_not_keep_the_device_polled(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_device: Device,
+    mock_bluetooth: SimpleNamespace,
+) -> None:
+    """With no entity listening (all disabled) polling stops; the registry is still enriched."""
+
+    async def _update() -> Any:
+        mock_device.state.firmware_version = "1.02.03"
+        mock_device.state.optimistic = False
+        return mock_device.state
+
+    mock_device.update.side_effect = _update  # type: ignore[attr-defined]
+    with patch("custom_components.govee_ble_local.PLATFORMS", []):
+        mock_config_entry.add_to_hass(hass)
+        assert await hass.config_entries.async_setup(mock_config_entry.entry_id)
+        await hass.async_block_till_done(wait_background_tasks=True)
+        device = dr.async_get(hass).async_get_device_by_identifier(
+            (DOMAIN, ADDRESS), mock_config_entry.entry_id
+        )
+        assert device is not None
+        assert device.sw_version == "1.02.03"  # from the first poll
+        mock_device.update.assert_awaited_once()  # type: ignore[attr-defined]
+
+        await advance(hass, MAX_POLL_INTERVAL_SECONDS)
+        mock_device.update.assert_awaited_once()  # type: ignore[attr-defined]
+        assert await hass.config_entries.async_unload(mock_config_entry.entry_id)
+
+
+async def test_entities_only_link_to_the_registry_device(
+    hass: HomeAssistant, setup_integration: MockConfigEntry
+) -> None:
+    """The device record has one writer (the registry sync); entities only link to it."""
+    entity = hass.data[LIGHT_DATA].get_entity(MAIN_LIGHT)
+    assert entity is not None
+    assert entity.device_info == {"identifiers": {(DOMAIN, ADDRESS)}}
+    device = dr.async_get(hass).async_get_device_by_identifier(
+        (DOMAIN, ADDRESS), setup_integration.entry_id
+    )
+    assert device is not None
+    assert (device.name, device.manufacturer, device.model) == (TITLE, "Govee", "H60A6")
+    assert er.async_get(hass).async_get(MAIN_LIGHT).device_id == device.id
 
 
 async def test_legacy_zone_switches_removed(
@@ -458,15 +668,14 @@ async def test_unload_cancels_pending_first_poll(
     mock_device: Device,
     mock_bluetooth: SimpleNamespace,
 ) -> None:
-    """Unloading while the staggered first poll is still waiting cancels it."""
+    """The staggered first poll is an entry task: unloading while it waits cancels it."""
     with patch("custom_components.govee_ble_local.FIRST_POLL_STAGGER_SECONDS", 10_000):
         # Any address hashes to a stagger in [0, 10000); this one is non-zero.
         assert zlib.crc32(ADDRESS.encode()) % 10_000
         mock_config_entry.add_to_hass(hass)
         assert await hass.config_entries.async_setup(mock_config_entry.entry_id)
         await hass.async_block_till_done(wait_background_tasks=False)
-        first_poll = mock_config_entry.runtime_data.first_poll
-        assert first_poll is not None
+        first_poll = _first_poll_task()
         assert not first_poll.done()
         assert await hass.config_entries.async_unload(mock_config_entry.entry_id)
         await hass.async_block_till_done()

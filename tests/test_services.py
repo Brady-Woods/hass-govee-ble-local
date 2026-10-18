@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import DEFAULT, AsyncMock, patch
 
 from govee_ble_local import Device, GoveeBleAuthError
 from homeassistant.config_entries import SOURCE_REAUTH, ConfigEntryState
@@ -85,8 +86,7 @@ async def test_capture_session_by_device_returns_and_stores_report(
 
     response = await _capture_session(hass, {"device_id": _device_id(hass, setup_integration)})
 
-    coordinator = setup_integration.runtime_data.coordinator
-    assert response == {"results": [coordinator.last_self_test]}
+    assert response == {"results": [setup_integration.runtime_data.last_self_test]}
     report = response["results"][0]
     assert report["address"] == ADDRESS
     assert report["sku"] == "H60A6"
@@ -131,8 +131,8 @@ async def test_capture_session_runs_every_targeted_device(
     assert set(reports) == {ADDRESS, PLUG_ADDRESS}
     assert reports[PLUG_ADDRESS]["sku"] == "H5083"
     assert [s["step"] for s in reports[PLUG_ADDRESS]["steps"]] == ["power_on", "power_off"]
-    assert setup_integration.runtime_data.coordinator.last_self_test == reports[ADDRESS]
-    assert plug_entry.runtime_data.coordinator.last_self_test == reports[PLUG_ADDRESS]
+    assert setup_integration.runtime_data.last_self_test == reports[ADDRESS]
+    assert plug_entry.runtime_data.last_self_test == reports[PLUG_ADDRESS]
 
 
 async def test_capture_session_requires_admin(
@@ -150,7 +150,7 @@ async def test_capture_session_requires_admin(
             context=Context(user_id=hass_read_only_user.id),
         )
     mock_device.set_power.assert_not_awaited()
-    assert setup_integration.runtime_data.coordinator.last_self_test is None
+    assert setup_integration.runtime_data.last_self_test is None
 
     response = await _capture_session(
         hass,
@@ -278,7 +278,65 @@ async def test_busy_when_another_self_test_is_running(
     assert result["ok"] is False
     assert result["address"] == ADDRESS
     assert "already running" in result["error"]
-    assert setup_integration.runtime_data.coordinator.last_self_test is None
+    assert setup_integration.runtime_data.last_self_test is None
+
+
+async def test_device_not_seen_reports_an_error_without_running(
+    hass: HomeAssistant,
+    setup_integration: MockConfigEntry,
+    mock_device: Device,
+    presence: SimpleNamespace,
+) -> None:
+    """A device no connectable scanner hears gets an error entry; nothing is sent."""
+    presence.connectable = False
+
+    response = await _capture_session(hass, {"device_id": _device_id(hass, setup_integration)})
+
+    assert response == {
+        "results": [
+            {
+                "ok": False,
+                "address": ADDRESS,
+                "error": "Cannot run the self-test: no Bluetooth scanner that can connect to "
+                # HA drops a translated message's final full stop.
+                "Test Ceiling currently sees it. Make sure it is powered on and in range",
+            }
+        ]
+    }
+    mock_device.set_power.assert_not_awaited()
+    assert setup_integration.runtime_data.last_self_test is None
+
+
+async def test_refused_second_run_keeps_the_running_one_tracked(
+    hass: HomeAssistant, setup_integration: MockConfigEntry, mock_device: Device
+) -> None:
+    """A second request while a self-test runs is busy and doesn't replace the tracked run."""
+    mock_device.state.is_on = True
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _slow_rgb(*_args: Any) -> Any:
+        started.set()
+        await release.wait()
+        return DEFAULT
+
+    mock_device.set_rgb.side_effect = _slow_rgb  # type: ignore[attr-defined]
+    target = {"device_id": _device_id(hass, setup_integration)}
+    first = hass.async_create_task(_capture_session(hass, target))
+    await started.wait()
+    running = setup_integration.runtime_data.self_test
+    assert running is not None
+    assert not running.done()
+
+    [busy] = (await _capture_session(hass, target))["results"]
+    assert "already running" in busy["error"]
+    assert setup_integration.runtime_data.self_test is running
+
+    release.set()
+    [report] = (await first)["results"]
+    assert report["ok"] is True
+    assert running.done()
+    assert setup_integration.runtime_data.last_self_test == report
 
 
 async def test_auth_error_reports_and_starts_reauth(
@@ -297,7 +355,7 @@ async def test_auth_error_reports_and_starts_reauth(
     assert result["address"] == ADDRESS
     assert "rejected its secret key" in result["error"]
     assert "Test Ceiling" in result["error"]
-    assert setup_integration.runtime_data.coordinator.last_self_test is None
+    assert setup_integration.runtime_data.last_self_test is None
     flows = hass.config_entries.flow.async_progress_by_handler(DOMAIN)
     assert [(f["context"]["source"], f["context"]["entry_id"]) for f in flows] == [
         (SOURCE_REAUTH, setup_integration.entry_id)

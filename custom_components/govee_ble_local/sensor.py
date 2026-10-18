@@ -2,11 +2,16 @@
 
 These are read-only diagnostics (no BLE I/O of their own) that read values the
 coordinator already tracks: advertisement RSSI, the cumulative connection-failure
-count, the current (adaptive-backoff) poll interval, last seen / last connected,
-and which Bluetooth source last heard the device. They attach to the same device
-as the light/switch entities. All except RSSI stay available even when the
-device can't be reached (that's the interesting case); RSSI is unavailable while
-no scanner hears the device, so stale values don't pollute statistics.
+count, the current (adaptive-backoff) poll interval (unknown while no polls are
+scheduled), last seen / last connected, and which connectable scanner (adapter
+or proxy) Home Assistant currently prefers for reaching the device (unknown
+while no connectable scanner hears it). They attach to the same device as the
+light/switch entities. All except RSSI stay available even when the device
+can't be reached (that's the interesting case); RSSI is unavailable while no
+scanner hears the device, so stale values don't pollute statistics. RSSI, poll
+interval, last seen and last connected are disabled by default: most users never
+look at them, and RSSI / last seen (every minute) and last connected (every
+poll) would otherwise add recorder rows for every device that often.
 """
 
 from __future__ import annotations
@@ -22,16 +27,12 @@ from homeassistant.components.sensor import (
     SensorEntityDescription,
     SensorStateClass,
 )
-from homeassistant.const import (
-    SIGNAL_STRENGTH_DECIBELS_MILLIWATT,
-    EntityCategory,
-    UnitOfTime,
-)
+from homeassistant.const import SIGNAL_STRENGTH_DECIBELS_MILLIWATT, UnitOfTime
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .coordinator import GoveeBleLocalCoordinator
-from .entity import GoveeBleLocalEntity
+from .entity import GoveeBleLocalDiagnosticEntity
 
 if TYPE_CHECKING:
     from . import GoveeBleLocalConfigEntry
@@ -41,13 +42,15 @@ PARALLEL_UPDATES = 0
 
 
 def _connection_source(coordinator: GoveeBleLocalCoordinator) -> str | None:
-    info = coordinator.last_service_info()
+    info = coordinator.async_last_service_info()
     return info.source if info is not None else None
 
 
 def _poll_interval(coordinator: GoveeBleLocalCoordinator) -> int | None:
-    interval = coordinator.update_interval
-    return int(interval.total_seconds()) if interval is not None else None
+    if not coordinator.polls_scheduled:  # polling disabled, or halted by a rejected secret
+        return None
+    # The interval before jitter: the jittered one is a new random value every poll.
+    return int(coordinator.nominal_interval.total_seconds())
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -61,6 +64,7 @@ class GoveeBleLocalSensorEntityDescription(SensorEntityDescription):
 SENSORS: tuple[GoveeBleLocalSensorEntityDescription, ...] = (
     GoveeBleLocalSensorEntityDescription(
         key="rssi",
+        entity_registry_enabled_default=False,
         device_class=SensorDeviceClass.SIGNAL_STRENGTH,
         state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement=SIGNAL_STRENGTH_DECIBELS_MILLIWATT,
@@ -75,6 +79,7 @@ SENSORS: tuple[GoveeBleLocalSensorEntityDescription, ...] = (
     ),
     GoveeBleLocalSensorEntityDescription(
         key="poll_interval",
+        entity_registry_enabled_default=False,
         translation_key="poll_interval",
         device_class=SensorDeviceClass.DURATION,
         state_class=SensorStateClass.MEASUREMENT,
@@ -83,12 +88,14 @@ SENSORS: tuple[GoveeBleLocalSensorEntityDescription, ...] = (
     ),
     GoveeBleLocalSensorEntityDescription(
         key="last_seen",
+        entity_registry_enabled_default=False,
         translation_key="last_seen",
         device_class=SensorDeviceClass.TIMESTAMP,
         value_fn=lambda coordinator: coordinator.last_seen,
     ),
     GoveeBleLocalSensorEntityDescription(
         key="last_connected",
+        entity_registry_enabled_default=False,
         translation_key="last_connected",
         device_class=SensorDeviceClass.TIMESTAMP,
         value_fn=lambda coordinator: coordinator.last_connected,
@@ -104,16 +111,15 @@ SENSORS: tuple[GoveeBleLocalSensorEntityDescription, ...] = (
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: GoveeBleLocalConfigEntry,
-    async_add_entities: AddEntitiesCallback,
+    async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
     """Set up the per-device diagnostic sensors."""
     async_add_entities(GoveeBleLocalDiagnosticSensor(entry, description) for description in SENSORS)
 
 
-class GoveeBleLocalDiagnosticSensor(GoveeBleLocalEntity, SensorEntity):
+class GoveeBleLocalDiagnosticSensor(GoveeBleLocalDiagnosticEntity, SensorEntity):
     """A diagnostic sensor reading a value the coordinator tracks."""
 
-    _attr_entity_category = EntityCategory.DIAGNOSTIC
     entity_description: GoveeBleLocalSensorEntityDescription
 
     def __init__(
@@ -125,16 +131,9 @@ class GoveeBleLocalDiagnosticSensor(GoveeBleLocalEntity, SensorEntity):
         super().__init__(entry, description.key)
         self.entity_description = description
 
-    async def async_added_to_hass(self) -> None:
-        """Also follow the coordinator's diagnostic-only updates."""
-        await super().async_added_to_hass()
-        self.async_on_remove(
-            self.coordinator.async_add_diagnostic_listener(self.async_write_ha_state)
-        )
-
     @property
     def available(self) -> bool:
-        """Report even when the device is unreachable (that's the interesting case)."""
+        """Report even when the device is unreachable, unless the value says otherwise."""
         return self.entity_description.available_fn(self.coordinator)
 
     @property

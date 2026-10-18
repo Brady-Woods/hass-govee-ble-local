@@ -24,6 +24,7 @@ from homeassistant.util.json import JsonObjectType
 
 from .capture import SelfTestBusyError, async_run_self_test
 from .const import DOMAIN, SERVICE_CAPTURE_SESSION
+from .helpers import async_secret_rejected
 
 if TYPE_CHECKING:
     from . import GoveeBleLocalConfigEntry
@@ -34,28 +35,37 @@ async def async_self_test_entry(
 ) -> dict[str, Any]:
     """Run the self-test against one entry's device and record the report.
 
-    Raises HomeAssistantError (translated) when another self-test is running or
-    the device rejects its secret (which also starts reauth). The entities are
+    Raises HomeAssistantError (translated) when no connectable scanner sees the
+    device, another self-test is running, or the device rejects its secret
+    (which also starts reauth). Once a run has started the entities are
     refreshed afterwards either way: the test drives the device through many
     states and the restore may not have fully succeeded.
     """
     data = entry.runtime_data
+    if not data.coordinator.async_address_present():
+        # Like a skipped poll: every step would only burn connect retries until
+        # it timed out, holding the (integration-wide) self-test lock meanwhile.
+        raise HomeAssistantError(
+            translation_domain=DOMAIN,
+            translation_key="self_test_device_not_found",
+            translation_placeholders={"device_name": entry.title},
+        )
+    task = entry.async_create_task(hass, async_run_self_test(data.device), "self_test")
+    if data.self_test is None or data.self_test.done():
+        # Tracked so an unload waits for the restore. A run already going is
+        # kept: this one is then refused as busy.
+        data.self_test = task
     try:
-        report = await async_run_self_test(data.device)
+        report = await task
     except SelfTestBusyError as err:
         raise HomeAssistantError(
             translation_domain=DOMAIN, translation_key="self_test_busy"
         ) from err
     except GoveeBleAuthError as err:
-        entry.async_start_reauth(hass)
-        raise HomeAssistantError(
-            translation_domain=DOMAIN,
-            translation_key="secret_rejected",
-            translation_placeholders={"device_name": entry.title},
-        ) from err
+        raise async_secret_rejected(hass, entry) from err
     finally:
         data.coordinator.async_publish_device_state()
-    data.coordinator.last_self_test = report
+    data.last_self_test = report
     return report
 
 

@@ -68,9 +68,9 @@ _CLOUD_SCHEMA = vol.Schema(
 )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class _PendingDevice:
-    """The device a secret is being collected for."""
+    """The device being set up, or whose secret is being replaced (reauth)."""
 
     address: str
     sku: str
@@ -106,10 +106,8 @@ class GoveeBleLocalConfigFlow(ConfigFlow, domain=DOMAIN):
 
     def __init__(self) -> None:
         """Initialize the flow."""
-        self._discovery_info: BluetoothServiceInfoBleak | None = None
-        self._sku: str | None = None
         self._pending: _PendingDevice | None = None
-        self._discovered: dict[str, tuple[str, str]] = {}  # address -> (name, sku)
+        self._discovered: dict[str, _PendingDevice] = {}  # keyed by address
         self._read_task: asyncio.Task[str | None] | None = None
         self._device_secret: str | None = None
 
@@ -129,8 +127,9 @@ class GoveeBleLocalConfigFlow(ConfigFlow, domain=DOMAIN):
         sku = _supported_sku(discovery_info)
         if sku is None:
             return self.async_abort(reason="not_supported")
-        self._discovery_info = discovery_info
-        self._sku = sku
+        self._pending = _PendingDevice(
+            address=discovery_info.address, sku=sku, title=discovery_info.name
+        )
         self.context["title_placeholders"] = {"name": discovery_info.name}
         return await self.async_step_bluetooth_confirm()
 
@@ -138,28 +137,22 @@ class GoveeBleLocalConfigFlow(ConfigFlow, domain=DOMAIN):
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Confirm setup of a Bluetooth-discovered device."""
-        if self._discovery_info is None or self._sku is None:
-            raise AbortFlow("unknown")
+        pending = self._require_pending()
         if user_input is not None:
-            return await self._finish(
-                self._discovery_info.address, self._sku, self._discovery_info.name
-            )
+            return await self._finish(pending)
         self._set_confirm_only()
         return self.async_show_form(
             step_id="bluetooth_confirm",
-            description_placeholders={"name": self._discovery_info.name},
+            description_placeholders={"name": pending.title},
         )
 
-    async def async_step_user(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Handle manual setup by picking from supported discovered devices."""
         if user_input is not None:
             address = user_input[CONF_ADDRESS]
             await self.async_set_unique_id(address, raise_on_progress=False)
             self._abort_if_unique_id_configured()
-            name, sku = self._discovered[address]
-            return await self._finish(address, sku, name)
+            return await self._finish(self._discovered[address])
 
         current = self._async_current_ids()
         self._discovered = {}
@@ -167,7 +160,9 @@ class GoveeBleLocalConfigFlow(ConfigFlow, domain=DOMAIN):
             if info.address in current or not info.name:
                 continue
             if (info_sku := _supported_sku(info)) is not None:
-                self._discovered[info.address] = (info.name, info_sku)
+                self._discovered[info.address] = _PendingDevice(
+                    address=info.address, sku=info_sku, title=info.name
+                )
         if not self._discovered:
             return self.async_abort(reason="no_devices_found")
 
@@ -176,20 +171,25 @@ class GoveeBleLocalConfigFlow(ConfigFlow, domain=DOMAIN):
             data_schema=vol.Schema(
                 {
                     vol.Required(CONF_ADDRESS): vol.In(
-                        {address: name for address, (name, _sku) in self._discovered.items()}
+                        {address: device.title for address, device in self._discovered.items()}
                     )
                 }
             ),
         )
 
-    async def _finish(self, address: str, sku: str, title: str) -> ConfigFlowResult:
+    async def _finish(self, device: _PendingDevice) -> ConfigFlowResult:
         """Create the entry, or first collect the secret key if the device needs one."""
-        if _requires_secret(sku):
-            self._pending = _PendingDevice(address, sku, title)
+        if _requires_secret(device.sku):
+            self._pending = device
             return await self.async_step_secret()
-        return self.async_create_entry(
-            title=title, data={CONF_ADDRESS: address, CONF_SKU: sku}
-        )
+        return self._create_entry(device)
+
+    def _create_entry(self, device: _PendingDevice, secret: str | None = None) -> ConfigFlowResult:
+        """Create the entry for ``device``, with its secret key if it has one."""
+        data = {CONF_ADDRESS: device.address, CONF_SKU: device.sku}
+        if secret:
+            data[CONF_SECRET] = secret
+        return self.async_create_entry(title=device.title, data=data)
 
     # -- secret -------------------------------------------------------------
 
@@ -218,21 +218,15 @@ class GoveeBleLocalConfigFlow(ConfigFlow, domain=DOMAIN):
             await device.stop()
         return raw.hex() if raw else None
 
-    def _create_secret_entry(self, secret: str | None) -> ConfigFlowResult:
-        pending = self._require_pending()
+    def _save_secret(self, secret: str) -> ConfigFlowResult:
+        """Finish with a secret: replace the rejected key on reauth, else create the entry."""
         if self.source == SOURCE_REAUTH:
-            entry = self._get_reauth_entry()
             return self.async_update_reload_and_abort(
-                entry, data={**entry.data, CONF_SECRET: secret}
+                self._get_reauth_entry(), data_updates={CONF_SECRET: secret}
             )
-        data = {CONF_ADDRESS: pending.address, CONF_SKU: pending.sku}
-        if secret:
-            data[CONF_SECRET] = secret
-        return self.async_create_entry(title=pending.title, data=data)
+        return self._create_entry(self._require_pending(), secret)
 
-    async def async_step_secret(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    async def async_step_secret(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Try to read the secret directly from the device (shown as progress)."""
         pending = self._require_pending()
         if self._read_task is None:
@@ -257,7 +251,9 @@ class GoveeBleLocalConfigFlow(ConfigFlow, domain=DOMAIN):
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Create the entry with the secret read off the (unbound) device."""
-        return self._create_secret_entry(self._device_secret)
+        if self._device_secret is None:
+            raise AbortFlow("unknown")
+        return self._save_secret(self._device_secret)
 
     async def async_step_secret_menu(
         self, user_input: dict[str, Any] | None = None
@@ -282,11 +278,13 @@ class GoveeBleLocalConfigFlow(ConfigFlow, domain=DOMAIN):
             except ValueError:
                 errors[CONF_SECRET] = "invalid_secret"
             else:
-                if secret is None and self.source == SOURCE_REAUTH:
-                    # A blank key can't fix a rejected one.
-                    errors[CONF_SECRET] = "invalid_secret"
-                else:
-                    return self._create_secret_entry(secret)
+                if secret is not None:
+                    return self._save_secret(secret)
+                if self.source != SOURCE_REAUTH:
+                    # First setup: blank means "add the key later" (reconfigure).
+                    return self._create_entry(pending)
+                # A blank key can't fix a rejected one.
+                errors[CONF_SECRET] = "invalid_secret"
         return self.async_show_form(
             step_id="secret_manual",
             data_schema=_SECRET_SCHEMA,
@@ -312,7 +310,7 @@ class GoveeBleLocalConfigFlow(ConfigFlow, domain=DOMAIN):
             except _CloudSecretError as err:
                 errors["base"] = err.reason
             else:
-                return self._create_secret_entry(secret)
+                return self._save_secret(secret)
         return self.async_show_form(
             step_id="secret_cloud",
             data_schema=_CLOUD_SCHEMA,
@@ -344,9 +342,7 @@ class GoveeBleLocalConfigFlow(ConfigFlow, domain=DOMAIN):
 
     # -- reauth -------------------------------------------------------------
 
-    async def async_step_reauth(
-        self, entry_data: Mapping[str, Any]
-    ) -> ConfigFlowResult:
+    async def async_step_reauth(self, entry_data: Mapping[str, Any]) -> ConfigFlowResult:
         """Collect a new secret after the device rejected the stored one.
 
         The key is wrong, or the device was re-paired to an account (which
@@ -354,7 +350,7 @@ class GoveeBleLocalConfigFlow(ConfigFlow, domain=DOMAIN):
         """
         entry = self._get_reauth_entry()
         self._pending = _PendingDevice(
-            entry_data[CONF_ADDRESS], entry_data.get(CONF_SKU, ""), entry.title
+            address=entry_data[CONF_ADDRESS], sku=entry_data.get(CONF_SKU, ""), title=entry.title
         )
         return await self.async_step_reauth_confirm()
 

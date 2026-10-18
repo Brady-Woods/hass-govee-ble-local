@@ -11,6 +11,7 @@ does; tests simulate a read-back by mutating ``device.state`` first.
 from __future__ import annotations
 
 from collections.abc import Generator
+from datetime import timedelta
 import time
 from types import SimpleNamespace
 from typing import Any
@@ -21,8 +22,12 @@ from govee_ble_local import Device, create_device
 from govee_ble_local.models import Encryption
 from homeassistant.components.bluetooth import BluetoothServiceInfoBleak
 from homeassistant.core import HomeAssistant
+from homeassistant.util import dt as dt_util
 import pytest
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from pytest_homeassistant_custom_component.common import (
+    MockConfigEntry,
+    async_fire_time_changed,
+)
 
 from custom_components.govee_ble_local import capture as capture_module
 from custom_components.govee_ble_local.const import CONF_SKU, DOMAIN
@@ -145,8 +150,12 @@ def make_service_info(
     rssi: int = -60,
     source: str = "local",
     connectable: bool = True,
+    seen_at: float | None = None,
 ) -> BluetoothServiceInfoBleak:
-    """Build a real BluetoothServiceInfoBleak for a Govee advertisement."""
+    """Build a real BluetoothServiceInfoBleak for a Govee advertisement.
+
+    ``seen_at`` is its (monotonic) receive time; by default, now.
+    """
     return BluetoothServiceInfoBleak(
         name=name,
         address=address,
@@ -158,7 +167,7 @@ def make_service_info(
         device=BLEDevice(address=address, name=name, details={}),
         advertisement=None,
         connectable=connectable,
-        time=time.monotonic(),
+        time=time.monotonic() if seen_at is None else seen_at,
         tx_power=None,
     )
 
@@ -187,23 +196,49 @@ def no_first_poll_stagger() -> Generator[None]:
 def presence() -> Generator[SimpleNamespace]:
     """Control what the Bluetooth stack reports for the device.
 
-    ``connectable``/``any`` drive ``coordinator.address_present`` and
-    ``service_info`` drives ``coordinator.last_service_info``. The isolated test
-    environment has no real scanners, which would otherwise read as "vanished".
+    ``connectable``/``any`` drive ``coordinator.async_address_present`` and
+    ``service_info`` drives ``coordinator.async_last_service_info`` (both
+    histories). The isolated test environment has no real scanners, which would
+    otherwise read as "vanished".
     """
     state = SimpleNamespace(connectable=True, any=True, service_info=make_service_info())
 
     def _present(self: GoveeBleLocalCoordinator, *, connectable: bool = True) -> bool:
         return bool(state.connectable if connectable else state.any)
 
-    def _last(self: GoveeBleLocalCoordinator) -> BluetoothServiceInfoBleak | None:
+    def _last(
+        self: GoveeBleLocalCoordinator, *, connectable: bool = True
+    ) -> BluetoothServiceInfoBleak | None:
         return state.service_info  # type: ignore[no-any-return]
 
     with (
-        patch.object(GoveeBleLocalCoordinator, "address_present", _present),
-        patch.object(GoveeBleLocalCoordinator, "last_service_info", _last),
+        patch.object(GoveeBleLocalCoordinator, "async_address_present", _present),
+        patch.object(GoveeBleLocalCoordinator, "async_last_service_info", _last),
     ):
         yield state
+
+
+@pytest.fixture
+def monotonic(presence: SimpleNamespace, freezer: Any) -> Generator[SimpleNamespace]:
+    """Control the Bluetooth stack's monotonic clock, which ages advertisements.
+
+    ``now`` starts at the default advertisement's receive time (just heard).
+    Freezes wall time too, and patches only once frozen: freezegun would
+    otherwise swap its own clock back in when it starts.
+    """
+    clock = SimpleNamespace(now=presence.service_info.time)
+    with patch("homeassistant.components.bluetooth.MONOTONIC_TIME", lambda: clock.now):
+        yield clock
+
+
+@pytest.fixture
+def entity_registry_enabled_by_default() -> Generator[None]:
+    """Register entities that default to disabled (segment lights, noisy diagnostics) as enabled."""
+    with patch(
+        "homeassistant.helpers.entity.Entity.entity_registry_enabled_default",
+        return_value=True,
+    ):
+        yield
 
 
 @pytest.fixture
@@ -255,6 +290,12 @@ def mock_bluetooth(presence: SimpleNamespace) -> Generator[SimpleNamespace]:
         )
 
 
+async def advance(hass: HomeAssistant, seconds: float) -> None:
+    """Fire the timers due ``seconds`` from now and let the resulting work finish."""
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=seconds))
+    await hass.async_block_till_done()
+
+
 def advertisement_callback(bluetooth_mocks: SimpleNamespace) -> Any:
     """Return the advertisement callback the integration registered."""
     return bluetooth_mocks.register.call_args.args[1]
@@ -275,8 +316,16 @@ async def setup_integration(
     mock_device: Device,
     mock_bluetooth: SimpleNamespace,
 ) -> MockConfigEntry:
-    """Set the integration up and return the loaded config entry."""
+    """Set the integration up and return the loaded config entry, first poll done."""
     mock_config_entry.add_to_hass(hass)
     assert await hass.config_entries.async_setup(mock_config_entry.entry_id)
-    await hass.async_block_till_done()
+    # The first poll is an entry background task, which a plain
+    # async_block_till_done() doesn't wait for.
+    await hass.async_block_till_done(wait_background_tasks=True)
     return mock_config_entry
+
+
+@pytest.fixture
+def entry(setup_integration: MockConfigEntry) -> MockConfigEntry:
+    """Short alias for ``setup_integration`` (the loaded entry, first poll done)."""
+    return setup_integration

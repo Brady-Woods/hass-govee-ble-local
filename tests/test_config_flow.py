@@ -19,6 +19,7 @@ from homeassistant.config_entries import (
 from homeassistant.const import CONF_ADDRESS, CONF_EMAIL, CONF_PASSWORD
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import AbortFlow, FlowResult, FlowResultType
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
@@ -70,13 +71,19 @@ def plug_device() -> Generator[Device]:
 
 
 @pytest.fixture
-def cloud_account() -> Generator[MagicMock]:
-    """Patch GoveeCloudAccount; tests set ``get_devices`` results."""
+def cloud_account_cls() -> Generator[MagicMock]:
+    """Patch the GoveeCloudAccount class (its instance is ``cloud_account``)."""
     with patch(f"{FLOW}.GoveeCloudAccount") as cls:
-        account = cls.return_value
-        account.get_devices = AsyncMock(return_value=[])
-        account.close = AsyncMock()
-        yield account
+        cls.return_value.get_devices = AsyncMock(return_value=[])
+        cls.return_value.close = AsyncMock()
+        yield cls
+
+
+@pytest.fixture
+def cloud_account(cloud_account_cls: MagicMock) -> MagicMock:
+    """The patched cloud account; tests set ``get_devices`` results."""
+    account: MagicMock = cloud_account_cls.return_value
+    return account
 
 
 def plug_entry(**extra: Any) -> MockConfigEntry:
@@ -172,6 +179,15 @@ async def choose(hass: HomeAssistant, result: FlowResult, option: str) -> FlowRe
     )
 
 
+async def assert_set_up_once(hass: HomeAssistant, setup_entry: AsyncMock) -> None:
+    """The created entry was set up, or the updated one reloaded, exactly once.
+
+    For reauth/reconfigure the reload is what makes the new secret take effect.
+    """
+    await hass.async_block_till_done()
+    assert len(setup_entry.mock_calls) == 1
+
+
 # -- Bluetooth discovery ------------------------------------------------------
 
 
@@ -191,6 +207,7 @@ async def test_bluetooth_discovery_creates_entry(
     assert result["title"] == LOCAL_NAME
     assert result["data"] == {CONF_ADDRESS: ADDRESS, CONF_SKU: "H60A6"}
     assert result["result"].unique_id == ADDRESS
+    await assert_set_up_once(hass, setup_entry)
 
 
 async def test_bluetooth_discovery_already_configured(hass: HomeAssistant) -> None:
@@ -255,6 +272,10 @@ async def test_user_flow_lists_only_supported_new_devices(
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["title"] == LOCAL_NAME
     assert result["data"] == {CONF_ADDRESS: ADDRESS, CONF_SKU: "H60A6"}
+    # Setting the domain up also sets up the other (already configured) entry.
+    await hass.async_block_till_done()
+    set_up = [call.args[1].entry_id for call in setup_entry.call_args_list]
+    assert set_up.count(result["result"].entry_id) == 1
 
 
 async def test_user_flow_no_devices(hass: HomeAssistant) -> None:
@@ -310,6 +331,7 @@ async def test_user_flow_secret_device_goes_to_secret_step(
         CONF_SKU: "H5083",
         CONF_SECRET: SECRET_HEX,
     }
+    await assert_set_up_once(hass, setup_entry)
 
 
 # -- secret read off the device ----------------------------------------------
@@ -335,6 +357,7 @@ async def test_secret_read_shows_progress_then_creates_entry(
     }
     plug_device.read_secret.assert_awaited_once()
     plug_device.stop.assert_awaited_once()
+    await assert_set_up_once(hass, setup_entry)
 
 
 async def test_secret_progress_not_done_keeps_showing_progress(
@@ -351,6 +374,27 @@ async def test_secret_progress_not_done_keeps_showing_progress(
 
     result = await finish_read(hass, again, gate)
     assert result["type"] is FlowResultType.CREATE_ENTRY
+
+
+async def test_closing_the_flow_mid_read_stops_the_link(
+    hass: HomeAssistant, plug_device: Device, setup_entry: AsyncMock
+) -> None:
+    """Closing the dialog while the secret is being read still stops the device link.
+
+    HA cancels the read task; without the stop the plug's connection slot would
+    stay held until the library's idle disconnect.
+    """
+    gate_read(plug_device, returns=bytes.fromhex(SECRET_HEX))
+    result = await start_plug_discovery(hass)
+    assert result["type"] is FlowResultType.SHOW_PROGRESS
+
+    hass.config_entries.flow.async_abort(result["flow_id"])
+    await hass.async_block_till_done()
+    plug_device.read_secret.assert_awaited_once()
+    plug_device.stop.assert_awaited_once()
+    assert [f for f in hass.config_entries.flow.async_progress() if f["handler"] == DOMAIN] == []
+    assert hass.config_entries.async_entries(DOMAIN) == []
+    setup_entry.assert_not_called()
 
 
 async def test_secret_read_passes_advertisement_to_create_device(
@@ -468,6 +512,7 @@ async def test_manual_secret_normalized(
         CONF_SKU: "H5083",
         CONF_SECRET: SECRET_HEX,
     }
+    await assert_set_up_once(hass, setup_entry)
 
 
 async def test_manual_secret_blank_allowed_on_setup(
@@ -481,6 +526,7 @@ async def test_manual_secret_blank_allowed_on_setup(
     assert result["title"] == PLUG_NAME
     assert result["data"] == {CONF_ADDRESS: PLUG_ADDRESS, CONF_SKU: "H5083"}
     assert CONF_SECRET not in result["data"]
+    await assert_set_up_once(hass, setup_entry)
 
 
 # -- cloud secret -------------------------------------------------------------
@@ -499,7 +545,11 @@ CREDENTIALS = {CONF_EMAIL: "user@example.com", CONF_PASSWORD: "hunter2"}
 
 
 async def test_cloud_secret_picks_matching_device(
-    hass: HomeAssistant, plug_device: Device, cloud_account: MagicMock, setup_entry: AsyncMock
+    hass: HomeAssistant,
+    plug_device: Device,
+    cloud_account_cls: MagicMock,
+    cloud_account: MagicMock,
+    setup_entry: AsyncMock,
 ) -> None:
     """The secret of the device matching the address wins, not the first with a secret."""
     cloud_account.get_devices.return_value = [
@@ -517,7 +567,14 @@ async def test_cloud_secret_picks_matching_device(
     }
     assert CONF_EMAIL not in result["data"]
     assert CONF_PASSWORD not in result["data"]
+    # Logged in with the entered credentials, on Home Assistant's shared session.
+    cloud_account_cls.assert_called_once_with(
+        CREDENTIALS[CONF_EMAIL],
+        CREDENTIALS[CONF_PASSWORD],
+        session=async_get_clientsession(hass),
+    )
     cloud_account.close.assert_awaited_once()
+    await assert_set_up_once(hass, setup_entry)
 
 
 async def test_cloud_secret_matches_lowercase_ble_mac(
@@ -662,6 +719,7 @@ async def test_reauth_manual_updates_secret(hass: HomeAssistant, setup_entry: As
     assert result["type"] is FlowResultType.ABORT
     assert result["reason"] == "reauth_successful"
     assert entry.data == {CONF_ADDRESS: PLUG_ADDRESS, CONF_SKU: "H5083", CONF_SECRET: SECRET_HEX}
+    await assert_set_up_once(hass, setup_entry)
 
 
 async def test_reauth_manual_blank_rejected(hass: HomeAssistant) -> None:
@@ -704,6 +762,7 @@ async def test_reauth_cloud_updates_secret(
     assert result["reason"] == "reauth_successful"
     assert entry.data == {CONF_ADDRESS: PLUG_ADDRESS, CONF_SKU: "H5083", CONF_SECRET: SECRET_HEX}
     cloud_account.close.assert_awaited_once()
+    await assert_set_up_once(hass, setup_entry)
 
 
 async def test_reauth_via_flow_init(hass: HomeAssistant) -> None:
@@ -739,6 +798,7 @@ async def test_reconfigure_device_without_secret(
     assert result["type"] is FlowResultType.ABORT
     assert result["reason"] == "reconfigure_successful"
     assert entry.data == {CONF_ADDRESS: ADDRESS, CONF_SKU: "H60A6"}
+    await assert_set_up_once(hass, setup_entry)
 
 
 async def test_reconfigure_entry_without_sku(hass: HomeAssistant, setup_entry: AsyncMock) -> None:
@@ -750,6 +810,7 @@ async def test_reconfigure_entry_without_sku(hass: HomeAssistant, setup_entry: A
     result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
     assert result["reason"] == "reconfigure_successful"
     assert entry.data == {CONF_ADDRESS: ADDRESS}
+    await assert_set_up_once(hass, setup_entry)
 
 
 async def test_reconfigure_secret_form_fields(hass: HomeAssistant) -> None:
@@ -773,6 +834,7 @@ async def test_reconfigure_blank_keeps_secret(
     assert result["type"] is FlowResultType.ABORT
     assert result["reason"] == "reconfigure_successful"
     assert entry.data[CONF_SECRET] == SECRET_HEX
+    await assert_set_up_once(hass, setup_entry)
 
 
 async def test_reconfigure_replaces_secret(hass: HomeAssistant, setup_entry: AsyncMock) -> None:
@@ -785,6 +847,7 @@ async def test_reconfigure_replaces_secret(hass: HomeAssistant, setup_entry: Asy
     )
     assert result["reason"] == "reconfigure_successful"
     assert entry.data == {CONF_ADDRESS: PLUG_ADDRESS, CONF_SKU: "H5083", CONF_SECRET: SECRET_HEX}
+    await assert_set_up_once(hass, setup_entry)
 
 
 async def test_reconfigure_sets_secret_when_missing(
@@ -799,6 +862,7 @@ async def test_reconfigure_sets_secret_when_missing(
     )
     assert result["reason"] == "reconfigure_successful"
     assert entry.data[CONF_SECRET] == SECRET_HEX
+    await assert_set_up_once(hass, setup_entry)
 
 
 async def test_reconfigure_clear_secret(hass: HomeAssistant, setup_entry: AsyncMock) -> None:
@@ -811,6 +875,7 @@ async def test_reconfigure_clear_secret(hass: HomeAssistant, setup_entry: AsyncM
     )
     assert result["reason"] == "reconfigure_successful"
     assert entry.data == {CONF_ADDRESS: PLUG_ADDRESS, CONF_SKU: "H5083"}
+    await assert_set_up_once(hass, setup_entry)
 
 
 async def test_reconfigure_new_secret_wins_over_clear(
@@ -825,6 +890,7 @@ async def test_reconfigure_new_secret_wins_over_clear(
     )
     assert result["reason"] == "reconfigure_successful"
     assert entry.data[CONF_SECRET] == SECRET_HEX
+    await assert_set_up_once(hass, setup_entry)
 
 
 async def test_reconfigure_invalid_secret(hass: HomeAssistant) -> None:

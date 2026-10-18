@@ -58,15 +58,23 @@ FIRST_POLL_STAGGER_SECONDS = 30
 # advertising stays available.
 UNAVAILABLE_AFTER_FAILURES = 3
 
-# Publish the "last seen" / RSSI diagnostics at most this often (advertisements
-# arrive several times a second; one recorder row per advertisement is bloat).
+# Refresh the "last seen" / RSSI diagnostics from HA's advertisement history this
+# often (advertisements arrive several times a second; one recorder row per
+# advertisement is bloat).
 LAST_SEEN_RESOLUTION_SECONDS = 60
 
-# Upper bound for one entity command (connect + handshake + frames). Commands
-# for a device run one at a time; without a deadline, a burst of commands to a
-# present-but-unconnectable device would queue and replay long after the user
-# gave up.
+# Upper bound for each library call an entity command makes (connect + handshake
+# + frames, and any wait for the library's per-device connection lock), so a
+# call to a present-but-unconnectable device fails instead of hanging. It bounds
+# each call, not a whole service call (a zone light's turn_on can make up to
+# four), and not the time a command waits in Home Assistant's PARALLEL_UPDATES
+# queue before it starts.
 COMMAND_TIMEOUT_SECONDS = 60
+
+# How long unloading an entry waits for a running self-test to finish (and put
+# the device back the way it found it) before the BLE link is closed under it.
+# Bounded so a self-test stuck on a bad link can't stall a reload indefinitely.
+SELF_TEST_UNLOAD_TIMEOUT_SECONDS = 60
 
 # Maps a library zone name (Device.zones[i].name) to an entity translation
 # key. Zones with any other name use the raw zone name as the entity name.

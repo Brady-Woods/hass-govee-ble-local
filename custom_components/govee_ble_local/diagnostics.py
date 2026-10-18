@@ -6,7 +6,7 @@ from dataclasses import asdict
 import re
 from typing import TYPE_CHECKING, Any
 
-from homeassistant.components.diagnostics import async_redact_data
+from homeassistant.components.diagnostics import REDACTED, async_redact_data
 from homeassistant.const import CONF_ADDRESS
 from homeassistant.core import HomeAssistant
 
@@ -16,21 +16,26 @@ if TYPE_CHECKING:
     from . import GoveeBleLocalConfigEntry
 
 # Identifiers of a specific physical unit (and the account-lock key) stay out of
-# shared diagnostics dumps.
-TO_REDACT = {CONF_ADDRESS, "ble_mac", "wifi_mac", "serial_number", CONF_SECRET}
-_REDACTED = "**REDACTED**"
+# shared diagnostics dumps. The title is the advertised name by default, which
+# ends in the last two bytes of the MAC.
+TO_REDACT = {CONF_ADDRESS, "ble_mac", "wifi_mac", "serial_number", CONF_SECRET, "title"}
 _SEPARATORS = re.compile(r"[:\-]")
+_HEX = re.compile(r"[0-9A-Fa-f]+")
 # Shorter values (e.g. a serial like "1") would over-redact unrelated text.
 _MIN_IDENTIFIER_LEN = 6
-_MAC_HEX_LEN = 12
+# Captured library text (frame lines, log lines, warnings) carries frame payloads
+# as hex. A multi-chunk reply splits a MAC or serial across lines, where no
+# by-value pattern can find it, so every hex run this long goes. The raw frames
+# stay available to admins in the capture_session response.
+_HEX_RUN = re.compile(r"[0-9A-Fa-f]{8,}")
 
 
 def _identifier_pattern(values: list[str]) -> re.Pattern[str] | None:
     """Match each identifier in free text, case-insensitively.
 
-    A MAC-like value matches with ``:``/``-``/no separators and also as the
-    contiguous hex of its bytes in either order (device-info replies embed the
-    address bytes reversed, and frame hex is lower-case).
+    A hex value (a MAC, a serial, the secret) matches with ``:``/``-``/no
+    separators between its bytes, in either byte order (device-info replies
+    embed identifiers reversed, and frame hex is lower-case).
     """
     alternatives: set[str] = set()
     for value in values:
@@ -39,11 +44,10 @@ def _identifier_pattern(values: list[str]) -> re.Pattern[str] | None:
             continue
         alternatives.add(re.escape(value))
         alternatives.add(re.escape(compact))
-        if len(compact) == _MAC_HEX_LEN and re.fullmatch(r"[0-9A-Fa-f]+", compact):
-            octets = [compact[i : i + 2] for i in range(0, _MAC_HEX_LEN, 2)]
-            alternatives.add(":".join(octets))
-            alternatives.add("-".join(octets))
-            alternatives.add("".join(reversed(octets)))
+        if len(compact) % 2 == 0 and _HEX.fullmatch(compact):
+            octets = [compact[i : i + 2] for i in range(0, len(compact), 2)]
+            for ordered in (octets, octets[::-1]):
+                alternatives.update(separator.join(ordered) for separator in ("", ":", "-"))
     if not alternatives:
         return None
     # Longest first so a full form wins over a substring form.
@@ -51,11 +55,11 @@ def _identifier_pattern(values: list[str]) -> re.Pattern[str] | None:
 
 
 def _scrub(value: Any, pattern: re.Pattern[str] | None) -> Any:
-    """Return ``value`` with every string (recursively) scrubbed of identifiers."""
+    """Return ``value`` with every match of ``pattern`` in its strings (recursively) redacted."""
     if pattern is None:
         return value
     if isinstance(value, str):
-        return pattern.sub(_REDACTED, value)
+        return pattern.sub(REDACTED, value)
     if isinstance(value, dict):
         return {key: _scrub(item, pattern) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
@@ -73,7 +77,9 @@ async def async_get_config_entry_diagnostics(
     state = coordinator.data
 
     # Key-based redaction can't reach identifiers embedded in log lines, frame
-    # hex or error messages, so every string is also scrubbed by value.
+    # hex or error messages, so every string is also scrubbed by value. Hex runs
+    # in captured text go first: an identifier match inside a run would leave
+    # its neighbours' fragments behind.
     identifiers = [
         value
         for value in (
@@ -101,8 +107,8 @@ async def async_get_config_entry_diagnostics(
             "scene_count": len(device.scene_names),
         },
         "state": asdict(state),
-        "recent_warnings": data.log_capture.records(),
-        "last_self_test": coordinator.last_self_test,
+        "recent_warnings": _scrub(data.log_capture.records(), _HEX_RUN),
+        "last_self_test": _scrub(data.last_self_test, _HEX_RUN),
     }
     scrubbed: dict[str, Any] = _scrub(
         async_redact_data(diagnostics, TO_REDACT), _identifier_pattern(identifiers)

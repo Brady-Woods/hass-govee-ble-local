@@ -51,6 +51,12 @@ def test_pct_to_brightness(pct: int, brightness: int) -> None:
     assert pct_to_brightness(pct) == brightness
 
 
+@pytest.mark.parametrize(("pct", "brightness"), [(101, 255), (150, 255), (255, 255), (-5, 0)])
+def test_pct_to_brightness_clamps_out_of_range_readback(pct: int, brightness: int) -> None:
+    """A read-back percent outside 0..100 can't become a brightness outside 0..255."""
+    assert pct_to_brightness(pct) == brightness
+
+
 @pytest.mark.parametrize(("brightness", "pct"), [(255, 100), (128, 50), (127, 50)])
 def test_brightness_to_pct(brightness: int, pct: int) -> None:
     """HA brightness maps onto a device percent."""
@@ -83,10 +89,14 @@ def test_parse_secret_blank(raw: str) -> None:
         "A1:B2:C3:D4:E5:F6:07:18",
         "a1 b2 c3 d4 e5 f6 07 18",
         f"  {SECRET_HEX.upper()}  ",
+        "A1-B2-C3-D4-E5-F6-07-18",
+        "a1b2c3d4\te5f60718",
+        "a1b2\nc3d4\r\ne5f6\x0b0718",
     ],
+    ids=["plain", "upper", "colons", "spaces", "padded", "dashes", "tab", "line_breaks"],
 )
 def test_parse_secret_normalizes(raw: str) -> None:
-    """Case, colons, spaces and surrounding whitespace are normalized away."""
+    """Case, separators and whitespace anywhere are normalized away (not stored)."""
     assert parse_secret(raw) == SECRET_HEX
 
 

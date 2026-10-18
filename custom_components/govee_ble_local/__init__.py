@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from datetime import timedelta
 import logging
+from typing import Any
 import zlib
 
 from govee_ble_local import Capability, Device, GoveeBleNotSupported, create_device
@@ -23,12 +25,21 @@ from homeassistant.helpers import (
     device_registry as dr,
     entity_registry as er,
 )
+from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.typing import UNDEFINED, ConfigType
 
 from .capture import LogCapture
-from .const import CONF_SECRET, CONF_SKU, DOMAIN, FIRST_POLL_STAGGER_SECONDS, MANUFACTURER
+from .const import (
+    CONF_SECRET,
+    CONF_SKU,
+    DOMAIN,
+    FIRST_POLL_STAGGER_SECONDS,
+    LAST_SEEN_RESOLUTION_SECONDS,
+    MANUFACTURER,
+    SELF_TEST_UNLOAD_TIMEOUT_SECONDS,
+)
 from .coordinator import GoveeBleLocalCoordinator
-from .helpers import clean_mac, clean_text, parse_secret
+from .helpers import clean_mac, clean_text, is_colour_zone, parse_secret
 from .services import async_register_services
 
 _LOGGER = logging.getLogger(__name__)
@@ -50,7 +61,10 @@ class GoveeBleLocalRuntimeData:
     device: Device
     coordinator: GoveeBleLocalCoordinator
     log_capture: LogCapture
-    first_poll: asyncio.Task[None] | None = field(default=None, repr=False)
+    # The running (or last) self-test, so an unload can let it restore the device.
+    self_test: asyncio.Task[dict[str, Any]] | None = field(default=None, repr=False)
+    # Most recent self-test report (button / capture_session service), for diagnostics.
+    last_self_test: dict[str, Any] | None = field(default=None, repr=False)
 
 
 type GoveeBleLocalConfigEntry = ConfigEntry[GoveeBleLocalRuntimeData]
@@ -124,13 +138,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: GoveeBleLocalConfigEntry
             translation_key="model_not_supported",
             translation_placeholders={"sku": sku},
         ) from err
+    # Close the link whenever the entry goes away (a failed setup included).
+    # HA runs on-unload jobs last in, first out, so registering this before the
+    # coordinator exists means polling is shut down first. HA cancels only entry
+    # background tasks - the scheduled, first and return polls - which frees the
+    # connection for the close. An entity command, a manual update_entity
+    # refresh or an overrunning self-test is not cancelled, and the close waits
+    # for it: HA stops waiting after 10 s, logs that the task "did not complete
+    # in time" and finishes the unload while the close completes in the
+    # background.
+    entry.async_on_unload(device.stop)
 
     # Warm the (blocking, cached) scene-catalog read off the event loop so the
     # light platform's effect_list access doesn't do file IO in the loop.
     if Capability.SCENES in device.capabilities:
         await hass.async_add_executor_job(lambda: device.scene_names)
 
-    _remove_legacy_zone_entities(hass, address, device)
+    _async_remove_legacy_zone_entities(hass, address, device)
 
     # Always-on WARNING+ capture so unrecognised frames / rejections surface in the
     # downloadable diagnostics without the user having to enable debug logging.
@@ -147,7 +171,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: GoveeBleLocalConfigEntry
     # full connect+handshake for every device on every restart - that startup
     # storm is what exhausts connection slots. The first real poll runs in the
     # background, staggered per device; a failure there is handled by the
-    # coordinator's backoff, not ConfigEntryNotReady.
+    # coordinator's backoff, not ConfigEntryNotReady. HA cancels it (like every
+    # entry background task) on unload.
     coordinator.async_set_updated_data(device.state)
     stagger = zlib.crc32(address.encode()) % FIRST_POLL_STAGGER_SECONDS
 
@@ -156,7 +181,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: GoveeBleLocalConfigEntry
         await asyncio.sleep(stagger)
         await coordinator.async_refresh()
 
-    entry.runtime_data.first_poll = entry.async_create_background_task(
+    entry.async_create_background_task(
         hass, _staggered_first_poll(), name=f"{DOMAIN}_first_poll_{address}"
     )
 
@@ -191,7 +216,7 @@ def _async_track_device_registry(hass: HomeAssistant, entry: GoveeBleLocalConfig
             clean_text(state.serial_number),
         )
         if info == last_info:
-            return  # fires on every coordinator update; skip the no-op case
+            return  # fires on every push to the entities; skip the no-op case
         last_info = info
         ble_mac, wifi_mac, hw_version, sw_version, serial = info
         connections = {(dr.CONNECTION_BLUETOOTH, address)}
@@ -214,12 +239,15 @@ def _async_track_device_registry(hass: HomeAssistant, entry: GoveeBleLocalConfig
         )
 
     _sync()
-    entry.async_on_unload(entry.runtime_data.coordinator.async_add_listener(_sync))
+    # A state listener, not a coordinator listener: HA polls while the coordinator
+    # has listeners, and this one would keep a device polled with every entity
+    # disabled.
+    entry.async_on_unload(entry.runtime_data.coordinator.async_add_state_listener(_sync))
 
 
 @callback
 def _async_track_bluetooth(hass: HomeAssistant, entry: GoveeBleLocalConfigEntry) -> None:
-    """Wire the passive advertisement and unavailability callbacks to the coordinator."""
+    """Wire the passive advertisement, presence and unavailability tracking to the coordinator."""
     address: str = entry.data[CONF_ADDRESS]
     coordinator = entry.runtime_data.coordinator
 
@@ -234,8 +262,21 @@ def _async_track_bluetooth(hass: HomeAssistant, entry: GoveeBleLocalConfigEntry)
         bluetooth.async_register_callback(
             hass,
             _async_update_ble,
-            bluetooth.BluetoothCallbackMatcher(address=address),
+            # Any scanner: a passive one reports on/off and presence just as well.
+            bluetooth.BluetoothCallbackMatcher(address=address, connectable=False),
             bluetooth.BluetoothScanningMode.PASSIVE,
+        )
+    )
+    # That callback only fires when an advertisement's content changes, so last
+    # seen / RSSI are read from HA's advertisement history: once now (aged by
+    # the history, not stamped with startup time), then on a timer.
+    coordinator.async_refresh_presence()
+    entry.async_on_unload(
+        async_track_time_interval(
+            hass,
+            coordinator.async_refresh_presence,
+            timedelta(seconds=LAST_SEEN_RESOLUTION_SECONDS),
+            name=f"{DOMAIN}_presence_{address}",
         )
     )
 
@@ -259,7 +300,7 @@ def _async_track_bluetooth(hass: HomeAssistant, entry: GoveeBleLocalConfigEntry)
 
 
 @callback
-def _remove_legacy_zone_entities(hass: HomeAssistant, address: str, device: Device) -> None:
+def _async_remove_legacy_zone_entities(hass: HomeAssistant, address: str, device: Device) -> None:
     """Remove orphaned zone-switch entities left by earlier entity schemes.
 
     1. Pre-v0.11 zone switches were keyed by integer index ({address}_zone_0 /
@@ -272,7 +313,7 @@ def _remove_legacy_zone_entities(hass: HomeAssistant, address: str, device: Devi
     registry = er.async_get(hass)
     stale_unique_ids = [f"{address}_zone_{i}" for i in ("0", "1")]
     stale_unique_ids += [
-        f"{address}_zone_{zone.name}" for zone in device.zones if zone.segments
+        f"{address}_zone_{zone.name}" for zone in device.zones if is_colour_zone(zone)
     ]
     for unique_id in stale_unique_ids:
         entity_id = registry.async_get_entity_id(Platform.SWITCH, DOMAIN, unique_id)
@@ -282,21 +323,22 @@ def _remove_legacy_zone_entities(hass: HomeAssistant, address: str, device: Devi
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: GoveeBleLocalConfigEntry) -> bool:
-    """Unload a config entry: platforms, then polling, then the BLE link.
+    """Unload a config entry: platforms, then let a running self-test finish.
 
-    Polling is stopped BEFORE the link is closed: HA only runs the entry's
-    on-unload callbacks (which also shut the coordinator down) after this
-    returns, and a poll firing while ``stop()`` waits for the connection lock
-    would otherwise fail against the closing link.
+    The self-test gets up to SELF_TEST_UNLOAD_TIMEOUT_SECONDS so its restore can
+    land before the link closes. Polling and the link itself are torn down by
+    the on-unload jobs HA runs after this returns: the coordinator's shutdown
+    first, then ``device.stop()`` (see async_setup_entry). HA waits at most 10 s
+    for those jobs: a command or manual refresh still holding the link (HA
+    cancels only background polls) can make the close finish after the unload,
+    or a reload, has completed.
     """
     _LOGGER.debug("Unloading entry for %s", entry.data[CONF_ADDRESS])
     # The capture_session service is registered in async_setup (integration-wide),
     # so it is intentionally left in place across entry unloads.
-    if not (unload_ok := await hass.config_entries.async_unload_platforms(entry, PLATFORMS)):
+    if not await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
         return False
-    data = entry.runtime_data
-    await data.coordinator.async_shutdown()
-    if data.first_poll is not None and not data.first_poll.done():
-        data.first_poll.cancel()
-    await data.device.stop()
-    return unload_ok
+    if (self_test := entry.runtime_data.self_test) is not None:
+        # Closing the link mid-test would leave the device in a test state.
+        await asyncio.wait({self_test}, timeout=SELF_TEST_UNLOAD_TIMEOUT_SECONDS)
+    return True

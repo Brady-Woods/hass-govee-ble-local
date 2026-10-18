@@ -11,6 +11,7 @@ from pathlib import Path
 
 from packaging.requirements import Requirement
 from packaging.version import Version
+import pytest
 
 MANIFEST = (
     Path(__file__).resolve().parent.parent
@@ -32,8 +33,14 @@ def test_only_requirement_is_the_library() -> None:
     )
 
 
-def test_library_requirement_is_a_semver_range() -> None:
-    req = Requirement(_requirements()[0])
+def _assert_semver_range(requirement: str) -> None:
+    req = Requirement(requirement)
+    assert not req.extras, (
+        f"{req}: an extra installs more packages into Home Assistant's environment "
+        "(CLAUDE.md rules 1 and 4)"
+    )
+    # A dict keyed by operator would hide a second bound (`>=1.2.1,<1.5,<2`).
+    assert len(req.specifier) == 2, f"{req}: needs exactly one '>=' and one '<'"
     specs = {s.operator: Version(s.version) for s in req.specifier}
     assert sorted(specs) == ["<", ">="], (
         f"{req}: must be '>=<floor>,<<next major>', never an exact pin (CLAUDE.md rule 1)"
@@ -45,3 +52,25 @@ def test_library_requirement_is_a_semver_range() -> None:
     )
     assert not req.marker
     assert not req.url
+
+
+def test_library_requirement_is_a_semver_range() -> None:
+    _assert_semver_range(_requirements()[0])
+
+
+@pytest.mark.parametrize(
+    "requirement",
+    [
+        "govee-ble-local==1.2.1",
+        "govee-ble-local>=1.2.1",
+        "govee-ble-local>=1.2.1,<3",
+        "govee-ble-local>=1.2.1,<1.5,<2",
+        "govee-ble-local>=1.2.1,<2,<1.5",
+        "govee-ble-local>=1.0,>=1.2.1,<2",
+        "govee-ble-local[test]>=1.2.1,<2",
+        'govee-ble-local>=1.2.1,<2; python_version >= "3.13"',
+    ],
+)
+def test_policy_rejects_off_policy_requirements(requirement: str) -> None:
+    with pytest.raises(AssertionError):
+        _assert_semver_range(requirement)

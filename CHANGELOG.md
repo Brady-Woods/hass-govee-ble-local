@@ -7,7 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Last seen and RSSI froze** for a device that keeps advertising the same thing (a light left in
+  one state): Home Assistant only calls the advertisement callback when an advertisement changes,
+  so these diagnostics now come from Home Assistant's advertisement history every minute. After a
+  restart, last seen reflects when the device was actually heard instead of the startup time.
+- **Entities stayed available forever** when polling had stopped (polling disabled in the entry's
+  system options, or halted by a rejected secret) and the device then left range. They now go
+  unavailable as soon as no connectable scanner sees the device.
+- Advertisements from passive (non-connectable) Bluetooth scanners now update on/off and presence
+  too; only connectable ones are used for connecting.
+- After a run of failed polls, a command that reaches the device brings polling back to the normal
+  cadence (once per failure streak) instead of waiting out a backoff of up to 30 minutes.
+- **Self-test:** fails straight away with a clear error when no connectable scanner sees the device,
+  instead of timing out step by step while blocking every other device's self-test. Reloading or
+  unloading the entry while a self-test runs now waits (up to 60 s) for the test to restore the
+  device before the connection is closed.
+- **Self-test frame capture was silently empty** when `govee_ble_local` had a level set through
+  Home Assistant's logger (`logger:` in YAML, `logger.set_level`, or the "Enable debug logging"
+  toggle once used). A child logger you made chattier keeps its debug output during a capture,
+  and restore failures are now logged even when the test ends with an unexpected error.
+- **Diagnostics could expose the Wi-Fi MAC and serial number** through the self-test frame hex
+  (reversed byte order, or an identifier split across two frames). Hex runs in the stored self-test
+  report and recent warnings are now redacted, and so is the entry title (the advertised name ends
+  in MAC bytes). Raw frames stay available through the admin-only `capture_session` action.
+- A device that reports a brightness above 100 % no longer publishes a brightness outside 0-255.
+- A pasted secret with an embedded tab, newline or `-` separators is cleaned up instead of being
+  stored as typed.
+- Fewer needless state writes: the poll-interval sensor shows the nominal interval (it changed to a
+  new random value on every poll), and a device dropping out of the scanner history no longer
+  pushes to every entity twice.
+- With every entity of a device disabled, the device-registry sync no longer keeps the device
+  polled.
+
 ### Changed
+- The RSSI, last seen, last connected and poll interval diagnostic sensors are disabled by default
+  for newly added devices (existing ones keep their setting).
+- Poll errors and the rejected-secret error are translated.
+- Internal clean-up with no behaviour change: entity/platform ownership rules, the command
+  publish pattern, the secret-rejected handling and the colour-temperature range each live in one
+  place; config-entry setup closes the BLE link through an on-unload job; entities link to the
+  device record instead of re-declaring it; platforms use `AddConfigEntryEntitiesCallback`; the
+  config flow keeps the pending device in one shape; formatting follows `ruff format`.
+- Tests: assertions that couldn't fail now discriminate, and new tests cover the presence timer,
+  availability without polling, diagnostics redaction, the logger integration, flow cancellation,
+  reauth/reconfigure reloads and the manifest requirement shape.
+- `docs/library-review.md` lists the problems whose fix depends on the `govee-ble-local` library
+  (self-test restore and read-back, the segment/zone light state model, connection-slot use and
+  more), to be decided after the library refactor.
 - Tests and type checks run against Home Assistant 2026.10 (`homeassistant==2026.10.0`,
   `pytest-homeassistant-custom-component==0.13.371`), and CI uses `actions/checkout` v7 and
   `actions/setup-python` v7 (Node 24).

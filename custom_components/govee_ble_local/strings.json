@@ -140,6 +140,9 @@
     "self_test_busy": {
       "message": "A self-test is already running; try again when it has finished."
     },
+    "self_test_device_not_found": {
+      "message": "Cannot run the self-test: no Bluetooth scanner that can connect to {device_name} currently sees it. Make sure it is powered on and in range."
+    },
     "no_matching_device": {
       "message": "No Govee BLE Local device matched the service target."
     },
@@ -154,6 +157,12 @@
     },
     "secret_malformed": {
       "message": "The stored secret key for {device_name} is malformed; enter it again via the re-authentication prompt."
+    },
+    "poll_skipped_absent": {
+      "message": "{address} is not advertising; poll skipped."
+    },
+    "poll_failed": {
+      "message": "Could not poll {address}: {error}"
     }
   }
 }

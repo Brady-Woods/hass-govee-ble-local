@@ -96,7 +96,7 @@ Per device (depending on its capabilities):
 | `light` | Zone light(s) | One per colour-controllable zone (RGB + kelvin); on/off-only zones become switches |
 | `light` | Segment light(s) | One per addressable segment (RGB + kelvin); **disabled by default** |
 | `switch` | Power / zone switch | Smart plugs, and on/off-only zones |
-| `sensor` | Signal strength, poll interval, connection failures, **last seen**, **last connected**, **connection source** | Diagnostic |
+| `sensor` | Signal strength, poll interval, connection failures, **last seen**, **last connected**, **connection source** | Diagnostic; signal strength, poll interval, last seen and last connected are **disabled by default** |
 | `binary_sensor` | Connectivity | Advertisement presence (reachable), not connect-poll success |
 | `button` | Run self-test | Runs the full-capability self-test and stores the capture |
 
@@ -110,7 +110,8 @@ gradual flag) and restores all of it when the test finishes — also when the te
 each report says whether the restore fully succeeded (`restored`, `restore_errors`). Only one
 self-test runs at a time. A device that can't be tested contributes an `{ok: false, error}`
 entry. For secret-gated plugs the raw `wire=` bytes are left out of the captured frames. The same
-capture is stored for the config-entry diagnostics download (with identifiers scrubbed).
+capture is stored for the config-entry diagnostics download, with identifiers scrubbed and its hex
+payloads redacted (only the service response carries the raw frames).
 
 ## Architecture
 
