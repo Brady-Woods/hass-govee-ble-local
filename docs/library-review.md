@@ -40,6 +40,57 @@ For each item:
 into a finding have no severity and are marked *unrated*. "Confirmed by N verifiers" counts the
 verifier votes recorded for the finding.
 
+## Re-check at library 4f2c073 (2026-10-17)
+
+Every item below was re-checked against the refactored library, `fix/review-findings` @ `4f2c073`
+(Kaitai spec refactor merged, public API unchanged, not yet released; the wheel reports 1.3.0). Each
+"fixed" or "changed" verdict was confirmed by a second, independent check. Totals: 28 still open,
+3 fixed (none released yet), 2 changed by the refactor, 2 not library-dependent, 1 needs
+hardware.
+
+"Next step" says who moves first. *Integration (floor)*: the integration can make the change now
+with APIs that exist at the 1.2.1 floor (guard anything newer with `getattr`). *Library*: it waits
+for a library change. Item details further down still describe the 1.2.1 / `c823fc5` state.
+
+| # | Status at 4f2c073 | What changed | Next step |
+|---|---|---|---|
+| 1.1 | still open | Unchanged. An H60A6 on pact (1, 1) no longer gets 0xA5 groups, so its snapshot has no segments; out-of-range segment indices now raise `GoveeBleInvalidValue` | Integration (floor): per-segment snapshot/restore, filtered to `segment_count` |
+| 1.2 | still open | Setters still never power on; the H60A6 wake result is only a spec note | Integration (floor): power on first, then colour, power last |
+| 1.3 | changed by the refactor | From 1.3.0 a segment RGB that is exactly a Kelvin tint goes out as a CCT frame, so the H60A6 repaint keeps CT mode; the floor still repaints RGB | Integration (floor): keep the skip-RGB-after-CCT guard for 1.2.1 |
+| 1.4 | still open | Unchanged | Integration (floor): restore by scene name |
+| 1.5 | still open | Unchanged; H6047 now has the gradual flag too | Integration (floor): guard on the snapshot |
+| 1.6 | still open | Unchanged (plug power rules changed around it) | Integration (floor): skip relay power-on when the start state is unknown |
+| 2.1 | still open | Unchanged: `update()` can still succeed silently after a failed read | Integration (floor) for the raised-error part; Library for a public read outcome |
+| 2.2 | still open | New handshake exception classes, but link-down vs per-command failure is still indistinguishable | Library: link-down marker and a no-ack split |
+| 2.3 | changed by the refactor | On H60A6 the extra read is now a single 0xAC query | Integration (floor): decide whether to skip it |
+| 3.1 | not library-dependent | Only message text changed | Integration: typed report |
+| 3.2 | still open | Field names unchanged | Integration: typed accessors |
+| 3.3 | not library-dependent | Unchanged | Integration: stable `reason` code |
+| 4.1 | still open | Unchanged | Integration (floor): fixture-off gate plus power-on |
+| 4.2 | still open | No `Segment.kelvin`; per-bar Kelvin is still H6047-only | Integration (floor) stopgap; Library for `Segment.kelvin` |
+| 4.3 | still open | Unchanged | Integration (floor): remember the Kelvin across off |
+| 4.4 | still open | Unchanged | Library: fold whole-device writes into `state.segments` |
+| 4.5 | still open | An off advertisement now fills `zone_power`, so the restart case is gone; zone-on still doesn't set `is_on` | Library: set `is_on` on zone-on |
+| 4.6 | fixed (unreleased) | An off advertisement marks every zone off | None; add the newest-leg test once released |
+| 4.7 | still open | Reachable differently now (see 4.5) | Integration: add the test |
+| 4.8 | still open | Unchanged since 1.3.0 | Integration (floor): index filter with 1.1 |
+| 5.1 | still open | Setters moved onto a shared commit helper; cost unchanged | Integration (floor): skip the known-on zone power write |
+| 5.2 | needs hardware | Nothing settles it | Hardware check on H60A6 and H6047 (section 10) |
+| 5.3 | still open | No batched zone/segment write | Library: batched API |
+| 6.1 | still open | Polls still hold the link 8 s; `idle_disconnect` works at both ends | Integration (floor): short `idle_disconnect` |
+| 6.2 | still open | No public non-terminal disconnect | Library: `Device.disconnect()` |
+| 6.3 | still open | `close()` still waits up to 45 s behind an in-flight operation | Library: cancel-aware close |
+| 6.4 | still open | `stop()` unchanged | Integration (floor): HA-stop listener |
+| 7.1 | still open | The builder raises `GoveeBleNotSupported` itself; no capability flag | Integration (floor): cached fallback; Library for a flag |
+| 7.2 | still open | Unchanged; 15 segments now enforced | Integration: add the test |
+| 7.3 | still open | `segment_count` stays 16 on H6641; still undecided | Integration (floor) via `getattr`; Library decision |
+| 8.1 | still open | Parser hardening only | Integration: realistic fixtures |
+| 8.2 | still open | Documentation only | Integration (optional): `dev.ble_mac or ""` |
+| 8.3 | fixed (unreleased) | `GoveeCloudAuthError` exists | Integration (floor): guarded import |
+| 9.1 | fixed (unreleased) | Index no longer rebuilt per call | None |
+| 9.2 | still open | Whole-device read-back is clamped; segment read-back isn't | None (the integration already clamps) |
+| 9.3 | still open | The parse debug log still prints secret-carrying frames unmasked | Library: mask them |
+
 ## Summary
 
 | # | Id | Area | Severity | Needs | Status in dev |
