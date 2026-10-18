@@ -45,6 +45,22 @@ MAX_POLL_INTERVAL_SECONDS = 1800
 # only keeps our own background polling from launching a connect storm.
 MAX_CONCURRENT_POLLS = 2
 
+# How long the library keeps a link open after an operation when no write is
+# keeping it warm (create_device's idle_disconnect; the library default is
+# 8 s). A poll gives its MAX_CONCURRENT_POLLS place back when update()
+# returns, but its link, and the adapter or proxy connection slot it holds,
+# stays open this long after: at 8 s the startup stagger left about three idle
+# links behind the two active polls, all of an ESPHome proxy's default three
+# slots. A short delay can't split calls that belong together: the library
+# cancels the timer as each operation starts and re-arms it as it ends, and
+# back-to-back calls (the reads of one update(), a zone light's 2-4 calls,
+# the self-test's steps) start the next one well within 1 s. A write still
+# keeps its link warm for 30 s (the library waits for the longer of the two),
+# so only the tail after a read gets shorter; the cost is that a command 1-8 s
+# after a poll opens a new link instead of reusing the poll's. It must be
+# above 0: 0 or less never drops an idle link.
+POLL_IDLE_DISCONNECT_SECONDS = 1.0
+
 # Random jitter (seconds) added to the poll interval (base and backoff) so
 # devices don't drift into lockstep over uptime. The crc32 stagger in
 # __init__.py only spreads the very first poll.

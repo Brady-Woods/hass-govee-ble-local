@@ -40,6 +40,7 @@ from custom_components.govee_ble_local.const import (
     DOMAIN,
     LAST_SEEN_RESOLUTION_SECONDS,
     MAX_POLL_INTERVAL_SECONDS,
+    POLL_IDLE_DISCONNECT_SECONDS,
 )
 from custom_components.govee_ble_local.coordinator import GoveeBleLocalCoordinator
 
@@ -477,7 +478,11 @@ async def test_setup_not_ready_when_device_not_seen(
 async def test_setup_sku_from_advertisement(
     hass: HomeAssistant, mock_device: Device, mock_bluetooth: SimpleNamespace
 ) -> None:
-    """An entry without a stored SKU identifies it from the advertisement."""
+    """An entry without a stored SKU identifies it from the advertisement.
+
+    Also pins the rest of the ``create_device`` call: no secret, and the short
+    idle-link delay (POLL_IDLE_DISCONNECT_SECONDS instead of the library's 8 s).
+    """
     entry = MockConfigEntry(
         domain=DOMAIN, title=TITLE, unique_id=ADDRESS, data={"address": ADDRESS}
     )
@@ -490,7 +495,12 @@ async def test_setup_sku_from_advertisement(
     assert sku == "H60A6"
     assert ble_device is mock_bluetooth.ble_lookup.return_value
     assert advertisement is mock_bluetooth.last_info.return_value.advertisement
-    assert create.call_args.kwargs == {"secret": None}
+    assert create.call_args.kwargs == {
+        "secret": None,
+        "idle_disconnect": POLL_IDLE_DISCONNECT_SECONDS,
+    }
+    # A finished poll's link is dropped soon: 0 or less would never drop it.
+    assert POLL_IDLE_DISCONNECT_SECONDS > 0
 
 
 @pytest.mark.parametrize(

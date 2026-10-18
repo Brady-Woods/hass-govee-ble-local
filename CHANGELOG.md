@@ -61,6 +61,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to 30 s to finish and restore the device first (an unload gives it 60 s); one that takes longer
   is cut off and leaves the device in its test state, with the restore failure logged. Closing a
   connection still in use doesn't hold up the shutdown for more than 5 s.
+- **A finished poll holds its Bluetooth connection slot for 1 s instead of 8 s.** The poll limit
+  counted running polls, not open connections, so during the startup stagger the idle connections
+  left behind could fill an ESPHome proxy's three slots and delay or fail other polls and commands.
+  After a command the connection still stays open for 30 s for quick follow-up changes; a command
+  sent 1-8 s after a poll now opens a new connection instead of reusing the poll's.
 
 ### Changed
 - The RSSI, last seen, last connected and poll interval diagnostic sensors are disabled by default

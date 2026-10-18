@@ -902,7 +902,11 @@ types are written once.
   refactor touches connection timing. Test: assert `create_device` is called with `idle_disconnect`.
 - **Verification:** confirmed by 1 verifier, lowered to low: the effect is transient and
   bleak-retry-connector backs off on out-of-slot errors.
-- **Decision:** open
+- **Decision:** done in the integration: `POLL_IDLE_DISCONNECT_SECONDS` = 1.0 s, passed to
+  `create_device` (works at 1.2.1 and 4f2c073). A modelled reconnect-storm check against both
+  libraries' fakes found no storm: 1 connect per poll, per command burst and per self-test, no link
+  closed mid-operation, none opened while idle. The one cost: a command 1-8 s after a poll now
+  makes a connect instead of reusing the poll's link. Bench check in section 10.
 
 ### 6.2 `no-nonterminal-disconnect`
 
@@ -1209,3 +1213,4 @@ types are written once.
 | Does `aa 01` answer reliably, and does the relay-bit mapping match | H5083 | 1.6 | poll with the dev library |
 | Colour read-back piece count, 10 or 12 | H6047 | 1.1, 4.8 | read with the dev library; correct [custom_components/govee_ble_local/GAPS.md:29-31](../custom_components/govee_ble_local/GAPS.md#L29-L31) or the library profile |
 | Live IC-derived piece count compared with the 16 declared segments, and whether writes follow it | H6641 | 7.3 | `0x40` read plus a mask test |
+| The 1 s idle drop after a read (`POLL_IDLE_DISCONNECT_SECONDS`): still 1 connect per poll and per command burst; the latency of a command sent 2-5 s after a poll (it now reconnects first); peak ESPHome proxy slot use during the startup stagger, with no out-of-slot errors; the H5083 still polls and switches cleanly with the library dropping the link after 1 s, before its own ~10 s idle drop | H60A6, H5083, several devices on one ESPHome proxy | 6.1 | debug logging for `govee_ble_local` and `bleak_retry_connector`: count connect attempts per poll and per command; the proxy's free-slot count in its ESPHome log or Home Assistant's Bluetooth diagnostics during a restart |

@@ -35,6 +35,7 @@ from .const import (
     FIRST_POLL_STAGGER_SECONDS,
     LAST_SEEN_RESOLUTION_SECONDS,
     MANUFACTURER,
+    POLL_IDLE_DISCONNECT_SECONDS,
     SELF_TEST_STOP_TIMEOUT_SECONDS,
     SELF_TEST_UNLOAD_TIMEOUT_SECONDS,
     STOP_CLOSE_TIMEOUT_SECONDS,
@@ -131,7 +132,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: GoveeBleLocalConfigEntry
     secret = _stored_secret(entry)
 
     try:
-        device = create_device(ble_device, sku, advertisement, secret=secret)
+        device = create_device(
+            ble_device,
+            sku,
+            advertisement,
+            secret=secret,
+            idle_disconnect=POLL_IDLE_DISCONNECT_SECONDS,
+        )
     except GoveeBleNotSupported as err:
         # Permanent: retrying can't make an unsupported model supported.
         raise ConfigEntryError(
