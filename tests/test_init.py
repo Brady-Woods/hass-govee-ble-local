@@ -362,6 +362,8 @@ async def test_home_assistant_stop_does_not_wait_long_for_a_busy_link(
             await hass.async_block_till_done()
     assert close_cancelled.is_set()
     assert "link still busy at shutdown" in caplog.text
+    # Let the fixture's unload close promptly (HA would wait 10 s for a hung stop()).
+    mock_device.stop.side_effect = None  # type: ignore[attr-defined]
 
 
 async def test_library_stop_twice_is_harmless() -> None:
