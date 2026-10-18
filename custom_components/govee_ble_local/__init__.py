@@ -12,8 +12,8 @@ from govee_ble_local import Capability, Device, GoveeBleNotSupported, create_dev
 from govee_ble_local.identify import identify
 from homeassistant.components import bluetooth
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_ADDRESS, Platform
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.const import CONF_ADDRESS, EVENT_HOMEASSISTANT_STOP, Platform
+from homeassistant.core import Event, HomeAssistant, callback
 from homeassistant.exceptions import (
     ConfigEntryAuthFailed,
     ConfigEntryError,
@@ -35,7 +35,9 @@ from .const import (
     FIRST_POLL_STAGGER_SECONDS,
     LAST_SEEN_RESOLUTION_SECONDS,
     MANUFACTURER,
+    SELF_TEST_STOP_TIMEOUT_SECONDS,
     SELF_TEST_UNLOAD_TIMEOUT_SECONDS,
+    STOP_CLOSE_TIMEOUT_SECONDS,
 )
 from .coordinator import GoveeBleLocalCoordinator
 from .helpers import clean_mac, clean_text, is_colour_zone, parse_secret
@@ -60,7 +62,7 @@ class GoveeBleLocalRuntimeData:
     device: Device
     coordinator: GoveeBleLocalCoordinator
     log_capture: LogCapture
-    # The running (or last) self-test, so an unload can let it restore the device.
+    # The running (or last) self-test, so an unload or HA stop can let it restore the device.
     self_test: asyncio.Task[SelfTestReport] | None = field(default=None, repr=False)
     # Most recent self-test report (button / capture_session service), for diagnostics.
     last_self_test: SelfTestReport | None = field(default=None, repr=False)
@@ -186,9 +188,51 @@ async def async_setup_entry(hass: HomeAssistant, entry: GoveeBleLocalConfigEntry
 
     _async_track_device_registry(hass, entry)
     _async_track_bluetooth(hass, entry)
+    _async_close_on_stop(hass, entry)
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
+
+
+@callback
+def _async_close_on_stop(hass: HomeAssistant, entry: GoveeBleLocalConfigEntry) -> None:
+    """Close the link when Home Assistant stops, after a running self-test's restore.
+
+    HA doesn't unload config entries when it stops, so this is the only close
+    of a link still open at shutdown: one a command keeps warm, or one a
+    command or self-test is still using (HA cancels background polls just
+    before it fires the event). HA waits for the listener, but gives its whole
+    stop stage only 100 s, so both waits are bounded: a running self-test gets
+    SELF_TEST_STOP_TIMEOUT_SECONDS to finish and restore the device (less than
+    an unload gives it), then the close gets STOP_CLOSE_TIMEOUT_SECONDS. A
+    self-test still running after that has its remaining steps and restore
+    refused: the device stays in its test state and the restore failure is
+    logged.
+
+    An unload after the event closes the link again, which is harmless.
+    async_listen, not async_listen_once as core led_ble uses: removing a
+    one-time listener that has already fired, as an unload after the event
+    would, logs an error (core esphome avoids it the same way).
+    """
+    data = entry.runtime_data
+
+    async def _async_stop(_event: Event) -> None:
+        if (self_test := data.self_test) is not None and not self_test.done():
+            await asyncio.wait({self_test}, timeout=SELF_TEST_STOP_TIMEOUT_SECONDS)
+        # The close waits for an operation still using the link, up to the
+        # library's 45 s operation deadline. Giving up early is safe: the device
+        # refuses new I/O from the moment the close starts, and HA cancels the
+        # task still using the link in its last shutdown stage.
+        try:
+            async with asyncio.timeout(STOP_CLOSE_TIMEOUT_SECONDS):
+                await data.device.stop()
+        except TimeoutError:
+            _LOGGER.debug(
+                "%s: link still busy at shutdown; not waiting to close it",
+                entry.data[CONF_ADDRESS],
+            )
+
+    entry.async_on_unload(hass.bus.async_listen(EVENT_HOMEASSISTANT_STOP, _async_stop))
 
 
 @callback

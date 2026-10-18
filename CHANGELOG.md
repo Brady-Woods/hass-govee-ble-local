@@ -55,6 +55,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pushes to every entity twice.
 - With every entity of a device disabled, the device-registry sync no longer keeps the device
   polled.
+- **The Bluetooth connection is now closed when Home Assistant stops or restarts.** Home Assistant
+  doesn't unload integrations at shutdown, so a connection still open (a command in the last 30 s,
+  or one still running) was left for the adapter or proxy to notice. A running self-test gets up
+  to 30 s to finish and restore the device first (an unload gives it 60 s); one that takes longer
+  is cut off and leaves the device in its test state, with the restore failure logged. Closing a
+  connection still in use doesn't hold up the shutdown for more than 5 s.
 
 ### Changed
 - The RSSI, last seen, last connected and poll interval diagnostic sensors are disabled by default

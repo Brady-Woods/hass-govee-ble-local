@@ -993,7 +993,12 @@ types are written once.
     unload before the stop event leaves `stop` awaited exactly once (the listener is gone); a stop
     during a self-test follows the chosen policy.
 - **Verification:** gap-pass finding; no verifier record came with the remainder report.
-- **Decision:** open
+- **Decision:** integration side done. The stop listener (`_async_close_on_stop` in
+  `__init__.py`) waits up to `SELF_TEST_STOP_TIMEOUT_SECONDS` = 30 s for a running self-test's
+  restore, then gives the close `STOP_CLOSE_TIMEOUT_SECONDS` = 5 s, so a busy link can't hold
+  shutdown for 45 s before 6.3 lands. A self-test still running after 30 s is cut off: its restore
+  fails with "connection closed" and is logged once. The library-side contract (document
+  `stop()`, 6.3) is still open.
 
 ## 7. Capability / feature flags
 

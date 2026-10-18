@@ -95,6 +95,10 @@ rules:
       down and close the BLE link. HA cancels a background poll still in
       flight, but not a command or manual refresh still using the link; it
       waits up to 10 s for the close, which can then finish after the unload.
+      HA doesn't unload entries when it stops, so a stop-event listener
+      (removed on unload) closes the link at shutdown too, after a shorter
+      bounded wait for a running self-test's restore; its close is bounded
+      as well, so a busy link doesn't hold up the shutdown.
   docs-configuration-parameters:
     status: exempt
     comment: The integration has no configuration parameters.

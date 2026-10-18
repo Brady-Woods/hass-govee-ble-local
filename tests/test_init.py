@@ -3,12 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import DEFAULT, patch
+from unittest.mock import DEFAULT, AsyncMock, MagicMock, patch
 import zlib
 
-from govee_ble_local import Device, GoveeBleConnectionError, GoveeBleNotSupported
+from bleak.backends.device import BLEDevice
+from govee_ble_local import (
+    Device,
+    GoveeBleConnectionError,
+    GoveeBleNotSupported,
+    create_device,
+)
 from homeassistant.components.bluetooth import (
     BluetoothChange,
     BluetoothScanningMode,
@@ -16,7 +23,12 @@ from homeassistant.components.bluetooth import (
 )
 from homeassistant.components.light import DATA_COMPONENT as LIGHT_DATA
 from homeassistant.config_entries import ConfigEntryState
-from homeassistant.const import STATE_OFF, STATE_ON, STATE_UNAVAILABLE
+from homeassistant.const import (
+    EVENT_HOMEASSISTANT_STOP,
+    STATE_OFF,
+    STATE_ON,
+    STATE_UNAVAILABLE,
+)
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 import pytest
@@ -40,7 +52,7 @@ from .conftest import (
     make_service_info,
     unavailable_callback,
 )
-from .const import ADDRESS, SECRET_HEX, TITLE
+from .const import ADDRESS, LOCAL_NAME, SECRET_HEX, TITLE
 
 MAIN_LIGHT = "light.test_ceiling"
 SELF_TEST_BUTTON = "button.test_ceiling_run_self_test"
@@ -204,6 +216,170 @@ async def test_unload_platform_failure_keeps_link(
     with patch.object(hass.config_entries, "async_unload_platforms", return_value=False):
         assert not await hass.config_entries.async_unload(setup_integration.entry_id)
     mock_device.stop.assert_not_awaited()
+
+
+async def test_home_assistant_stop_closes_link(
+    hass: HomeAssistant, setup_integration: MockConfigEntry, mock_device: Device
+) -> None:
+    """Home Assistant stopping closes the link: it doesn't unload config entries."""
+    hass.bus.async_fire(EVENT_HOMEASSISTANT_STOP)
+    await hass.async_block_till_done()
+    mock_device.stop.assert_awaited_once()  # type: ignore[attr-defined]
+    assert connection(mock_device).closed
+    assert setup_integration.state is ConfigEntryState.LOADED
+
+
+async def test_unload_after_home_assistant_stop(
+    hass: HomeAssistant,
+    setup_integration: MockConfigEntry,
+    mock_device: Device,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An unload after the stop event closes the link a second time and logs no error."""
+    hass.bus.async_fire(EVENT_HOMEASSISTANT_STOP)
+    await hass.async_block_till_done()
+    assert await hass.config_entries.async_unload(setup_integration.entry_id)
+    await hass.async_block_till_done()
+    assert setup_integration.state is ConfigEntryState.NOT_LOADED
+    assert mock_device.stop.await_count == 2  # type: ignore[attr-defined]
+    assert [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR] == []
+
+
+async def test_unload_removes_the_stop_listener(
+    hass: HomeAssistant, setup_integration: MockConfigEntry, mock_device: Device
+) -> None:
+    """A stop event after an unload doesn't close the (already closed) link again."""
+    assert await hass.config_entries.async_unload(setup_integration.entry_id)
+    hass.bus.async_fire(EVENT_HOMEASSISTANT_STOP)
+    await hass.async_block_till_done()
+    mock_device.stop.assert_awaited_once()  # type: ignore[attr-defined]
+
+
+async def test_home_assistant_stop_waits_for_a_running_self_test(
+    hass: HomeAssistant, setup_integration: MockConfigEntry, mock_device: Device
+) -> None:
+    """Stopping mid self-test lets it finish its restore before the link is closed."""
+    mock_device.state.is_on = True
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _slow_rgb(*_args: Any) -> Any:
+        started.set()
+        await release.wait()
+        return DEFAULT
+
+    data = setup_integration.runtime_data
+    stopped_with: list[bool] = []
+
+    def _stop() -> None:
+        stopped_with.append(data.self_test is not None and data.self_test.done())
+        # Like the library's close: any later write (a restore too) is refused.
+        connection(mock_device).error = GoveeBleConnectionError("connection closed")
+
+    mock_device.set_rgb.side_effect = _slow_rgb  # type: ignore[attr-defined]
+    mock_device.stop.side_effect = _stop  # type: ignore[attr-defined]
+    press = hass.async_create_task(
+        hass.services.async_call("button", "press", {"entity_id": SELF_TEST_BUTTON}, blocking=True)
+    )
+    await started.wait()
+    hass.bus.async_fire(EVENT_HOMEASSISTANT_STOP)
+    for _ in range(10):
+        await asyncio.sleep(0)
+    mock_device.stop.assert_not_awaited()  # type: ignore[attr-defined]
+
+    release.set()
+    await press
+    await hass.async_block_till_done()
+    assert stopped_with == [True]
+    report = data.last_self_test
+    assert report is not None
+    assert (report["ok"], report["restored"]) == (True, True)
+
+
+async def test_home_assistant_stop_wait_for_a_self_test_is_bounded(
+    hass: HomeAssistant,
+    setup_integration: MockConfigEntry,
+    mock_device: Device,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A self-test still running after the bound is cut off: its restore fails, logged once."""
+    mock_device.state.is_on = True
+    started = asyncio.Event()
+    link_closed = asyncio.Event()
+
+    async def _stuck_rgb(*_args: Any) -> Any:
+        started.set()
+        await link_closed.wait()
+        return DEFAULT  # then the real write, which the closed link refuses
+
+    def _stop() -> None:
+        connection(mock_device).error = GoveeBleConnectionError("connection closed")
+        link_closed.set()
+
+    mock_device.set_rgb.side_effect = _stuck_rgb  # type: ignore[attr-defined]
+    mock_device.stop.side_effect = _stop  # type: ignore[attr-defined]
+    press = hass.async_create_task(
+        hass.services.async_call("button", "press", {"entity_id": SELF_TEST_BUTTON}, blocking=True)
+    )
+    await started.wait()
+    with patch("custom_components.govee_ble_local.SELF_TEST_STOP_TIMEOUT_SECONDS", 0.01):
+        hass.bus.async_fire(EVENT_HOMEASSISTANT_STOP)
+        async with asyncio.timeout(5):
+            await hass.async_block_till_done()
+    await press
+    mock_device.stop.assert_awaited_once()  # type: ignore[attr-defined]
+    report = setup_integration.runtime_data.last_self_test
+    assert report is not None
+    assert report["restored"] is False
+    assert all("connection closed" in err for err in report["restore_errors"])
+    warnings = [r for r in caplog.records if "could not fully restore" in r.getMessage()]
+    assert len(warnings) == 1
+
+
+async def test_home_assistant_stop_does_not_wait_long_for_a_busy_link(
+    hass: HomeAssistant,
+    setup_integration: MockConfigEntry,
+    mock_device: Device,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A close stuck behind an operation still using the link stops waiting after the bound."""
+    caplog.set_level(logging.DEBUG, logger="custom_components.govee_ble_local")
+    close_cancelled = asyncio.Event()
+
+    async def _busy_close() -> None:
+        # The library's close waits for the operation holding the link.
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            close_cancelled.set()
+            raise
+
+    mock_device.stop.side_effect = _busy_close  # type: ignore[attr-defined]
+    with patch("custom_components.govee_ble_local.STOP_CLOSE_TIMEOUT_SECONDS", 0.01):
+        hass.bus.async_fire(EVENT_HOMEASSISTANT_STOP)
+        async with asyncio.timeout(5):
+            await hass.async_block_till_done()
+    assert close_cancelled.is_set()
+    assert "link still busy at shutdown" in caplog.text
+
+
+async def test_library_stop_twice_is_harmless() -> None:
+    """The library's ``Device.stop()`` may run twice: the stop event, then an unload.
+
+    The first call drops the open link and refuses further I/O; the second
+    finds no link and returns. The library has no test of its own for this.
+    """
+    device = create_device(BLEDevice(address=ADDRESS, name=LOCAL_NAME, details={}), "H60A6", None)
+    client = MagicMock()
+    client.disconnect = AsyncMock()
+    # An open link. Relies on the private GoveeConnection._client
+    # (govee_ble_local/transport/connection.py); a library rename breaks this line.
+    device._conn._client = client
+    await device.stop()
+    await device.stop()
+    client.disconnect.assert_awaited_once()
+    with pytest.raises(GoveeBleConnectionError):
+        await device.set_power(True)
 
 
 async def test_setup_publishes_passive_state_before_first_poll(

@@ -71,8 +71,8 @@ async def async_self_test_entry(
         )
     task = entry.async_create_task(hass, async_run_self_test(data.device), "self_test")
     if data.self_test is None or data.self_test.done():
-        # Tracked so an unload waits for the restore. A run already going is
-        # kept: this one is then refused as busy.
+        # Tracked so an unload or HA stop waits for the restore. A run already
+        # going is kept: this one is then refused as busy.
         data.self_test = task
     try:
         report = await task

@@ -76,6 +76,15 @@ COMMAND_TIMEOUT_SECONDS = 60
 # Bounded so a self-test stuck on a bad link can't stall a reload indefinitely.
 SELF_TEST_UNLOAD_TIMEOUT_SECONDS = 60
 
+# When Home Assistant stops: how long the stop listener waits for a running
+# self-test to finish and restore the device, then for the link to close (see
+# _async_close_on_stop). HA gives its whole stop stage 100 s, shared with every
+# other integration, so the self-test gets less than an unload gives it, and
+# the close doesn't wait out an operation still using the link (up to the
+# library's 45 s deadline). 5 s matches the library's own disconnect bound.
+SELF_TEST_STOP_TIMEOUT_SECONDS = 30
+STOP_CLOSE_TIMEOUT_SECONDS = 5
+
 # Maps a library zone name (Device.zones[i].name) to an entity translation
 # key. Zones with any other name use the raw zone name as the entity name.
 ZONE_TRANSLATION_KEYS: dict[str, str] = {
