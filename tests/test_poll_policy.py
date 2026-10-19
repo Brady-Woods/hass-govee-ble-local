@@ -18,6 +18,7 @@ import asyncio
 from collections.abc import Generator
 from datetime import timedelta
 import importlib.metadata
+import itertools
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
@@ -876,6 +877,29 @@ async def test_on_backoff_restarts_when_a_poll_reads_something_new(
     assert nominal(coordinator) == BASE
     await coordinator.async_refresh()
     assert nominal(coordinator) == BASE * 2
+
+
+@pytest.mark.parametrize("device_sku", ["H6047"])
+async def test_on_backoff_ignores_a_poll_that_only_reconfirms_the_bars(
+    coordinator: GoveeBleLocalCoordinator, air: Air, mock_device: Device
+) -> None:
+    """A poll that reads the same bars again stamps them confirmed again: that is bookkeeping
+    (``zone_power_confirmed``), not something new, so the backoff keeps doubling."""
+    await turned_on_outside_ha(air)
+    stamps = itertools.count(1)
+
+    async def _update(**_kwargs: Any) -> Any:
+        mock_device.state.zone_power = {0: True, 1: True}
+        mock_device.state.zone_power_confirmed = dict.fromkeys((0, 1), float(next(stamps)))
+        mock_device.state.optimistic = False
+        return mock_device.state
+
+    mock_device.update.side_effect = _update  # type: ignore[attr-defined]
+    await coordinator.async_refresh()  # the bars read for the first time: something new
+    assert nominal(coordinator) == BASE
+    for expected in ON_BACKOFF[1:3]:
+        await coordinator.async_refresh()
+        assert nominal(coordinator) == expected
 
 
 async def test_on_backoff_restarts_on_an_advertised_flip(

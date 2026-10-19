@@ -151,7 +151,10 @@ def has_app_advert_parser(device: Device) -> bool:
 def _polled_state(state: DeviceState) -> dict[str, Any]:
     """Return a copy of what a poll read, to tell whether the next one found anything new."""
     polled = asdict(state)
-    polled.pop("optimistic", None)  # bookkeeping, not device state
+    # Bookkeeping, not device state: a read that only confirms the zones again
+    # stamps them anew (zone_power_confirmed), which is nothing new.
+    polled.pop("optimistic", None)
+    polled.pop("zone_power_confirmed", None)
     return polled
 
 
@@ -258,12 +261,6 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         self._first_poll_waiting = False
         self._unsub_holdoff_cap: CALLBACK_TYPE | None = None
         self._shutting_down = False
-        # Bluetooth monotonic time each zone's power (by power index) was last
-        # confirmed: a poll read it back, or the device acked a write that set
-        # it. The library assigns state.zone_power a new dict whenever it applies
-        # one (a read, or an acked write), and never on a read that timed out or
-        # was discarded, so a new dict across a poll or a command is the signal.
-        self._zones_confirmed_at: dict[int, float] = {}
         # Doublings of the poll interval for a slow-connecting or weak-signal
         # device, and how long the last successful poll took (diagnostics).
         self.slow_poll_steps = 0
@@ -618,24 +615,14 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         return bool(self._commands_running) or self._unsub_holdoff_end is not None
 
     @callback
-    def async_note_command_started(self) -> dict[int, bool]:
-        """Note an entity command starting: background polls wait until it is done.
-
-        Returns the zone power it starts from, for ``async_note_command_finished``.
-        """
+    def async_note_command_started(self) -> None:
+        """Note an entity command starting: background polls wait until it is done."""
         self._commands_running += 1
         self._async_cancel_holdoff_end()  # the hold-off restarts when the last one ends
-        return self._device.state.zone_power
 
     @callback
-    def async_note_command_finished(self, zones_before: dict[int, bool] | None = None) -> None:
-        """Note an entity command ending (landed or not): polls wait a little longer still.
-
-        ``zones_before`` (from ``async_note_command_started``): zone power the
-        command set, the device having acked it, counts as confirmed.
-        """
-        if zones_before is not None:
-            self._note_zone_power(zones_before)
+    def async_note_command_finished(self) -> None:
+        """Note an entity command ending (landed or not): polls wait a little longer still."""
         self._commands_running = max(0, self._commands_running - 1)
         if self._commands_running or self._shutting_down:
             # Another command still runs (the hold-off starts when it ends), or the
@@ -975,7 +962,6 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
 
         async with _poll_semaphore(self.hass):
             started = bluetooth.MONOTONIC_TIME()
-            zones_before = self._device.state.zone_power
             try:
                 # A tighter connect budget than a command's: a device that doesn't
                 # answer frees the device (and a command waiting for it) sooner.
@@ -1017,7 +1003,6 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
             finally:
                 # Even a failed poll may have read power before it failed.
                 self._io_at = bluetooth.MONOTONIC_TIME()
-                self._note_zone_power(zones_before)
         if not data.optimistic:
             self.last_connected = dt_util.utcnow()
         self.consecutive_failures = 0
@@ -1028,20 +1013,6 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         self._note_poll_speed(bluetooth.MONOTONIC_TIME() - started)
         self._async_note_success(data)
         return data
-
-    def _note_zone_power(self, before: dict[int, bool]) -> None:
-        """Stamp the zones whose power the library applied since ``before`` as confirmed."""
-        zone_power = self._device.state.zone_power
-        if zone_power is before:
-            return
-        now = bluetooth.MONOTONIC_TIME()
-        for index in zone_power:
-            self._zones_confirmed_at[index] = now
-
-    def zone_power_age(self, index: int) -> float | None:
-        """Return the seconds since zone ``index``'s power was confirmed (None: never)."""
-        confirmed = self._zones_confirmed_at.get(index)
-        return None if confirmed is None else bluetooth.MONOTONIC_TIME() - confirmed
 
     def _note_poll_speed(self, seconds: float) -> None:
         """Count a slow successful poll (or a weak signal) toward its slow backoff, or reset it."""

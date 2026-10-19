@@ -148,12 +148,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Zone lights (H60A6 main panel and ring, H6047 bars) respond sooner, in the Govee app's
   order.** Changing the colour, colour temperature or brightness of a zone that is lit now sends
   only that change, as the app does, instead of re-sending the zone's power after it; on an H6047
-  that also skips reading the other bar first. A zone that is off, or whose "on" hasn't been
-  confirmed in the last 2 minutes (read back by a poll, or switched on by Home Assistant; it may
-  have been switched off in the Govee app since), is switched on first and then changed, which is
-  the order the app takes. If switching such a zone on fails, the change is still sent and the
-  failure reported. A plain turn on still always sends the zone's power. The self-test puts a
-  device back in the same order: on first, then its colours, then off last.
+  that also skips reading the other bar first. A zone that is off, or whose "on" the device hasn't
+  confirmed in the last 2 minutes (by reporting that zone's power, or acking Home Assistant
+  switching that zone; it may have been switched off in the Govee app since), is switched on first
+  and then changed, which is the order the app takes. The confirmation times are the ones
+  `govee-ble-local` 1.5.0 keeps per zone. If switching the zone on fails, the change isn't sent.
+  A plain turn on still always sends the zone's power. The self-test puts a device back in the
+  same order: on first, then its colours, then off last.
 - **Background polls give way to commands.** A background poll that comes due while a command to
   the same device is running, or within 25 s after one, now waits until then (while the command's
   connection is still open, so the poll reuses it), and a second tap or a slider step doesn't queue

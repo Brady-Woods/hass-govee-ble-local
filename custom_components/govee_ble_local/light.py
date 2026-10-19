@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from abc import abstractmethod
 import logging
+import time
 from typing import TYPE_CHECKING, Any
 
 from govee_ble_local import Capability, Device
@@ -18,7 +19,7 @@ from homeassistant.components.light import (
     LightEntityFeature,
 )
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
+from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .const import DOMAIN, ZONE_STATE_FRESH_SECONDS
@@ -451,16 +452,17 @@ class GoveeBleLocalZoneLight(_SubLight):
     def _known_lit(self) -> bool:
         """Return whether the zone is known to be on, by a confirmation recent enough to trust.
 
-        Confirmed means a poll read the zone's power back, or the device acked a
-        write that set it (``coordinator.zone_power_age``); a poll whose reads all
-        went unanswered confirms nothing. Advertisements carry only the whole
-        fixture's on/off: a zone switched off in the Govee app while the fixture
-        stays on reads "on" here until the next read-back.
+        The library stamps a zone's power as confirmed (``zone_power_confirmed``,
+        on ``time.monotonic()``) only when the device reported it or acked a write
+        of that zone, and drops the stamp wherever it forgets the zone's power.
+        Advertisements carry only the whole fixture's on/off: a zone switched off
+        in the Govee app while the fixture stays on reads "on" here until the next
+        read-back.
         """
         if self.is_on is not True or self._power_index is None:
             return False
-        age = self.coordinator.zone_power_age(self._power_index)
-        return age is not None and age < ZONE_STATE_FRESH_SECONDS
+        confirmed = self._device.state.zone_power_confirmed.get(self._power_index)
+        return confirmed is not None and time.monotonic() - confirmed < ZONE_STATE_FRESH_SECONDS
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Power the zone on, optionally setting colour/temperature/brightness.
@@ -468,29 +470,14 @@ class GoveeBleLocalZoneLight(_SubLight):
         Follows the Govee app, which never sends a zone's power with a colour or
         brightness change and only lets an off zone be changed once switched on:
         a change to a zone known to be lit sends just that change, and a zone that
-        is off (or not known to be on) is switched on first, then changed. A plain
-        turn_on always sends the power: it is the zone's on switch.
+        is off (or not known to be on) is switched on first, then changed. If that
+        fails, nothing else is sent: the zone may be dark. A plain turn_on always
+        sends the power: it is the zone's on switch.
         """
         plain = not (kwargs.keys() & _COLOUR_KWARGS)
-        power_failed: HomeAssistantError | None = None
         async with self._command():
             if plain or not self._known_lit():
-                try:
-                    await self._run_client_command(
-                        self._device.set_zone_power(self._zone_name, True)
-                    )
-                except HomeAssistantError as err:
-                    # On a zone believed lit (just not confirmed lately) the change
-                    # still goes out, as it did before power came first; the power
-                    # failure is reported after it. An H6047 bar whose other bar is
-                    # unknown fails here when its aa 36 read goes unanswered.
-                    if (
-                        plain
-                        or self.is_on is not True
-                        or err.translation_key != "ble_command_failed"
-                    ):
-                        raise
-                    power_failed = err
+                await self._run_client_command(self._device.set_zone_power(self._zone_name, True))
             if ATTR_COLOR_TEMP_KELVIN in kwargs:
                 kelvin = _clamp_kelvin(self._device, kwargs[ATTR_COLOR_TEMP_KELVIN])
                 _LOGGER.debug(
@@ -524,8 +511,6 @@ class GoveeBleLocalZoneLight(_SubLight):
                     self._device.set_segment_brightness(list(self._segments), pct)
                 )
                 self._attr_brightness = kwargs[ATTR_BRIGHTNESS]
-        if power_failed is not None:
-            raise power_failed
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Power the zone off."""

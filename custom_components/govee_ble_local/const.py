@@ -166,12 +166,12 @@ POLL_CONNECT_TIMEOUT_SECONDS = 15
 WEAK_SIGNAL_RSSI = -90
 SLOW_POLL_MAX_STEPS = 3
 
-# A zone light trusts its zone's "on" this long after it was confirmed (a poll
-# read the zone's power back, or the device acked HA's write that set it): then
-# a colour or brightness change sends only that change, without the zone's
-# power frame (as the Govee app does). Older, the zone may have been switched
-# off elsewhere since (advertisements carry only the whole fixture's on/off),
-# so it is switched on first.
+# A zone light trusts its zone's "on" this long after the device confirmed it
+# (the library's ``zone_power_confirmed``: the device reported the zone's power,
+# or acked a write of it): then a colour or brightness change sends only that
+# change, without the zone's power frame (as the Govee app does). Older, the
+# zone may have been switched off elsewhere since (advertisements carry only the
+# whole fixture's on/off), so it is switched on first.
 ZONE_STATE_FRESH_SECONDS = 120
 
 # A device that has vanished from every connectable scanner goes unavailable
