@@ -7,6 +7,7 @@ from collections.abc import Callable, Generator
 from dataclasses import replace
 import json
 import logging
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import DEFAULT, AsyncMock, Mock, call
 
@@ -15,7 +16,6 @@ from govee_ble_local import (
     Device,
     GoveeBleAuthError,
     GoveeBleConnectionError,
-    GoveeBleError,
     Segment,
     Zone,
 )
@@ -210,16 +210,18 @@ def child_levels() -> Generator[Callable[[str, int], None]]:
 
 
 async def test_self_test_skips_scenes_when_the_scene_store_is_unreadable(
-    broken_scene_store: GoveeBleError,
+    broken_scene_store: SimpleNamespace,
 ) -> None:
-    """A broken scene store skips the scene steps with the reason; the rest of the test runs."""
+    """With setup's store error, the scene steps are skipped without reading the store."""
     device = make_device("H60A6")
     _prime(device)
+    error = str(broken_scene_store.error)
 
-    report = await async_run_self_test(device)
+    report = await async_run_self_test(device, scene_store_error=error)
 
+    assert broken_scene_store.on_loop == []  # never read, on the loop or off it
     steps = {s["step"]: s for s in report["steps"]}
-    assert steps["scenes"]["skipped"] == f"scene store unreadable: {broken_scene_store}"
+    assert steps["scenes"]["skipped"] == f"scene store unreadable: {error}"
     assert not [name for name in steps if name.startswith("scene:")]
     assert report["ok"] is True
     assert report["restored"] is True

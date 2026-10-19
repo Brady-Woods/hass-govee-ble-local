@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from datetime import timedelta
-import importlib.metadata
 import logging
 from pathlib import Path
 import zlib
@@ -83,9 +82,9 @@ class GoveeBleLocalRuntimeData:
     self_test: asyncio.Task[SelfTestReport] | None = field(default=None, repr=False)
     # Most recent self-test report (button / capture_session service), for diagnostics.
     last_self_test: SelfTestReport | None = field(default=None, repr=False)
-    # The bundled scene names, read once at setup; None when the library's scene
-    # store couldn't be read (the light then offers no effects).
-    scene_names: list[str] | None = field(default_factory=list)
+    # Why the library's scene store couldn't be read at setup (None: it could).
+    # Then nothing reads the device's scenes: each read would hit the file again.
+    scene_store_error: str | None = None
 
 
 type GoveeBleLocalConfigEntry = ConfigEntry[GoveeBleLocalRuntimeData]
@@ -121,14 +120,15 @@ def _async_report_scene_store(hass: HomeAssistant, err: GoveeBleError) -> None:
         _LOGGER.debug("Scene store still unreadable: %s", err)
         return
     hass.data[_SCENE_STORE_REPORTED] = True
-    try:
-        version = importlib.metadata.version("govee-ble-local")
-    except importlib.metadata.PackageNotFoundError:
-        version = "unknown version"
+    # Both in memory: no package-metadata read on the event loop.
+    version = getattr(govee_ble_local, "__version__", "unknown version")
     _LOGGER.error(
         "The installed govee-ble-local (%s, %s) can't read its bundled scene store: %s. "
-        "Govee lights keep working without effects; reinstall govee-ble-local "
-        "(restart Home Assistant after removing it) to bring them back",
+        "Govee lights keep working without effects. To fix it: on Home Assistant OS the "
+        "next Home Assistant update reinstalls the library; in a Docker container, recreate "
+        "the container (a restart keeps the broken copy); in a Python virtual environment, "
+        "run 'pip install --force-reinstall govee-ble-local' and restart. If it persists, "
+        "report it with this device's diagnostics",
         version,
         Path(govee_ble_local.__file__).parent,
         err,
@@ -230,18 +230,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: GoveeBleLocalConfigEntry
     # background.
     entry.async_on_unload(device.stop)
 
-    # Read the (blocking, cached) scene catalog off the event loop, so the light
-    # platform's effect list doesn't do file IO in the loop.
-    scene_names: list[str] | None = []
+    # Load the (blocking, cached) scene catalog off the event loop, so the scene
+    # reads on the loop afterwards (the effect list, diagnostics) are cache hits.
+    scene_store_error: str | None = None
     if Capability.SCENES in device.capabilities:
         try:
-            scene_names = await hass.async_add_executor_job(lambda: device.scene_names)
+            await hass.async_add_executor_job(lambda: device.scene_names)
         except GoveeBleError as err:
             # From govee-ble-local 1.5.0 a missing or corrupt bundled scene store
             # raises for every model (1.4.x gave no effects). The light works
             # without effects; only a reinstall of the library brings them back.
+            scene_store_error = str(err)
             _async_report_scene_store(hass, err)
-            scene_names = None
 
     _async_remove_legacy_zone_entities(hass, address, device)
 
@@ -252,7 +252,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: GoveeBleLocalConfigEntry
 
     coordinator = GoveeBleLocalCoordinator(hass, entry, device)
     entry.runtime_data = GoveeBleLocalRuntimeData(
-        device=device, coordinator=coordinator, log_capture=log_capture, scene_names=scene_names
+        device=device,
+        coordinator=coordinator,
+        log_capture=log_capture,
+        scene_store_error=scene_store_error,
     )
 
     # The device is advertising (async_ble_device_from_address above found it),

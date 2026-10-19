@@ -6,7 +6,7 @@ import json
 import logging
 from types import SimpleNamespace
 
-from govee_ble_local import Device, GoveeBleError
+from govee_ble_local import Device
 from homeassistant.core import HomeAssistant
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
@@ -77,12 +77,15 @@ def mock_config_entry() -> MockConfigEntry:
 async def test_diagnostics_with_an_unreadable_scene_store(
     hass: HomeAssistant,
     hass_client: ClientSessionGenerator,
-    broken_scene_store: GoveeBleError,
+    broken_scene_store: SimpleNamespace,
     setup_integration: MockConfigEntry,
 ) -> None:
-    """A broken scene store shows as no scene count, instead of failing the download."""
+    """A broken scene store shows as no scene count and its error, without reading it again."""
+    reads = len(broken_scene_store.on_loop)
     diagnostics = await get_diagnostics_for_config_entry(hass, hass_client, setup_integration)
     assert diagnostics["device"]["scene_count"] is None
+    assert diagnostics["device"]["scene_store_error"] == str(broken_scene_store.error)
+    assert len(broken_scene_store.on_loop) == reads
 
 
 async def test_diagnostics_structure(
@@ -104,6 +107,7 @@ async def test_diagnostics_structure(
         "capabilities": ["brightness", "color_temp", "power", "rgb", "scenes", "segments"],
         "zones": ["main", "background"],
         "scene_count": len(mock_device.scene_names),
+        "scene_store_error": None,
     }
     assert diagnostics["device"]["scene_count"] > 3
     coordinator = diagnostics["coordinator"]

@@ -252,10 +252,10 @@ async def test_busy_and_failed_devices_do_not_abort_the_others(
     """A device that can't be tested contributes an error entry; the rest still report."""
     plug_entry, plug = await _add_plug_entry(hass, mock_bluetooth)
 
-    async def _runner(device: Device) -> dict[str, Any]:
+    async def _runner(device: Device, **kwargs: Any) -> dict[str, Any]:
         if device is plug:
             raise SelfTestBusyError
-        return await capture.async_run_self_test(device)
+        return await capture.async_run_self_test(device, **kwargs)
 
     with patch(RUNNER, side_effect=_runner):
         response = await _capture_session(

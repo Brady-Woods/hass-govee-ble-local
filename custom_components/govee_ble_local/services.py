@@ -69,7 +69,11 @@ async def async_self_test_entry(
             translation_key="self_test_device_not_found",
             translation_placeholders={"device_name": entry.title},
         )
-    task = entry.async_create_task(hass, async_run_self_test(data.device), "self_test")
+    task = entry.async_create_task(
+        hass,
+        async_run_self_test(data.device, scene_store_error=data.scene_store_error),
+        "self_test",
+    )
     if data.self_test is None or data.self_test.done():
         # Tracked so an unload or HA stop waits for the restore. A run already
         # going is kept: this one is then refused as busy.

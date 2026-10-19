@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import importlib.metadata
 import logging
 from types import SimpleNamespace
 from typing import Any
@@ -11,6 +10,7 @@ from unittest.mock import DEFAULT, AsyncMock, MagicMock, patch
 import zlib
 
 from bleak.backends.device import BLEDevice
+import govee_ble_local
 from govee_ble_local import (
     Device,
     GoveeBleConnectionError,
@@ -550,26 +550,28 @@ async def test_first_poll_waits_for_a_command_sent_during_its_stagger(
 
 async def test_unreadable_scene_store_sets_up_without_effects(
     hass: HomeAssistant,
-    broken_scene_store: GoveeBleError,
+    broken_scene_store: SimpleNamespace,
     mock_config_entry: MockConfigEntry,
     mock_device: Device,
     *,
     mock_bluetooth: SimpleNamespace,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """A broken scene store costs the light its effects, not its setup."""
+    """A broken scene store costs the light its effects, not its setup; nothing reads it
+    on the event loop."""
     mock_config_entry.add_to_hass(hass)
     assert await hass.config_entries.async_setup(mock_config_entry.entry_id)
     await hass.async_block_till_done(wait_background_tasks=True)
     assert mock_config_entry.state is ConfigEntryState.LOADED
-    assert mock_config_entry.runtime_data.scene_names is None
+    assert mock_config_entry.runtime_data.scene_store_error == str(broken_scene_store.error)
 
     # The report is the only error: no entity update failed on a scene read either
     # (the coordinator would log that, not raise it).
     [record] = [r for r in caplog.records if r.levelno >= logging.ERROR]
     assert "scene store" in record.getMessage()
     assert "govee-ble-local" in record.getMessage()
-    assert str(broken_scene_store) in record.getMessage()
+    assert str(broken_scene_store.error) in record.getMessage()
+    assert "diagnostics" in record.getMessage()  # what to do if reinstalling doesn't help
 
     attrs = hass.states.get("light.test_ceiling").attributes
     assert "effect_list" not in attrs
@@ -579,6 +581,8 @@ async def test_unreadable_scene_store_sets_up_without_effects(
     mock_device.turn_on.assert_awaited()  # type: ignore[attr-defined]
     assert hass.states.get("light.test_ceiling").attributes["brightness"] == 128
     assert [r for r in caplog.records if r.levelno >= logging.ERROR] == [record]
+    assert broken_scene_store.on_loop  # the store was read...
+    assert not any(broken_scene_store.on_loop)  # ...but never on the event loop
 
 
 async def test_unreadable_scene_store_is_reported_once_per_run(
@@ -588,17 +592,14 @@ async def test_unreadable_scene_store_is_reported_once_per_run(
     err = GoveeBleError("scene catalog could not be read")
     with (
         caplog.at_level(logging.DEBUG, logger="custom_components.govee_ble_local"),
-        # No package metadata (a vendored copy): the error still names the location.
-        patch(
-            "custom_components.govee_ble_local.importlib.metadata.version",
-            side_effect=importlib.metadata.PackageNotFoundError("govee-ble-local"),
-        ),
+        # It runs on the event loop: no package-metadata read (that's file I/O).
+        patch("importlib.metadata.version", side_effect=AssertionError("metadata read")),
     ):
         _async_report_scene_store(hass, err)
         _async_report_scene_store(hass, err)
     records = [r for r in caplog.records if "scene store" in r.getMessage().lower()]
     assert [r.levelno for r in records] == [logging.ERROR, logging.DEBUG]
-    assert "unknown version" in records[0].getMessage()
+    assert govee_ble_local.__version__ in records[0].getMessage()
 
 
 async def test_setup_not_ready_when_device_not_seen(

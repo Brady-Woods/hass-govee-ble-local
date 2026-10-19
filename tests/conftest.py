@@ -10,6 +10,7 @@ does; tests simulate a read-back by mutating ``device.state`` first.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable, Generator, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -363,17 +364,29 @@ def modelled() -> ModelledCase:
 
 
 @pytest.fixture
-def broken_scene_store() -> Generator[GoveeBleError]:
-    """Make every scene lookup fail as on a broken install (1.5.0 raises for every SKU).
+def broken_scene_store() -> Generator[SimpleNamespace]:
+    """Make the library's scene store unreadable, as on a broken install (1.5.0 raises).
 
-    Patches the two catalog functions the library's Device reads its scenes through.
+    Replaces the store loader every scene lookup goes through with an uncached one that
+    raises, as the library's does for a missing or corrupt store, and records whether each
+    read ran on the event loop (``on_loop``): there it would block on the file.
     """
-    err = GoveeBleError("scene catalog for H60A6 could not be read: FileNotFoundError()")
-    with (
-        patch("govee_ble_local.devices.device.load_scenes", side_effect=err),
-        patch("govee_ble_local.devices.device.scene_names_by_code", side_effect=err),
-    ):
-        yield err
+    store = SimpleNamespace(
+        error=GoveeBleError("scene catalog for H60A6 could not be read: FileNotFoundError()"),
+        on_loop=[],
+    )
+
+    def _catalog(_sku: str) -> Any:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            store.on_loop.append(False)
+        else:
+            store.on_loop.append(True)
+        raise store.error
+
+    with patch("govee_ble_local.scenes._catalog", _catalog):
+        yield store
 
 
 @pytest.fixture

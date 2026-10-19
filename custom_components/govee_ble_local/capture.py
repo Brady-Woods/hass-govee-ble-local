@@ -33,7 +33,6 @@ from govee_ble_local import (
     Device,
     DeviceState,
     GoveeBleAuthError,
-    GoveeBleError,
     GoveeBleNotSupported,
     Segment,
     Zone,
@@ -503,7 +502,9 @@ def _zone_colour_is(device: Device, zone: Zone, expected: tuple[int, int, int]) 
     return _match(_zone_colour(device.state, zone), expected)
 
 
-async def _exercise_fixture(device: Device, steps: _Steps) -> None:
+async def _exercise_fixture(
+    device: Device, steps: _Steps, *, scene_store_error: str | None = None
+) -> None:
     """Whole-fixture power-on, brightness, colour, colour temperature and scenes."""
     caps = device.capabilities
     if Capability.POWER in caps:
@@ -532,13 +533,11 @@ async def _exercise_fixture(device: Device, steps: _Steps) -> None:
             lambda: _match(device.state.color_temp_kelvin, kelvin),
         )
     if Capability.SCENES in caps:
-        try:
-            names = device.scene_names[:_MAX_SCENES]
-        except GoveeBleError as err:
-            # The library's scene store can't be read (a broken install).
-            steps.skip("scenes", f"scene store unreadable: {err}")
-            names = []
-        for name in names:
+        if scene_store_error is not None:
+            # Setup couldn't read the library's scene store (a broken install): a read
+            # here would hit the file again on the event loop, and fail again.
+            steps.skip("scenes", f"scene store unreadable: {scene_store_error}")
+        for name in [] if scene_store_error is not None else device.scene_names[:_MAX_SCENES]:
             await steps.run(
                 f"scene:{name}",
                 partial(device.set_scene_by_name, name),
@@ -596,9 +595,15 @@ async def _exercise_zones(device: Device, steps: _Steps) -> None:
         )
 
 
-async def _exercise(device: Device, steps: _Steps, *, power_known: bool) -> None:
+async def _exercise(
+    device: Device,
+    steps: _Steps,
+    *,
+    power_known: bool,
+    scene_store_error: str | None = None,
+) -> None:
     """Drive every capability the device declares, recording each step."""
-    await _exercise_fixture(device, steps)
+    await _exercise_fixture(device, steps, scene_store_error=scene_store_error)
     await _exercise_segments(device, steps)
     await _exercise_zones(device, steps)
     if device.profile.gradual:
@@ -635,7 +640,9 @@ def _sanitize_frames(lines: list[str], *, requires_secret: bool) -> list[str]:
     return [_WIRE_FIELD.sub("", line) for line in lines if not _NO_PLAINTEXT.search(line)]
 
 
-async def async_run_self_test(device: Device) -> SelfTestReport:
+async def async_run_self_test(
+    device: Device, *, scene_store_error: str | None = None
+) -> SelfTestReport:
     """Exercise the device's full capability surface and capture the BLE session.
 
     Returns a report ``{ok, restored, restore_errors, address, sku, encryption,
@@ -647,16 +654,19 @@ async def async_run_self_test(device: Device) -> SelfTestReport:
     full pre-test state is captured up front and restored at the end, also when
     a step raises.
 
+    ``scene_store_error``: why setup couldn't read the library's scene store;
+    the scene steps are then skipped, without reading it.
+
     Raises SelfTestBusyError if another self-test is running, and
     GoveeBleAuthError if the device rejects its secret key.
     """
     if _SELF_TEST_LOCK.locked():
         raise SelfTestBusyError
     async with _SELF_TEST_LOCK:
-        return await _run_self_test(device)
+        return await _run_self_test(device, scene_store_error)
 
 
-async def _run_self_test(device: Device) -> SelfTestReport:
+async def _run_self_test(device: Device, scene_store_error: str | None) -> SelfTestReport:
     caps = device.capabilities
     steps = _Steps(device)
     restore_errors: list[str] = []
@@ -671,7 +681,12 @@ async def _run_self_test(device: Device) -> SelfTestReport:
         snap = _snapshot(device)
         auth_failed = False
         try:
-            await _exercise(device, steps, power_known=snap["is_on"] is not None)
+            await _exercise(
+                device,
+                steps,
+                power_known=snap["is_on"] is not None,
+                scene_store_error=scene_store_error,
+            )
         except GoveeBleAuthError:
             # Nothing lands without the secret; restoring would only retry the rejected key.
             auth_failed = True

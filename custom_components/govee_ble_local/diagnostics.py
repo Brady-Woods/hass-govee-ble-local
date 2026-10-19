@@ -107,8 +107,10 @@ async def async_get_config_entry_diagnostics(
             "sku": device.sku,
             "capabilities": sorted(c.value for c in device.capabilities),
             "zones": [z.name for z in device.zones],
-            # None: the library's scene store couldn't be read.
-            "scene_count": None if data.scene_names is None else len(data.scene_names),
+            # Counted live (the scenes a device offers can change); not read at all when
+            # the scene store couldn't be read at setup, as each read would hit the file.
+            "scene_count": None if data.scene_store_error else len(device.scene_names),
+            "scene_store_error": data.scene_store_error,
         },
         "state": asdict(state),
         "recent_warnings": _scrub(data.log_capture.records(), _HEX_RUN),
