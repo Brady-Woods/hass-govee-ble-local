@@ -95,6 +95,22 @@ async def test_capture_session_by_device_returns_and_stores_report(
     mock_device.set_rgb.assert_awaited()
 
 
+async def test_the_self_test_gets_the_setups_scene_store_error(
+    hass: HomeAssistant,
+    broken_scene_store: SimpleNamespace,
+    setup_integration: MockConfigEntry,
+    mock_device: Device,
+) -> None:
+    """The scene-store error found at setup reaches the self-test (service and button path),
+    which skips its scene steps without reading the store again."""
+    mock_device.state.is_on = True
+    reads = len(broken_scene_store.on_loop)
+    response = await _capture_session(hass, {"device_id": _device_id(hass, setup_integration)})
+    steps = {s["step"]: s for s in response["results"][0]["steps"]}
+    assert steps["scenes"]["skipped"] == f"scene store unreadable: {broken_scene_store.error}"
+    assert len(broken_scene_store.on_loop) == reads
+
+
 async def test_capture_session_by_entity_and_state_refresh(
     hass: HomeAssistant, setup_integration: MockConfigEntry, mock_device: Device
 ) -> None:
