@@ -22,11 +22,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `error` text is unchanged.
 
 ### Fixed
-- **Discovery matched too little:** Bluetooth discovery now also matches Govee's encrypted
-  broadcast headers (manufacturer IDs 0x8841 and 0x8842, which the library has listed since 1.4.0)
-  and `GVB…` names (B7080 / B7081 / B7082 advertise as `GV` + model). A device the installed
-  library doesn't support, a Govee sensor for example, is still not offered: its discovery aborts as
-  "not supported". The models themselves arrive with the library release that admits them.
+- **Bluetooth discovery follows the library's own discovery lists** (`govee-ble-local` 1.4.0): it
+  also matches Govee's encrypted broadcast headers (manufacturer IDs 0x8841 and 0x8842) and names
+  starting `GVB` (Home Assistant can't match the library's two-letter `GV` prefix on its own).
+  Matching isn't support: a device the installed library doesn't support, such as a Govee sensor,
+  is still not offered (its discovery aborts as "not supported"), and new models work only once a
+  library release admits them.
 - Ready for the next `govee-ble-local` release: the config flow uses `profile_for()` (in the library
   since 1.2.1) instead of `device_profile_for()`, which newer releases deprecate. The tests pass
   against both the 1.2.1 floor and the refactored library.
