@@ -20,8 +20,11 @@ from govee_ble_local import (
     GoveeBleNotSupported,
     GoveeBleTimeout,
     Segment,
+    profile_for,
+    supported_skus,
 )
 from govee_ble_local.wire import build
+from homeassistant.components.bluetooth import BluetoothChange
 from homeassistant.components.light import DATA_COMPONENT
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.const import STATE_OFF, STATE_ON, STATE_UNAVAILABLE, STATE_UNKNOWN
@@ -33,6 +36,8 @@ import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.govee_ble_local.const import (
+    CONF_ALLOW_MODELLED,
+    CONF_SKU,
     DEFAULT_MAX_KELVIN,
     DEFAULT_MIN_KELVIN,
     DOMAIN,
@@ -40,8 +45,14 @@ from custom_components.govee_ble_local.const import (
 )
 from custom_components.govee_ble_local.helpers import segment_count
 
-from .conftest import connection, make_device, runtime_segment_count
-from .const import ADDRESS
+from .conftest import (
+    advertisement_callback,
+    connection,
+    make_device,
+    make_service_info,
+    runtime_segment_count,
+)
+from .const import ADDRESS, TITLE, pact_mfg
 
 MAIN = "light.test_ceiling"
 AURORA = 19074  # H60A6 scene code of "Aurora"
@@ -844,6 +855,105 @@ async def test_h61a8_range_is_refreshed_after_the_hardware_read(
     # A request in the widened range reaches the device unclamped.
     await _call(hass, "turn_on", MAIN, color_temp_kelvin=2200)
     assert mock_device.turn_on.await_args.kwargs["kelvin"] == 2200
+
+
+@pytest.fixture
+def kelvin_by_pact_case() -> tuple[str, bool, tuple[int, int], tuple[int, int]]:
+    """A model whose Kelvin range the advertised pact picks: (sku, opt-in, pact, its range).
+
+    Taken from the library (default models first, then the opt-in ones), never a fixed SKU:
+    one whose range at that pact differs from the range it has before any pact is known.
+    """
+    for allow in (False, True):
+        for sku in supported_skus(allow_modelled=allow):
+            profile = profile_for(sku, allow_modelled=allow)
+            if profile is None or Capability.COLOR_TEMP not in profile.capabilities:
+                continue
+            for pact, lo, hi in profile.kelvin_by_pact:
+                if (lo, hi) != (profile.min_kelvin, profile.max_kelvin):
+                    return sku, allow, pact, (lo, hi)
+    pytest.fail("the installed library has no model whose Kelvin range depends on the pact")
+
+
+async def test_kelvin_range_follows_a_pact_learned_from_an_advert(
+    hass: HomeAssistant,
+    mock_bluetooth: SimpleNamespace,
+    kelvin_by_pact_case: tuple[str, bool, tuple[int, int], tuple[int, int]],
+) -> None:
+    """An advert that first carries the device's pact shows the range it picks, without a poll."""
+    sku, allow, pact, picked = kelvin_by_pact_case
+    device = make_device(sku, name=f"GV{sku}ABCD", allow_modelled=allow)
+    data: dict[str, Any] = {"address": ADDRESS, CONF_SKU: sku}
+    if allow:
+        data[CONF_ALLOW_MODELLED] = True
+    entry = await _setup_custom(
+        hass,
+        MockConfigEntry(domain=DOMAIN, title=TITLE, unique_id=ADDRESS, data=data),
+        device,
+        mock_bluetooth,
+    )
+    assert device.pact is None
+    ranges = _kelvin_ranges(hass, MAIN)
+    assert ranges == dict.fromkeys(ranges, (device.profile.min_kelvin, device.profile.max_kelvin))
+    _seed(entry, is_on=True)  # the advert repeats the on/off already known: only its pact is new
+    await hass.async_block_till_done()
+    device.update.reset_mock()
+
+    info = make_service_info(
+        name=f"GV{sku}ABCD", manufacturer_data=pact_mfg(*pact), advertisement=True
+    )
+    advertisement_callback(mock_bluetooth)(info, BluetoothChange.ADVERTISEMENT)
+    await hass.async_block_till_done()
+    assert device.pact == pact
+    assert _kelvin_ranges(hass, MAIN) == dict.fromkeys(ranges, picked)
+    device.update.assert_not_awaited()  # published from the advert, not by a poll
+
+
+@pytest.mark.parametrize("reported", [False, True], ids=["unreported", "reported"])
+async def test_a_learned_pact_is_not_an_on_off_flip(
+    hass: HomeAssistant,
+    mock_bluetooth: SimpleNamespace,
+    kelvin_by_pact_case: tuple[str, bool, tuple[int, int], tuple[int, int]],
+    reported: bool,
+) -> None:
+    """A pact-only advert publishes the new range but never takes the on/off-flip path.
+
+    ``reported`` is whether the library returns True for it: govee-ble-local may signal a
+    learned pact as a change, and the flip path would restart a lit light's poll backoff.
+    """
+    sku, allow, pact, picked = kelvin_by_pact_case
+    device = make_device(sku, name=f"GV{sku}ABCD", allow_modelled=allow)
+    data: dict[str, Any] = {"address": ADDRESS, CONF_SKU: sku}
+    if allow:
+        data[CONF_ALLOW_MODELLED] = True
+    entry = await _setup_custom(
+        hass,
+        MockConfigEntry(domain=DOMAIN, title=TITLE, unique_id=ADDRESS, data=data),
+        device,
+        mock_bluetooth,
+    )
+    _seed(entry, is_on=True)
+    await hass.async_block_till_done()
+    ingest = device.ingest_advertisement
+
+    def _ingest(advertisement: Any) -> bool:
+        learned = device.pact
+        took = ingest(advertisement)
+        return took or (reported and device.pact != learned)
+
+    coordinator = entry.runtime_data.coordinator
+    info = make_service_info(
+        name=f"GV{sku}ABCD", manufacturer_data=pact_mfg(*pact), advertisement=True
+    )
+    with (
+        patch.object(device, "ingest_advertisement", side_effect=_ingest),
+        patch.object(coordinator, "_async_handle_power_flip") as flip,
+    ):
+        advertisement_callback(mock_bluetooth)(info, BluetoothChange.ADVERTISEMENT)
+        await hass.async_block_till_done()
+    flip.assert_not_called()
+    ranges = _kelvin_ranges(hass, MAIN)
+    assert ranges == dict.fromkeys(ranges, picked)
 
 
 @pytest.mark.skipif(not H61A8_HAS_CCT, reason="the installed library has no H61A8 colour temp")

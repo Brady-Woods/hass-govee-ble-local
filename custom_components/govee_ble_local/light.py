@@ -58,7 +58,7 @@ def _apply_kelvin_range(light: LightEntity, device: Device) -> None:
 
     Re-read on every update: the library can change the range after setup, once a poll
     has read the hardware or soft version, or once a later advert has given the device
-    its pact (published at the next update). The range is a capability attribute, so a
+    its pact (the coordinator publishes that advert). The range is a capability attribute, so a
     setup-time copy left the state attributes, the entity registry's capabilities and
     the frontend's colour-temperature slider on the old range.
     """

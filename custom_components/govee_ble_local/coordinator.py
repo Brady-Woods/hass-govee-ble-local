@@ -68,7 +68,7 @@ from .const import (
     POLL_JITTER_SECONDS,
     UNAVAILABLE_AFTER_FAILURES,
 )
-from .helpers import BLE_ERRORS
+from .helpers import BLE_ERRORS, kelvin_range
 
 if TYPE_CHECKING:
     from . import GoveeBleLocalConfigEntry
@@ -356,8 +356,9 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         changed, not for each repeat: last seen / RSSI therefore come from the
         history on a timer (``async_refresh_presence``), except when the device
         is heard again after no scanner did. Only pushes to the entities when
-        something they show actually changed. Each call re-checks the poll
-        policy too.
+        something they show actually changed: on/off, or a pact the device learns
+        from it (and the Kelvin range that pact picks). Each call re-checks the
+        poll policy too.
         """
         if service_info.connectable:
             # Keep the freshest BLEDevice (best scanner/proxy path) for the next
@@ -383,14 +384,25 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         if self.rssi is None:
             heard_again = self._take_presence(service_info)
         was_on = self._device.state.is_on
-        if self._device.ingest_advertisement(service_info.advertisement):
+        learned_before = self._advert_learned()
+        changed = self._device.ingest_advertisement(service_info.advertisement)
+        if changed and self._device.state.is_on != was_on:
             # The return poll already reads what a turn-on poll would.
             self._async_handle_power_flip(was_on, schedule_poll=not return_poll)
+            self.async_publish_device_state()
+        elif changed or self._advert_learned() != learned_before:
+            # The advert gave the device its pact, which can pick another Kelvin range
+            # (kelvin_by_pact): show it now, not at the next poll (up to 15 minutes away).
+            # Not an on/off flip, whether or not the library reports it as a change.
             self.async_publish_device_state()
         elif self._async_apply_policy() or self.device_available != self._published_available:
             self._async_publish_status()
         elif heard_again:
             self.async_update_diagnostics()
+
+    def _advert_learned(self) -> tuple[tuple[int, int] | None, tuple[int, int]]:
+        """Return what an advert can change besides on/off: the pact and the Kelvin range."""
+        return self._device.pact, kelvin_range(self._device)
 
     @callback
     def _async_handle_power_flip(self, was_on: bool | None, *, schedule_poll: bool = True) -> None:
