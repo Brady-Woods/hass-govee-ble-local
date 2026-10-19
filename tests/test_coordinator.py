@@ -832,6 +832,11 @@ async def test_a_stream_of_commands_holds_a_poll_off_at_most_the_cap(
     assert coordinator.commands_holding_off  # it ran although commands still hold polls off
     coordinator.async_note_command_finished()
 
+    # A cap timer that fires with nothing held (a late callback) starts no poll.
+    coordinator._async_holdoff_cap_reached(dt_util.utcnow())
+    await hass.async_block_till_done()
+    mock_device.update.assert_awaited_once()  # type: ignore[attr-defined]
+
 
 async def test_rearming_the_schedule_replaces_a_held_poll(
     hass: HomeAssistant,

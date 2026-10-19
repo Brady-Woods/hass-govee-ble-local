@@ -540,8 +540,8 @@ async def test_segment_step_gate_reads_the_runtime_segment_count(
 # -- restore ----------------------------------------------------------------
 
 
-async def test_restore_order_colour_then_brightness_then_power() -> None:
-    """Colour is put back first, brightness next, power last (with only the differing zone)."""
+async def test_restore_order_power_on_then_colour_then_power_off() -> None:
+    """What was on goes on first, then colour and brightness, then the off zone goes off last."""
     device = make_device("H60A6")
     _prime(
         device,
@@ -555,9 +555,9 @@ async def test_restore_order_colour_then_brightness_then_power() -> None:
 
     assert report["restored"] is True
     assert _restore_calls(manager) == [
+        ("set_power", (True,)),
         ("set_rgb", ((1, 2, 3),)),
         ("set_brightness", (40,)),
-        ("set_power", (True,)),
         ("set_zone_power", ("background", False)),
     ]
     assert device.state.brightness == 40
@@ -585,13 +585,13 @@ async def test_restore_static_colours_segments_and_zones() -> None:
 
     assert report["restored"] is True
     assert _restore_calls(manager) == [
+        ("set_power", (True,)),  # the zones are lit before they're coloured
         ("set_color_temp", (3000,)),
         ("set_segment_rgb", ([0], (9, 9, 9))),
         ("set_segment_brightness", ([0], 33)),
         ("set_zone_rgb", ("main", (8, 8, 8))),
         ("set_zone_rgb", ("background", (9, 9, 9))),
         ("set_brightness", (70,)),
-        ("set_power", (True,)),
     ]
 
 
@@ -625,8 +625,8 @@ async def test_restore_active_scene_skips_zone_and_segment_colours() -> None:
 
     assert report["restored"] is True
     assert _restore_calls(manager) == [
-        ("set_scene", (AFTERNOON_CODE,)),
         ("set_power", (True,)),
+        ("set_scene", (AFTERNOON_CODE,)),
     ]
     assert device.active_scene == "Afternoon"
 
@@ -652,10 +652,9 @@ async def test_restore_failure_does_not_abandon_later_actions() -> None:
     assert report["ok"] is True  # the steps themselves all passed
     assert report["restored"] is False
     assert report["restore_errors"] == ["zone_rgb:background: boom"]
-    assert _restore_calls(manager)[-2:] == [
-        ("set_brightness", (40,)),
-        ("set_power", (True,)),
-    ]
+    restore = _restore_calls(manager)
+    assert restore[0] == ("set_power", (True,))
+    assert restore[-1] == ("set_brightness", (40,))  # still attempted after the failure
 
 
 async def test_restore_failure_logs_a_warning(caplog: pytest.LogCaptureFixture) -> None:

@@ -374,39 +374,56 @@ async def _restore_colour(device: Device, snap: _Snapshot, restorer: _Restorer) 
             await attempt(f"zone_rgb:{zone.name}", partial(device.set_zone_rgb, zone.name, colour))
 
 
-async def _restore_power(device: Device, snap: _Snapshot, restorer: _Restorer) -> None:
-    """Restore whole-device power (which switches every zone), then differing zones."""
+async def _restore_power_on(device: Device, snap: _Snapshot, restorer: _Restorer) -> None:
+    """Switch back on, first, what was on: the whole device, or the zones that were.
+
+    The Govee app only lets a lit zone be coloured, so the colours go to lit zones.
+    """
     has_power = Capability.POWER in device.capabilities
     if snap["is_on"] is False and has_power:
-        await restorer.attempt("power", partial(device.set_power, False))
-        return
-    whole_on = snap["is_on"] is True and has_power
-    if whole_on:
+        return  # it ends off: _restore_power_off switches it off
+    if snap["is_on"] is True and has_power:
+        # Switches every zone on; those that were off go off last.
         await restorer.attempt("power", partial(device.set_power, True))
+        return
     zones: tuple[Zone, ...] = device.zones
     for zone in zones:
-        was_on = snap["zone_power"].get(zone.name)
-        if was_on is None or (whole_on and was_on):
-            continue
-        await restorer.attempt(
-            f"zone_power:{zone.name}", partial(device.set_zone_power, zone.name, was_on)
-        )
+        if snap["zone_power"].get(zone.name) is True:
+            await restorer.attempt(
+                f"zone_power:{zone.name}", partial(device.set_zone_power, zone.name, True)
+            )
+
+
+async def _restore_power_off(device: Device, snap: _Snapshot, restorer: _Restorer) -> None:
+    """Switch off, last, what was off: the whole device, or the zones that were."""
+    if snap["is_on"] is False and Capability.POWER in device.capabilities:
+        await restorer.attempt("power", partial(device.set_power, False))
+        return
+    zones: tuple[Zone, ...] = device.zones
+    for zone in zones:
+        if snap["zone_power"].get(zone.name) is False:
+            await restorer.attempt(
+                f"zone_power:{zone.name}", partial(device.set_zone_power, zone.name, False)
+            )
 
 
 async def _restore(device: Device, snap: _Snapshot) -> list[str]:
     """Best-effort return to the pre-test state; returns the failed actions.
 
     Every action is attempted on its own - one failure never abandons the rest.
-    Order matters: colour first, then brightness and the gradual flag, then
-    power LAST so its final word is the original on/off state.
+    Order matters, as in the Govee app: what was on is switched on first (the app
+    colours only lit zones), then colour, brightness and the gradual flag, then
+    what was off is switched off LAST, so the final word is the original on/off
+    state.
     """
     restorer = _Restorer()
+    await _restore_power_on(device, snap, restorer)
     await _restore_colour(device, snap, restorer)
     if snap["brightness"] is not None and Capability.BRIGHTNESS in device.capabilities:
         await restorer.attempt("brightness", partial(device.set_brightness, snap["brightness"]))
     if snap["gradual"] is not None and device.profile.gradual:
         await restorer.attempt("gradual", partial(device.set_gradual, snap["gradual"]))
-    await _restore_power(device, snap, restorer)
+    await _restore_power_off(device, snap, restorer)
     return restorer.errors
 
 

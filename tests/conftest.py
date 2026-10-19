@@ -74,6 +74,8 @@ class FakeConnection:
     def __init__(self) -> None:
         self.encryption = Encryption.NONE
         self.sent: list[bytes] = []
+        # The request frame of every read (query) the library made, answered or not.
+        self.queries: list[bytes] = []
         self.error: BaseException | None = None
         self.fail_after: int | None = None
         self.closed = False
@@ -104,7 +106,9 @@ class FakeConnection:
         # Newer libraries pass a function of the link's write size (MTU-sized uploads).
         self._write(list(frames(self.write_payload_size) if callable(frames) else frames))
 
-    async def query(self, *_args: Any, **_kwargs: Any) -> list[bytes]:
+    async def query(self, *args: Any, **_kwargs: Any) -> list[bytes]:
+        if args:
+            self.queries.append(args[0])
         if self.error is not None:
             raise self.error
         return []

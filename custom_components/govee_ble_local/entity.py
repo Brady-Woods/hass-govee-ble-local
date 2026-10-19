@@ -65,11 +65,11 @@ class GoveeBleLocalEntity(CoordinatorEntity[GoveeBleLocalCoordinator]):
         ``async_note_device_io``), and holds background polls off while the
         command runs and for a while after (``commands_holding_off``).
         """
-        self.coordinator.async_note_command_started()
+        zones_before = self.coordinator.async_note_command_started()
         try:
             yield
         finally:
-            self.coordinator.async_note_command_finished()
+            self.coordinator.async_note_command_finished(zones_before)
             self.coordinator.async_note_device_io()
             self.coordinator.async_publish_device_state()
 

@@ -55,7 +55,7 @@ for a library change. Item details further down still describe the 1.2.1 / `c823
 | # | Status at 4f2c073 | What changed | Next step |
 |---|---|---|---|
 | 1.1 | still open | Unchanged. An H60A6 on pact (1, 1) no longer gets 0xA5 groups, so its snapshot has no segments; out-of-range segment indices now raise `GoveeBleInvalidValue` | Integration (floor): per-segment snapshot/restore, filtered to `segment_count` |
-| 1.2 | still open | Setters still never power on; the H60A6 wake result is only a spec note | Integration (floor): power on first, then colour, power last |
+| 1.2 | done in the integration | The self-test restore now switches on first, colours, and switches off last (release/device-list) | None (library: document off-state semantics) |
 | 1.3 | changed by the refactor | From 1.3.0 a segment RGB that is exactly a Kelvin tint goes out as a CCT frame, so the H60A6 repaint keeps CT mode; the floor still repaints RGB | Integration (floor): keep the skip-RGB-after-CCT guard for 1.2.1 |
 | 1.4 | still open | Unchanged | Integration (floor): restore by scene name |
 | 1.5 | still open | Unchanged; H6047 now has the gradual flag too | Integration (floor): guard on the snapshot |
@@ -74,8 +74,8 @@ for a library change. Item details further down still describe the 1.2.1 / `c823
 | 4.6 | fixed (unreleased) | An off advertisement marks every zone off | None; add the newest-leg test once released |
 | 4.7 | still open | Reachable differently now (see 4.5) | Integration: add the test |
 | 4.8 | still open | Unchanged since 1.3.0 | Integration (floor): index filter with 1.1 |
-| 5.1 | still open | Setters moved onto a shared commit helper; cost unchanged | Integration (floor): skip the known-on zone power write |
-| 5.2 | needs hardware | Nothing settles it | Hardware check on H60A6 and H6047 (section 10) |
+| 5.1 | done in the integration | A change to a zone known to be lit sends no zone power (release/device-list, latency fix #4) | Library: the batched write (5.3), optional |
+| 5.2 | decided from the app | Zone power first when the zone isn't known to be on, the Govee app's order (release/device-list) | None |
 | 5.3 | still open | No batched zone/segment write | Library: batched API |
 | 6.1 | still open | Polls still hold the link 8 s; `idle_disconnect` works at both ends | Integration (floor): short `idle_disconnect` |
 | 6.2 | still open | No public non-terminal disconnect | Library: `Device.disconnect()` |
@@ -237,7 +237,11 @@ no restore action raised ([custom_components/govee_ble_local/capture.py:592](../
 - **Verification:** confirmed by 2 verifiers, uncertain for 1 (impact lens: the visible failure
   depends on firmware; the everyday zone light already sends colour before zone power and has been in
   use on an H60A6 without a reported failure). Needs hardware: H60A6 zones and H6047, see section 10.
-- **Decision:** open
+- **Decision:** done in the integration (release/device-list). The self-test restore switches
+  on what was on first, then puts colour, brightness and the gradual flag back, then switches off
+  what was off last. That is the Govee app's order: it only lets a lit zone be coloured
+  (`ColorModeH60A6.java:399-462`, `ColorMode10Segment.java:172-223`). The off-state semantics in the
+  library are still undocumented.
 
 ### 1.3 `cct-restore-overwritten-by-rgb-repaint`
 
@@ -830,7 +834,12 @@ types are written once.
   ([tests/test_light.py:1216-1221](../tests/test_light.py#L1216-L1221)) with the zone off.
 - **Verification:** confirmed by 1 verifier (the 3 s ack timeout is a ceiling, not the usual cost).
   Coordinate with 5.2, which may move this write.
-- **Decision:** open
+- **Decision:** done in the integration (release/device-list, latency fix #4). A colour or
+  brightness change to a zone known to be lit sends no zone power, as the Govee app does
+  (`VM4LightH60A6.java:1373-1383`, `NewDetailVm.java:669-725`: zone power is only the header
+  switch). "Known to be lit" means a poll read the zone's power back, or the device acked HA's own
+  write, less than `ZONE_STATE_FRESH_SECONDS` (120 s) ago. A plain `turn_on` always sends power.
+  The batched write (5.3) is still open.
 
 ### 5.2 `zone-power-sent-after-colour`
 
@@ -851,7 +860,10 @@ types are written once.
   without flashing the old one) and add a comment that the order is deliberate.
 - **Verification:** 1 verifier, uncertain. This order has shipped since `d82fd30` without a report.
   Needs hardware: H60A6 and H6047, see section 10.
-- **Decision:** open
+- **Decision:** decided from the app instead of the hardware check (release/device-list, latency
+  fix #4). The app never colours an off zone in normal use; a user switches the zone on, then
+  colours it. So the zone light sends zone power first when the zone is off or not known to be on,
+  then the change. The self-test restore follows the same order (1.2).
 
 ### 5.3 `batched-sub-light-writes`
 
