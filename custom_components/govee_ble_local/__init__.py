@@ -39,6 +39,8 @@ from .const import (
     CONF_SECRET,
     CONF_SKU,
     DOMAIN,
+    FIRST_POLL_STAGGER_MAX_SECONDS,
+    FIRST_POLL_STAGGER_PER_DEVICE_SECONDS,
     FIRST_POLL_STAGGER_SECONDS,
     LAST_SEEN_RESOLUTION_SECONDS,
     MANUFACTURER,
@@ -100,6 +102,20 @@ def _resolve_sku(
         translation_key="sku_unknown",
         translation_placeholders={"address": entry.data[CONF_ADDRESS]},
     )
+
+
+def _first_poll_stagger(hass: HomeAssistant, address: str) -> int:
+    """Return the seconds this device's first background poll waits after setup.
+
+    Derived from the address, so it is the same on every restart, over a window
+    that grows with the number of configured devices (see FIRST_POLL_STAGGER_*).
+    """
+    devices = len(hass.config_entries.async_entries(DOMAIN))
+    window = min(
+        max(FIRST_POLL_STAGGER_SECONDS, FIRST_POLL_STAGGER_PER_DEVICE_SECONDS * devices),
+        FIRST_POLL_STAGGER_MAX_SECONDS,
+    )
+    return zlib.crc32(address.encode()) % window
 
 
 def _stored_secret(entry: GoveeBleLocalConfigEntry) -> bytes | None:
@@ -206,11 +222,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: GoveeBleLocalConfigEntry
     # coordinator's backoff, not ConfigEntryNotReady. HA cancels it (like every
     # entry background task) on unload.
     coordinator.async_set_updated_data(device.state)
-    stagger = zlib.crc32(address.encode()) % FIRST_POLL_STAGGER_SECONDS
+    stagger = _first_poll_stagger(hass, address)
 
     async def _staggered_first_poll() -> None:
         _LOGGER.debug("Waiting %ds stagger before first poll of %s", stagger, address)
         await asyncio.sleep(stagger)
+        # A command sent meanwhile holds the first poll off too, as it does the later ones.
+        await coordinator.async_wait_for_commands()
         await coordinator.async_refresh()
 
     entry.async_create_background_task(

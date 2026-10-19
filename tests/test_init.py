@@ -34,7 +34,7 @@ from homeassistant.helpers import device_registry as dr, entity_registry as er
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.govee_ble_local import capture
+from custom_components.govee_ble_local import _first_poll_stagger, capture
 from custom_components.govee_ble_local.const import (
     CONF_ALLOW_MODELLED,
     CONF_SECRET,
@@ -42,6 +42,7 @@ from custom_components.govee_ble_local.const import (
     DOMAIN,
     LAST_SEEN_RESOLUTION_SECONDS,
     MAX_POLL_INTERVAL_SECONDS,
+    POLL_HOLDOFF_AFTER_COMMAND_SECONDS,
     POLL_IDLE_DISCONNECT_SECONDS,
 )
 from custom_components.govee_ble_local.coordinator import GoveeBleLocalCoordinator
@@ -465,6 +466,54 @@ async def test_first_poll_is_staggered(
         assert await hass.config_entries.async_setup(mock_config_entry.entry_id)
         await hass.async_block_till_done(wait_background_tasks=True)
     assert sleeps == [zlib.crc32(ADDRESS.encode()) % 30]
+    mock_device.update.assert_awaited_once()  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize(("devices", "window"), [(1, 30), (10, 50), (40, 120)])
+async def test_first_poll_stagger_window_grows_with_the_device_count(
+    hass: HomeAssistant, devices: int, window: int
+) -> None:
+    """The first polls spread over 5 s per configured device, from 30 s up to 120 s."""
+    for n in range(devices):
+        MockConfigEntry(
+            domain=DOMAIN, unique_id=f"AA:BB:CC:DD:{n // 256:02X}:{n % 256:02X}"
+        ).add_to_hass(hass)
+    with (
+        patch("custom_components.govee_ble_local.FIRST_POLL_STAGGER_SECONDS", 30),
+        patch("custom_components.govee_ble_local.FIRST_POLL_STAGGER_PER_DEVICE_SECONDS", 5),
+    ):
+        stagger = _first_poll_stagger(hass, ADDRESS)
+    assert stagger == zlib.crc32(ADDRESS.encode()) % window
+
+
+async def test_first_poll_waits_for_a_command_sent_during_its_stagger(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_device: Device,
+    mock_bluetooth: SimpleNamespace,
+) -> None:
+    """A command sent before the first poll holds it off like any background poll."""
+    real_sleep = asyncio.sleep
+
+    async def _sleep(delay: float) -> None:
+        task = asyncio.current_task()
+        if task is not None and task.get_name() == FIRST_POLL_TASK:
+            # The stagger: a command to the device starts meanwhile.
+            mock_config_entry.runtime_data.coordinator.async_note_command_started()
+        await real_sleep(0)
+
+    with patch("custom_components.govee_ble_local.asyncio.sleep", _sleep):
+        mock_config_entry.add_to_hass(hass)
+        assert await hass.config_entries.async_setup(mock_config_entry.entry_id)
+        await hass.async_block_till_done(wait_background_tasks=False)
+    coordinator = mock_config_entry.runtime_data.coordinator
+    mock_device.update.assert_not_awaited()  # type: ignore[attr-defined]
+
+    coordinator.async_note_command_finished()
+    await advance(hass, POLL_HOLDOFF_AFTER_COMMAND_SECONDS - 5)
+    mock_device.update.assert_not_awaited()  # type: ignore[attr-defined]
+    await advance(hass, POLL_HOLDOFF_AFTER_COMMAND_SECONDS + 1)
+    await hass.async_block_till_done(wait_background_tasks=True)
     mock_device.update.assert_awaited_once()  # type: ignore[attr-defined]
 
 

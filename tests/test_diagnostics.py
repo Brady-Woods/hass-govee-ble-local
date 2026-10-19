@@ -98,6 +98,8 @@ async def test_diagnostics_structure(
     coordinator = diagnostics["coordinator"]
     assert coordinator["last_update_success"] is True
     assert coordinator["consecutive_failures"] == 0
+    assert coordinator["slow_poll_steps"] == 0
+    assert isinstance(coordinator["last_poll_seconds"], float)
     assert coordinator["total_failures"] == 0
     assert coordinator["device_available"] is True
     assert coordinator["poll_policy"] == "fixed"  # H60A6 is excluded from the advert policy

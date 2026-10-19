@@ -131,6 +131,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unknown while a device has no background polls, and its diagnostics name the step (`poll_policy`).
   A light or plug with no background polls goes unavailable as soon as no connectable Bluetooth
   adapter or proxy hears it, instead of after three missed polls.
+- **Background polls give way to commands.** A scheduled poll that comes due while a command to the
+  same device is running, or within 30 s after one (while the command's connection is still open
+  for follow-ups), now waits until then, so a second tap or a slider step doesn't queue behind the
+  poll's reads. A device whose polls take 10 s or more, or that is heard at -90 dBm or weaker, is
+  polled less often: the interval doubles with each slow poll, up to 8 times and within the
+  30-minute cap, and a fast poll at a usable signal resets it. After a restart the first polls
+  spread over 5 s per configured device (at least 30 s, at most 2 minutes) instead of always 30 s.
+  The diagnostics show the slow-poll steps and how long the last poll took.
 - The RSSI, last seen, last connected and poll interval diagnostic sensors are disabled by default
   for newly added devices (existing ones keep their setting).
 - Poll errors and the rejected-secret error are translated.

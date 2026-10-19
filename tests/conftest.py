@@ -236,7 +236,10 @@ def reset_log_capture() -> Generator[None]:
 @pytest.fixture(autouse=True)
 def no_first_poll_stagger() -> Generator[None]:
     """Run the background first poll immediately (crc32 % 1 == 0)."""
-    with patch("custom_components.govee_ble_local.FIRST_POLL_STAGGER_SECONDS", 1):
+    with (
+        patch("custom_components.govee_ble_local.FIRST_POLL_STAGGER_SECONDS", 1),
+        patch("custom_components.govee_ble_local.FIRST_POLL_STAGGER_PER_DEVICE_SECONDS", 0),
+    ):
         yield
 
 

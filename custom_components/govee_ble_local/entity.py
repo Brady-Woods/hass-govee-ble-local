@@ -62,11 +62,14 @@ class GoveeBleLocalEntity(CoordinatorEntity[GoveeBleLocalCoordinator]):
         state would leave its siblings stale until the next poll. It is pushed
         after a failure part-way too: the library already applied what landed.
         The coordinator also notes that HA talked to the device (see
-        ``async_note_device_io``).
+        ``async_note_device_io``), and holds background polls off while the
+        command runs and for a while after (``command_holdoff``).
         """
+        self.coordinator.async_note_command_started()
         try:
             yield
         finally:
+            self.coordinator.async_note_command_finished()
             self.coordinator.async_note_device_io()
             self.coordinator.async_publish_device_state()
 

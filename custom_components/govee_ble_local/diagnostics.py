@@ -99,6 +99,8 @@ async def async_get_config_entry_diagnostics(
             "poll_policy": coordinator.poll_policy.value,
             "consecutive_failures": coordinator.consecutive_failures,
             "total_failures": coordinator.total_failures,
+            "slow_poll_steps": coordinator.slow_poll_steps,
+            "last_poll_seconds": coordinator.last_poll_seconds,
             "device_available": coordinator.device_available,
         },
         "device": {

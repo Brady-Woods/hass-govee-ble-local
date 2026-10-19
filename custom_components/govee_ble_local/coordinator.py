@@ -64,9 +64,13 @@ from .const import (
     MAX_CONCURRENT_POLLS,
     MAX_POLL_INTERVAL_SECONDS,
     ON_POLL_MAX_INTERVAL_SECONDS,
+    POLL_HOLDOFF_AFTER_COMMAND_SECONDS,
     POLL_INTERVAL_SECONDS,
     POLL_JITTER_SECONDS,
+    SLOW_POLL_MAX_STEPS,
+    SLOW_POLL_SECONDS,
     UNAVAILABLE_AFTER_FAILURES,
+    WEAK_SIGNAL_RSSI,
 )
 from .helpers import BLE_ERRORS, kelvin_range
 
@@ -228,6 +232,19 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         # The manufacturer data a re-offered advertisement last changed on/off
         # from (see _async_reoffer_advertisement).
         self._reoffered: dict[int, bytes] | None = None
+        # Entity commands running now, and the timer that ends the hold-off
+        # POLL_HOLDOFF_AFTER_COMMAND_SECONDS after the last one: background polls
+        # wait for both (``commands_holding_off``). Whether a scheduled poll is
+        # waiting for the hold-off to end; set while none is in force.
+        self._commands_running = 0
+        self._unsub_holdoff_end: CALLBACK_TYPE | None = None
+        self._poll_waiting = False
+        self._no_holdoff = asyncio.Event()
+        self._no_holdoff.set()
+        # Doublings of the poll interval for a slow-connecting or weak-signal
+        # device, and how long the last successful poll took (diagnostics).
+        self.slow_poll_steps = 0
+        self.last_poll_seconds: float | None = None
 
     # -- reachability -------------------------------------------------------
 
@@ -455,8 +472,10 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
             self._unsub_flip_poll = None
 
     async def async_shutdown(self) -> None:
-        """Also drop a pending turn-on poll (HA calls this when the entry unloads)."""
+        """Also drop a pending turn-on poll and hold-off (HA calls this on unload)."""
         self._async_cancel_flip_poll()
+        self._async_cancel_holdoff_end()
+        self._no_holdoff.set()
         await super().async_shutdown()
 
     @callback
@@ -565,6 +584,75 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         """
         self._io_at = bluetooth.MONOTONIC_TIME()
         self._reoffered = None
+
+    @property
+    def commands_holding_off(self) -> bool:
+        """Whether background polls wait: a command is running, or one ended just now.
+
+        "Just now" is POLL_HOLDOFF_AFTER_COMMAND_SECONDS after the last one ended.
+        """
+        return bool(self._commands_running) or self._unsub_holdoff_end is not None
+
+    @callback
+    def async_note_command_started(self) -> None:
+        """Note an entity command starting: background polls wait until it is done."""
+        self._commands_running += 1
+        self._no_holdoff.clear()
+        self._async_cancel_holdoff_end()  # the hold-off restarts when this one ends
+
+    @callback
+    def async_note_command_finished(self) -> None:
+        """Note an entity command ending (landed or not): polls wait a little longer still."""
+        self._commands_running = max(0, self._commands_running - 1)
+        if not self._commands_running:
+            self._async_cancel_holdoff_end()
+            self._unsub_holdoff_end = async_call_later(
+                self.hass, POLL_HOLDOFF_AFTER_COMMAND_SECONDS, self._async_end_holdoff
+            )
+
+    @callback
+    def _async_end_holdoff(self, _now: datetime) -> None:
+        """End the hold-off, and run a scheduled poll it held back."""
+        self._unsub_holdoff_end = None
+        self._no_holdoff.set()
+        if self._poll_waiting:
+            self._poll_waiting = False
+            self.config_entry.async_create_background_task(
+                self.hass,
+                self._handle_refresh_interval(),
+                name=f"{self.name}_held_off_poll",
+                eager_start=True,
+            )
+
+    @callback
+    def _async_cancel_holdoff_end(self) -> None:
+        """Drop the timer that would end the hold-off, if any."""
+        if self._unsub_holdoff_end is not None:
+            self._unsub_holdoff_end()
+            self._unsub_holdoff_end = None
+
+    async def async_wait_for_commands(self) -> None:
+        """Return once no command holds background polls off (at once if none does)."""
+        await self._no_holdoff.wait()
+
+    async def _handle_refresh_interval(self, _now: datetime | None = None) -> None:
+        """Run a scheduled poll, unless an entity command is running or just ran.
+
+        A poll then would take the device for its reads while the user is likely
+        to follow up (a second tap, a slider drag), and HA already shows what the
+        command did. It waits for the hold-off to end instead (``_async_end_holdoff``
+        runs it), however many commands extend it meanwhile.
+        """
+        if self.commands_holding_off:
+            self._unsub_refresh = None  # the timer that just fired
+            self._poll_waiting = True
+            return
+        await super()._handle_refresh_interval(_now)
+
+    def _async_unsub_refresh(self) -> None:
+        """Cancel the scheduled poll, one waiting for a hold-off to end included."""
+        super()._async_unsub_refresh()
+        self._poll_waiting = False
 
     @callback
     def async_handle_command_success(self) -> None:
@@ -721,10 +809,16 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         return True
 
     def _healthy_interval(self) -> timedelta:
-        """Return the interval after a successful poll: the on-backoff, or the base cadence."""
+        """Return the interval after a successful poll.
+
+        The on-backoff, or the base cadence, doubled for each slow-poll step (up
+        to the cap): a device whose polls are slow is polled less.
+        """
         if self.poll_policy is PollPolicy.ON:
-            return min(_BASE_INTERVAL * (1 << self._on_backoff_steps), _ON_MAX_INTERVAL)
-        return _BASE_INTERVAL
+            interval = min(_BASE_INTERVAL * (1 << self._on_backoff_steps), _ON_MAX_INTERVAL)
+        else:
+            interval = _BASE_INTERVAL
+        return min(interval * (1 << self.slow_poll_steps), _MAX_INTERVAL)
 
     def _failure_interval(self) -> timedelta:
         """Return the failure backoff for the current streak of failed (or skipped) polls.
@@ -749,6 +843,7 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
             raise self._update_failed("poll_skipped_absent")
 
         async with _poll_semaphore(self.hass):
+            started = bluetooth.MONOTONIC_TIME()
             try:
                 data = await self._device.update()
             except GoveeBleAuthError as err:
@@ -786,8 +881,19 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         self._skipped_absent = False
         self._command_reset_used = False
         self._lost_while_unpolled = False
+        self._note_poll_speed(bluetooth.MONOTONIC_TIME() - started)
         self._async_note_success(data)
         return data
+
+    def _note_poll_speed(self, seconds: float) -> None:
+        """Count a slow successful poll (or a weak signal) toward its slow backoff, or reset it."""
+        self.last_poll_seconds = round(seconds, 1)
+        info = self.async_last_service_info(connectable=True)
+        weak = info is not None and info.rssi <= WEAK_SIGNAL_RSSI
+        if seconds >= SLOW_POLL_SECONDS or weak:
+            self.slow_poll_steps = min(self.slow_poll_steps + 1, SLOW_POLL_MAX_STEPS)
+        else:
+            self.slow_poll_steps = 0
 
     @callback
     def _async_note_success(self, state: DeviceState) -> None:

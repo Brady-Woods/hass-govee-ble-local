@@ -28,15 +28,23 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.update_coordinator import UpdateFailed
 from homeassistant.util import dt as dt_util
 import pytest
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from pytest_homeassistant_custom_component.common import (
+    MockConfigEntry,
+    async_fire_time_changed,
+)
 
 from custom_components.govee_ble_local.const import (
     CONF_SKU,
     DOMAIN,
     LAST_SEEN_RESOLUTION_SECONDS,
     MAX_CONCURRENT_POLLS,
+    MAX_POLL_INTERVAL_SECONDS,
+    POLL_HOLDOFF_AFTER_COMMAND_SECONDS,
     POLL_INTERVAL_SECONDS,
+    SLOW_POLL_MAX_STEPS,
+    SLOW_POLL_SECONDS,
     UNAVAILABLE_AFTER_FAILURES,
+    WEAK_SIGNAL_RSSI,
 )
 from custom_components.govee_ble_local.coordinator import GoveeBleLocalCoordinator
 
@@ -660,6 +668,144 @@ async def test_scheduler_fires_at_the_backed_off_interval(
     mock_device.update.assert_awaited_once()  # type: ignore[attr-defined]
     assert coordinator.consecutive_failures == 3
     assert interval(coordinator) == BASE * 4
+
+
+# -- polls give way to commands ---------------------------------------------------
+
+HOLDOFF = POLL_HOLDOFF_AFTER_COMMAND_SECONDS
+
+
+async def test_scheduled_poll_waits_for_a_running_command_and_the_hold_off(
+    hass: HomeAssistant,
+    coordinator: GoveeBleLocalCoordinator,
+    mock_device: Device,
+) -> None:
+    """A poll that comes due mid-command runs only once the hold-off after it has passed."""
+    gate = asyncio.Event()
+
+    async def _slow_turn_on(*_args: Any, **_kwargs: Any) -> None:
+        await gate.wait()
+
+    mock_device.turn_on.side_effect = _slow_turn_on  # type: ignore[attr-defined]
+    mock_device.update.reset_mock()  # type: ignore[attr-defined]
+    # Not a Home Assistant task: async_block_till_done would wait for the held command.
+    command = asyncio.create_task(_turn_on(hass))
+    await _until(lambda: coordinator.commands_holding_off)
+
+    # HA's timer fires while the command still runs (within its 60 s deadline).
+    coordinator._set_poll_interval(timedelta(seconds=20))
+    coordinator._schedule_refresh()
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=25))
+    await _until(lambda: coordinator._poll_waiting)
+    mock_device.update.assert_not_awaited()  # type: ignore[attr-defined]
+
+    gate.set()
+    await command
+    await advance(hass, HOLDOFF - 5)  # inside the hold-off after it
+    mock_device.update.assert_not_awaited()  # type: ignore[attr-defined]
+    assert coordinator.commands_holding_off
+
+    await advance(hass, HOLDOFF + 1)
+    mock_device.update.assert_awaited_once()  # type: ignore[attr-defined]
+    assert not coordinator.commands_holding_off
+    assert coordinator.last_update_success
+
+
+async def test_a_new_command_extends_the_hold_off(
+    hass: HomeAssistant,
+    coordinator: GoveeBleLocalCoordinator,
+    mock_device: Device,
+) -> None:
+    """A poll held off by one command waits out the hold-off of the next one too."""
+    await _turn_on(hass)
+    mock_device.update.reset_mock()  # type: ignore[attr-defined]
+    await coordinator._handle_refresh_interval()  # the scheduled poll fires in the hold-off
+    mock_device.update.assert_not_awaited()  # type: ignore[attr-defined]
+
+    await advance(hass, HOLDOFF - 10)
+    await _turn_on(hass)  # restarts the hold-off
+    await advance(hass, 15)  # past the first command's hold-off, inside the second's
+    mock_device.update.assert_not_awaited()  # type: ignore[attr-defined]
+
+    await advance(hass, HOLDOFF + 1)
+    mock_device.update.assert_awaited_once()  # type: ignore[attr-defined]
+
+
+async def test_unload_drops_a_held_off_poll(
+    hass: HomeAssistant,
+    coordinator: GoveeBleLocalCoordinator,
+    mock_device: Device,
+    setup_integration: MockConfigEntry,
+) -> None:
+    """Unloading during a hold-off cancels it and the poll it held back."""
+    await _turn_on(hass)
+    mock_device.update.reset_mock()  # type: ignore[attr-defined]
+    await coordinator._handle_refresh_interval()
+    assert await hass.config_entries.async_unload(setup_integration.entry_id)
+    assert not coordinator.commands_holding_off  # its timer is gone, not just yet to fire
+    await advance(hass, HOLDOFF + 1)
+    mock_device.update.assert_not_awaited()  # type: ignore[attr-defined]
+
+
+async def _until(condition: Callable[[], bool]) -> None:
+    """Yield to the event loop until ``condition`` holds (without waiting for HA's tasks)."""
+    for _ in range(50):
+        if condition():
+            return
+        await asyncio.sleep(0)
+    pytest.fail("condition never held")
+
+
+def _timed_polls(device: Device, clock: SimpleNamespace, *seconds: float) -> None:
+    """Make the next polls succeed, each taking the given seconds on the Bluetooth clock."""
+    durations = iter(seconds)
+
+    async def _update() -> Any:
+        clock.now += next(durations)
+        device.state.optimistic = False
+        return device.state
+
+    device.update.side_effect = _update  # type: ignore[attr-defined]
+
+
+async def test_slow_polls_back_off_and_a_fast_one_resets(
+    hass: HomeAssistant,
+    coordinator: GoveeBleLocalCoordinator,
+    mock_device: Device,
+    monotonic: SimpleNamespace,
+) -> None:
+    """Each slow poll doubles the interval, up to the cap of steps; a fast poll undoes it."""
+    slow = SLOW_POLL_SECONDS + 2
+    _timed_polls(mock_device, monotonic, *([slow] * (SLOW_POLL_MAX_STEPS + 1)), 2.0)
+    for step in range(1, SLOW_POLL_MAX_STEPS + 2):
+        await coordinator.async_refresh()
+        assert coordinator.slow_poll_steps == min(step, SLOW_POLL_MAX_STEPS)
+        expected = BASE * (1 << min(step, SLOW_POLL_MAX_STEPS))
+        assert interval(coordinator) == min(expected, MAX_POLL_INTERVAL_SECONDS)
+    assert coordinator.last_poll_seconds == slow
+
+    await coordinator.async_refresh()
+    assert coordinator.slow_poll_steps == 0
+    assert interval(coordinator) == BASE
+    assert coordinator.last_poll_seconds == 2.0
+
+
+async def test_a_weak_signal_backs_polls_off_too(
+    hass: HomeAssistant,
+    coordinator: GoveeBleLocalCoordinator,
+    mock_device: Device,
+    presence: SimpleNamespace,
+) -> None:
+    """A device heard only at or below WEAK_SIGNAL_RSSI is polled less, however fast its poll."""
+    presence.service_info = make_service_info(rssi=WEAK_SIGNAL_RSSI)
+    await coordinator.async_refresh()
+    assert coordinator.slow_poll_steps == 1
+    assert interval(coordinator) == BASE * 2
+
+    presence.service_info = make_service_info(rssi=WEAK_SIGNAL_RSSI + 1)
+    await coordinator.async_refresh()
+    assert coordinator.slow_poll_steps == 0
+    assert interval(coordinator) == BASE
 
 
 # -- notifications --------------------------------------------------------------

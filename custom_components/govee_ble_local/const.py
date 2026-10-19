@@ -113,8 +113,34 @@ POLL_IDLE_DISCONNECT_SECONDS = 1.0
 # __init__.py only spreads the very first poll.
 POLL_JITTER_SECONDS = (0, 30)
 
-# Spread (seconds) of the per-device stagger before the first background poll.
+# Spread (seconds) of the per-device stagger before the first background poll:
+# FIRST_POLL_STAGGER_PER_DEVICE_SECONDS for each configured device, at least
+# FIRST_POLL_STAGGER_SECONDS and at most FIRST_POLL_STAGGER_MAX_SECONDS. Every
+# entry sets up when Home Assistant starts, so with a fixed 30 s a larger install
+# packed all its first connects (and the connection slots they hold) into the
+# same half minute, and a command to any of those devices queued behind its poll.
 FIRST_POLL_STAGGER_SECONDS = 30
+FIRST_POLL_STAGGER_PER_DEVICE_SECONDS = 5
+FIRST_POLL_STAGGER_MAX_SECONDS = 120
+
+# A background poll that comes due while an entity command to the device is
+# running, or within this long after one ended, waits until then. The library
+# keeps a command's link up this long for quick follow-ups (its
+# ACTIVE_IDLE_DELAY): a poll then would take the device for its reads just when
+# the user is likely to adjust again, and Home Assistant already shows what the
+# command did.
+POLL_HOLDOFF_AFTER_COMMAND_SECONDS = 30
+
+# A successful poll that took at least SLOW_POLL_SECONDS (connect, handshake and
+# reads), or a device whose connectable advertisement is at or below
+# WEAK_SIGNAL_RSSI, counts as slow: its background polls back off, doubling per
+# slow poll up to SLOW_POLL_MAX_STEPS doublings (and MAX_POLL_INTERVAL_SECONDS),
+# so its long connects don't keep holding a connection slot and the device that
+# a command would wait behind. A fast poll at a usable signal resets it. A
+# typical poll takes 1-5 s; a device at -92 dBm on the bench took 3-24 s.
+SLOW_POLL_SECONDS = 10
+WEAK_SIGNAL_RSSI = -90
+SLOW_POLL_MAX_STEPS = 3
 
 # A device that has vanished from every connectable scanner goes unavailable
 # after this many consecutive failed (or skipped) polls. A device still
