@@ -223,12 +223,14 @@ class GoveeBleLocalLight(GoveeBleLocalEntity, LightEntity):
     def _apply_effect_list(self) -> None:
         """Offer the scenes the device offers now, on a light that offers effects.
 
-        Re-read on every update: from govee-ble-local 1.5.0 the scenes a device
-        offers follow its scene set, which the hardware/soft versions read after
-        setup (and the advertised pact) decide, so the list can shrink then. Like
-        the Kelvin range it is a capability attribute: the state, the entity
-        registry's capabilities and the effect picker follow. Not on a light set
-        up without effects (an unreadable scene store), whose reads would fail.
+        Re-read on every update. With govee-ble-local 1.5.0 (G1, not yet released)
+        the scenes a device offers follow its scene set, which the hardware/soft
+        versions read after setup and the advertised pact decide: the list can
+        shrink after the device-info read and change either way with the pact.
+        Earlier libraries offer the same scenes throughout. Like the Kelvin range
+        it is a capability attribute: the state, the entity registry's
+        capabilities and the effect picker follow. Not on a light set up without
+        effects (an unreadable scene store), whose reads would fail.
         """
         if self._attr_effect_list is None:
             return
