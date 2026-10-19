@@ -87,6 +87,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sent 1-8 s after a poll now opens a new connection instead of reusing the poll's.
 
 ### Changed
+- **Requires `govee-ble-local` 1.5.0 or newer** (`>=1.5.0,<2`, was `>=1.2.1,<2`): the
+  advertised-protocol support check and the opt-in for unverified models use what 1.5.0 adds. Home
+  Assistant installs the new library itself on the next restart.
 - **Far fewer background connections, driven by what the advertisements show.** A Govee light's
   advertisement carries its on/off state (nothing else), so while Home Assistant has heard that
   byte in the last 3 minutes it no longer polls every 2 minutes regardless:
