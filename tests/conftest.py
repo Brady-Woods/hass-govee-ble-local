@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Generator, Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import timedelta
 import time
 from types import SimpleNamespace
@@ -20,6 +21,7 @@ from unittest.mock import AsyncMock, PropertyMock, patch
 
 from bleak.backends.device import BLEDevice
 from bleak.backends.scanner import AdvertisementData
+import govee_ble_local
 from govee_ble_local import Device, create_device
 from govee_ble_local.models import Encryption
 from homeassistant.components.bluetooth import BluetoothServiceInfoBleak
@@ -35,7 +37,7 @@ from custom_components.govee_ble_local import capture as capture_module
 from custom_components.govee_ble_local.const import CONF_SKU, DOMAIN
 from custom_components.govee_ble_local.coordinator import GoveeBleLocalCoordinator
 
-from .const import ADDRESS, LOCAL_NAME, TITLE, govee_mfg
+from .const import ADDRESS, LOCAL_NAME, TITLE, govee_mfg, pact_mfg
 
 pytest_plugins = ["pytest_homeassistant_custom_component"]
 
@@ -289,6 +291,57 @@ def entity_registry_enabled_by_default() -> Generator[None]:
         return_value=True,
     ):
         yield
+
+
+@dataclass(frozen=True)
+class ModelledCase:
+    """A model the library supports only as "modelled", at a pact its modelled row accepts."""
+
+    sku: str
+    pact: tuple[int, int]
+    # A pact none of its modelled rows lists: the library serves it, but not there.
+    unlisted_pact: tuple[int, int]
+
+    @property
+    def name(self) -> str:
+        """The name it advertises."""
+        return f"Govee_{self.sku}_ABCD"
+
+    def info(
+        self, *, manufacturer_data: dict[int, bytes] | None = None, advertisement: bool = False
+    ) -> BluetoothServiceInfoBleak:
+        """Its advert: at that pact, unless other manufacturer data is given."""
+        mfg = pact_mfg(*self.pact) if manufacturer_data is None else manufacturer_data
+        return make_service_info(name=self.name, manufacturer_data=mfg, advertisement=advertisement)
+
+
+@pytest.fixture
+def modelled() -> ModelledCase:
+    """A model the installed library supports only as "modelled", at one of its rows' pacts.
+
+    Taken from the library, never a fixed list: what counts as modelled moves. The pacts
+    tried are each modelled row's own, read from the library's route table (a test-only
+    look at a private name, imported here so a move fails only these tests, not the
+    collection of every module). The unlisted pact is the first outside all of them.
+    """
+    from govee_ble_local.devices import profile as library_profiles  # noqa: PLC0415
+
+    lib = govee_ble_local
+    skus = sorted(set(lib.supported_skus(allow_modelled=True)) - set(lib.supported_skus()))
+    routes = getattr(library_profiles, "_MODELLED", (None, {}))[1]
+    grid = [(t, c) for t in range(1, 16) for c in range(1, 16)]
+    for sku in skus:
+        rows = routes.get(sku, ())
+        if not rows or any(row.pacts is None for row in rows):
+            continue  # a row that takes any pact leaves no unlisted one
+        listed = sorted(set().union(*(row.pacts for row in rows)))
+        unlisted = next((pact for pact in grid if pact not in listed), None)
+        for pact in listed:
+            if unlisted is not None and lib.is_supported_sku(sku, pact=pact, allow_modelled=True):
+                assert not lib.is_supported_sku(sku, pact=pact)
+                assert not lib.is_supported_sku(sku, pact=unlisted, allow_modelled=True)
+                return ModelledCase(sku, pact, unlisted)
+    pytest.fail("found no modelled-only model at one of its rows' pacts in the installed library")
 
 
 @pytest.fixture

@@ -35,6 +35,7 @@ from homeassistant.helpers.typing import UNDEFINED, ConfigType
 
 from .capture import LogCapture, SelfTestReport
 from .const import (
+    CONF_ALLOW_MODELLED,
     CONF_SECRET,
     CONF_SKU,
     DOMAIN,
@@ -137,6 +138,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: GoveeBleLocalConfigEntry
     # stored as hex in the config entry (see config_flow's secret steps).
     secret = _stored_secret(entry)
 
+    # Set by the config flow when the user opted in to a "modelled" model.
+    allow_modelled = bool(entry.data.get(CONF_ALLOW_MODELLED, False))
+
     try:
         device = create_device(
             ble_device,
@@ -144,10 +148,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: GoveeBleLocalConfigEntry
             advertisement,
             secret=secret,
             idle_disconnect=POLL_IDLE_DISCONNECT_SECONDS,
+            allow_modelled=allow_modelled,
         )
     except GoveeBleNotSupported as err:
         adv = identify(service_info.name, service_info.manufacturer_data) if service_info else None
-        if adv is not None and adv.pact is not None and is_supported_sku(sku):
+        if (
+            adv is not None
+            and adv.pact is not None
+            and is_supported_sku(sku, allow_modelled=allow_modelled)
+        ):
             # The library serves the model, only not at the pact the device advertises now.
             # A later advert can carry another, so retry instead of giving up for good.
             raise ConfigEntryNotReady(

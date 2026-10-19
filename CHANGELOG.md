@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Opt-in setup for unverified models (needs the next `govee-ble-local` release):** a model whose
+  support the library infers from the Govee app, rather than checking it against the app's own
+  controls, and that hasn't been tested on a real device, is no longer simply refused. Discovery
+  and manual setup ask first, say plainly that its support is inferred and untested, and set it up
+  only if you accept. The choice is stored in the device's entry, and deleting the entry
+  withdraws it. Fully unsupported models are still not offered. Setup now
+  always passes the choice to the library, so every entry needs that release, not only new ones;
+  with it, existing entries set up as before.
 - **H61A8 colour temperature (with the next library release):** a `govee-ble-local` release after
   1.3.0 gives the H61A8 colour temperature and per-segment brightness. The main and segment lights
   then offer colour temperature over the range the library gives that unit (2700-6500 K, widening

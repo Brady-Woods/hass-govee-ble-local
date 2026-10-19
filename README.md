@@ -37,6 +37,11 @@ device-agnostic library (see **Architecture**), so adding a model is mostly a
 matter of describing its capabilities in a profile, not re-implementing the
 transport. The curated devices above double as the **real-hardware test set**.
 
+Some models are supported only by inference from the Govee app: their support isn't checked
+against the app's own controls, and they haven't been tested on a real device. Setting one of
+those up asks you first; if you accept, the choice is stored in that device's entry, and
+deleting the entry withdraws it.
+
 ## Features
 
 - Fully local control over BLE — works with airplane mode / no internet

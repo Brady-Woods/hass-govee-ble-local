@@ -19,6 +19,9 @@ CONF_SECRET = "secret"  # noqa: S105 - a config key, not a secret
 # Reconfigure-form checkbox: explicitly remove the stored secret (a blank secret
 # field keeps the existing one).
 CONF_CLEAR_SECRET = "clear_secret"  # noqa: S105 - a config key
+# True when the user chose to set up a model the library supports only as "modelled" (inferred
+# from the app, not traced or hardware-verified); absent means False.
+CONF_ALLOW_MODELLED = "allow_modelled"
 
 # Colour-temperature range assumed when the library's profile doesn't give one.
 DEFAULT_MIN_KELVIN = 2700

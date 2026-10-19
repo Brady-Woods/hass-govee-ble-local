@@ -36,6 +36,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.govee_ble_local import capture
 from custom_components.govee_ble_local.const import (
+    CONF_ALLOW_MODELLED,
     CONF_SECRET,
     CONF_SKU,
     DOMAIN,
@@ -47,6 +48,7 @@ from custom_components.govee_ble_local.coordinator import GoveeBleLocalCoordinat
 
 from .conftest import (
     FakeConnection,
+    ModelledCase,
     advance,
     advertisement_callback,
     allow_adverts,
@@ -502,9 +504,28 @@ async def test_setup_sku_from_advertisement(
     assert create.call_args.kwargs == {
         "secret": None,
         "idle_disconnect": POLL_IDLE_DISCONNECT_SECONDS,
+        "allow_modelled": False,  # an entry without the opt-in
     }
     # A finished poll's link is dropped soon: 0 or less would never drop it.
     assert POLL_IDLE_DISCONNECT_SECONDS > 0
+
+
+async def test_setup_passes_the_modelled_opt_in(
+    hass: HomeAssistant, mock_device: Device, mock_bluetooth: SimpleNamespace
+) -> None:
+    """An entry the user opted in for a "modelled" model sets the device up with it."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title=TITLE,
+        unique_id=ADDRESS,
+        data={"address": ADDRESS, CONF_SKU: "H60A6", CONF_ALLOW_MODELLED: True},
+    )
+    entry.add_to_hass(hass)
+    with patch(
+        "custom_components.govee_ble_local.create_device", return_value=mock_device
+    ) as create:
+        assert await hass.config_entries.async_setup(entry.entry_id)
+    assert create.call_args.kwargs["allow_modelled"] is True
 
 
 @pytest.mark.parametrize(
@@ -542,8 +563,17 @@ async def test_unsupported_model_is_a_permanent_error(
         await hass.config_entries.async_setup(entry.entry_id)
     assert create.call_args.args[1] == "H9999"
     assert entry.state is ConfigEntryState.SETUP_ERROR
-    assert (
-        entry.reason == "The Govee model H9999 is not supported by this version of the integration"
+    assert entry.error_reason_translation_key == "model_not_supported"
+    assert entry.error_reason_translation_placeholders == {"sku": "H9999"}
+    assert entry.reason is not None
+    assert entry.reason.startswith("The Govee model H9999 is not supported")
+
+
+def _fake_transport() -> Any:
+    """Build every library Device on a FakeConnection: the only fake in a real-library setup."""
+    return patch(
+        "govee_ble_local.devices.device.GoveeConnection",
+        side_effect=lambda *_a, **_k: FakeConnection(),
     )
 
 
@@ -574,10 +604,7 @@ async def test_setup_with_the_real_library_routes_by_the_advertised_pact(
         domain=DOMAIN, title=TITLE, unique_id=ADDRESS, data={"address": ADDRESS, CONF_SKU: "H6009"}
     )
     entry.add_to_hass(hass)
-    with patch(
-        "govee_ble_local.devices.device.GoveeConnection",
-        side_effect=lambda *_a, **_k: FakeConnection(),
-    ):
+    with _fake_transport():
         await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done(wait_background_tasks=True)
         assert entry.state is state
@@ -594,6 +621,57 @@ async def test_setup_with_the_real_library_routes_by_the_advertised_pact(
             }
             assert entry.reason is not None
             assert "advertises protocol version 2,3" in entry.reason
+
+
+@pytest.mark.parametrize(
+    ("opted_in", "other_pact", "state"),
+    [
+        (True, False, ConfigEntryState.LOADED),
+        (False, False, ConfigEntryState.SETUP_ERROR),  # not supported without the opt-in
+        (True, True, ConfigEntryState.SETUP_RETRY),  # served as modelled, not at this pact
+    ],
+    ids=["opted_in", "not_opted_in", "opted_in_other_pact"],
+)
+async def test_setup_with_the_real_library_takes_the_modelled_opt_in(
+    hass: HomeAssistant,
+    presence: SimpleNamespace,
+    mock_bluetooth: SimpleNamespace,
+    modelled: ModelledCase,
+    *,
+    opted_in: bool,
+    other_pact: bool,
+    state: ConfigEntryState,
+) -> None:
+    """The real create_device sets a modelled-only model up only for an entry that opted in.
+
+    At a pact its rows don't list, the opted-in model is still one the library serves, so
+    setup retries rather than failing for good.
+    """
+    info = modelled.info(
+        manufacturer_data=pact_mfg(*modelled.unlisted_pact) if other_pact else None,
+        advertisement=True,
+    )
+    presence.service_info = mock_bluetooth.last_info.return_value = info
+    data: dict[str, Any] = {"address": ADDRESS, CONF_SKU: modelled.sku}
+    if opted_in:
+        data[CONF_ALLOW_MODELLED] = True
+    entry = MockConfigEntry(domain=DOMAIN, title=TITLE, unique_id=ADDRESS, data=data)
+    entry.add_to_hass(hass)
+    with _fake_transport():
+        await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done(wait_background_tasks=True)
+        assert entry.state is state
+        if state is ConfigEntryState.LOADED:
+            assert entry.runtime_data.device.profile == profile_for(
+                modelled.sku, pact=modelled.pact, allow_modelled=True
+            )
+            assert await hass.config_entries.async_unload(entry.entry_id)
+        if other_pact:
+            assert entry.error_reason_translation_key == "protocol_not_supported"
+            assert entry.error_reason_translation_placeholders == {
+                "sku": modelled.sku,
+                "protocol": "{},{}".format(*modelled.unlisted_pact),
+            }
 
 
 async def test_setup_passes_secret_to_library(

@@ -5,6 +5,14 @@
       "bluetooth_confirm": {
         "description": "Do you want to set up {name}?"
       },
+      "modelled_confirm": {
+        "title": "Set up an unverified model?",
+        "description": "{name} is a Govee {model}. This integration's support for that model is inferred from the Govee app rather than checked against the app's own controls, and it hasn't been tested on a real device, so some or all of its controls may not work.",
+        "menu_options": {
+          "modelled_accept": "Set it up anyway",
+          "modelled_decline": "Don't set it up"
+        }
+      },
       "user": {
         "data": {
           "address": "Device"
@@ -59,7 +67,8 @@
       "protocol_not_supported": "This Govee model is supported, but not at the protocol version the device is advertising now, so it can't be set up.",
       "reconfigure_successful": "Device reloaded successfully.",
       "reauth_successful": "Secret key updated.",
-      "unknown": "Unexpected error: the setup flow lost track of the device. Please start again."
+      "unknown": "Unexpected error: the setup flow lost track of the device. Please start again.",
+      "modelled_declined": "Setup cancelled: support for this model is inferred, not checked against the Govee app's own controls or tested on a real device. If it's offered again, choose Ignore to stop seeing it."
     },
     "progress": {
       "read_secret": "Trying to read {name}'s secret key directly from the device. This only works while it is unbound (factory-reset) and can take up to a minute."
@@ -155,7 +164,7 @@
       "message": "Could not find the Govee device {address} over Bluetooth; make sure it is powered on and in range."
     },
     "model_not_supported": {
-      "message": "The Govee model {sku} is not supported by this version of the integration."
+      "message": "The Govee model {sku} is not supported by this version of the integration. If this version offers it as an unverified model, delete this entry and add the device again to opt in."
     },
     "protocol_not_supported": {
       "message": "The Govee {sku} advertises protocol version {protocol}, which this version of the integration doesn't support for that model. Setup will be retried in case the device advertises another."

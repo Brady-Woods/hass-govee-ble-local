@@ -52,12 +52,13 @@ if TYPE_CHECKING:
 else:
     import voluptuous as vol
 
-from .const import CONF_CLEAR_SECRET, CONF_SECRET, CONF_SKU, DOMAIN
+from .const import CONF_ALLOW_MODELLED, CONF_CLEAR_SECRET, CONF_SECRET, CONF_SKU, DOMAIN
 from .helpers import BLE_ERRORS, parse_secret
 
 _LOGGER = logging.getLogger(__name__)
 
 _MENU_OPTIONS = ["secret_cloud", "secret_manual"]
+_MODELLED_OPTIONS = ["modelled_accept", "modelled_decline"]
 _SECRET_SCHEMA = vol.Schema({vol.Optional(CONF_SECRET, default=""): str})
 _CLOUD_SCHEMA = vol.Schema(
     {
@@ -81,6 +82,8 @@ class _PendingDevice:
     # parseable pact, or reauth) looks the SKU up at any pact. _finish() re-checks the
     # device at the pact of the advert setup will route by, when that one differs.
     pact: tuple[int, int] | None = None
+    # Supported only as "modelled" (allow_modelled): set up only after the user confirms.
+    modelled: bool = False
 
 
 class _CloudAuthErrorUnavailable(GoveeCloudError):
@@ -107,17 +110,28 @@ def _supported_device(info: BluetoothServiceInfoBleak) -> _PendingDevice | None:
     """Return the device to set up if this advertisement is a supported Govee device.
 
     Support is checked at the advertised pact, as setup's create_device() routes by it:
-    a model the library serves only at some pacts is not offered at another one.
+    a model the library serves only at some pacts is not offered at another one. A model
+    the library supports only as "modelled" is returned flagged, for the user to confirm.
     """
     adv = identify(info.name, info.manufacturer_data)
-    if adv is None or not is_supported_sku(adv.sku, pact=adv.pact):
+    if adv is None:
         return None
-    return _PendingDevice(address=info.address, sku=adv.sku, title=info.name, pact=adv.pact)
+    if is_supported_sku(adv.sku, pact=adv.pact):
+        modelled = False
+    elif is_supported_sku(adv.sku, pact=adv.pact, allow_modelled=True):
+        modelled = True
+    else:
+        return None
+    return _PendingDevice(
+        address=info.address, sku=adv.sku, title=info.name, pact=adv.pact, modelled=modelled
+    )
 
 
-def _requires_secret(sku: str, pact: tuple[int, int] | None = None) -> bool:
+def _requires_secret(
+    sku: str, pact: tuple[int, int] | None = None, *, allow_modelled: bool = False
+) -> bool:
     """Return True if this SKU's device profile (at ``pact``) gates commands behind a secret."""
-    profile = profile_for(sku, pact=pact)
+    profile = profile_for(sku, pact=pact, allow_modelled=allow_modelled)
     return bool(profile and profile.requires_secret)
 
 
@@ -151,6 +165,8 @@ class GoveeBleLocalConfigFlow(ConfigFlow, domain=DOMAIN):
             return self.async_abort(reason="not_supported")
         self._pending = pending
         self.context["title_placeholders"] = {"name": discovery_info.name}
+        if pending.modelled:
+            return await self.async_step_modelled_confirm()
         return await self.async_step_bluetooth_confirm()
 
     async def async_step_bluetooth_confirm(
@@ -172,15 +188,19 @@ class GoveeBleLocalConfigFlow(ConfigFlow, domain=DOMAIN):
             address = user_input[CONF_ADDRESS]
             await self.async_set_unique_id(address, raise_on_progress=False)
             self._abort_if_unique_id_configured()
-            return await self._finish(self._discovered[address])
+            device = self._discovered[address]
+            if device.modelled:
+                self._pending = device
+                return await self.async_step_modelled_confirm()
+            return await self._finish(device)
 
         current = self._async_current_ids()
         self._discovered = {}
         for info in async_discovered_service_info(self.hass):
             if info.address in current or not info.name:
                 continue
-            if (device := _supported_device(info)) is not None:
-                self._discovered[info.address] = device
+            if (found := _supported_device(info)) is not None:
+                self._discovered[info.address] = found
         if not self._discovered:
             return self.async_abort(reason="no_devices_found")
 
@@ -195,16 +215,39 @@ class GoveeBleLocalConfigFlow(ConfigFlow, domain=DOMAIN):
             ),
         )
 
+    async def async_step_modelled_confirm(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Ask before setting up a model whose support is modelled, not traced or verified."""
+        pending = self._require_pending()
+        return self.async_show_menu(
+            step_id="modelled_confirm",
+            menu_options=_MODELLED_OPTIONS,
+            description_placeholders={"name": pending.title, "model": pending.sku},
+        )
+
+    async def async_step_modelled_accept(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Set the modelled device up after all (its entry records the choice)."""
+        return await self._finish(self._require_pending())
+
+    async def async_step_modelled_decline(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Don't set the modelled device up."""
+        return self.async_abort(reason="modelled_declined")
+
     async def _finish(self, device: _PendingDevice) -> ConfigFlowResult:
         """Create the entry, or first collect the secret key if the device needs one."""
         if (pact := self._setup_pact(device.address)) is not None and pact != device.pact:
             # Setup routes by the latest connectable advert, whose pact can differ from the
             # flow's (which may have had none: any pact), so don't create an entry it would
             # refuse. Without one, setup waits for the device and the flow's pact stands.
-            if not is_supported_sku(device.sku, pact=pact):
+            if not is_supported_sku(device.sku, pact=pact, allow_modelled=device.modelled):
                 return self.async_abort(reason="protocol_not_supported")
             device = replace(device, pact=pact)
-        if _requires_secret(device.sku, device.pact):
+        if _requires_secret(device.sku, device.pact, allow_modelled=device.modelled):
             self._pending = device
             return await self.async_step_secret()
         return self._create_entry(device)
@@ -217,14 +260,18 @@ class GoveeBleLocalConfigFlow(ConfigFlow, domain=DOMAIN):
 
     def _create_entry(self, device: _PendingDevice, secret: str | None = None) -> ConfigFlowResult:
         """Create the entry for ``device``, with its secret key if it has one."""
-        data = {CONF_ADDRESS: device.address, CONF_SKU: device.sku}
+        data: dict[str, Any] = {CONF_ADDRESS: device.address, CONF_SKU: device.sku}
         if secret:
             data[CONF_SECRET] = secret
+        if device.modelled:
+            data[CONF_ALLOW_MODELLED] = True
         return self.async_create_entry(title=device.title, data=data)
 
     # -- secret -------------------------------------------------------------
 
-    async def _read_secret_from_device(self, address: str, sku: str) -> str | None:
+    async def _read_secret_from_device(
+        self, address: str, sku: str, *, allow_modelled: bool = False
+    ) -> str | None:
         """Try to read the 8-byte secret straight off the device over BLE.
 
         Works only while the device is UNBOUND (factory-reset, not paired to the
@@ -236,7 +283,12 @@ class GoveeBleLocalConfigFlow(ConfigFlow, domain=DOMAIN):
             return None
         info = async_last_service_info(self.hass, address, connectable=True)
         try:
-            device = create_device(ble_device, sku, info.advertisement if info else None)
+            device = create_device(
+                ble_device,
+                sku,
+                info.advertisement if info else None,
+                allow_modelled=allow_modelled,
+            )
         except GoveeBleError as err:
             _LOGGER.debug("Cannot create device %s (%s): %s", address, sku, err)
             return None
@@ -262,7 +314,9 @@ class GoveeBleLocalConfigFlow(ConfigFlow, domain=DOMAIN):
         pending = self._require_pending()
         if self._read_task is None:
             self._read_task = self.hass.async_create_task(
-                self._read_secret_from_device(pending.address, pending.sku),
+                self._read_secret_from_device(
+                    pending.address, pending.sku, allow_modelled=pending.modelled
+                ),
                 f"{DOMAIN}_read_secret_{pending.address}",
             )
         if not self._read_task.done():
@@ -388,7 +442,9 @@ class GoveeBleLocalConfigFlow(ConfigFlow, domain=DOMAIN):
         """
         entry = self._get_reauth_entry()
         self._pending = _PendingDevice(
-            address=entry_data[CONF_ADDRESS], sku=entry_data.get(CONF_SKU, ""), title=entry.title
+            address=entry_data[CONF_ADDRESS],
+            sku=entry_data.get(CONF_SKU, ""),
+            title=entry.title,
         )
         return await self.async_step_reauth_confirm()
 
@@ -416,7 +472,9 @@ class GoveeBleLocalConfigFlow(ConfigFlow, domain=DOMAIN):
         """
         entry = self._get_reconfigure_entry()
         sku: str = entry.data.get(CONF_SKU, "")
-        needs_secret = bool(sku) and _requires_secret(sku)
+        needs_secret = bool(sku) and _requires_secret(
+            sku, allow_modelled=bool(entry.data.get(CONF_ALLOW_MODELLED, False))
+        )
         errors: dict[str, str] = {}
 
         if user_input is not None:

@@ -33,13 +33,14 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from custom_components.govee_ble_local import config_flow
 from custom_components.govee_ble_local.config_flow import GoveeBleLocalConfigFlow
 from custom_components.govee_ble_local.const import (
+    CONF_ALLOW_MODELLED,
     CONF_CLEAR_SECRET,
     CONF_SECRET,
     CONF_SKU,
     DOMAIN,
 )
 
-from .conftest import make_device, make_service_info
+from .conftest import ModelledCase, make_device, make_service_info
 from .const import ADDRESS, LOCAL_NAME, PLUG_ADDRESS, PLUG_NAME, SECRET_HEX, pact_mfg
 
 FLOW = "custom_components.govee_ble_local.config_flow"
@@ -343,7 +344,7 @@ async def test_bluetooth_discovery_checks_support_at_the_advertised_pact(
         result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
     assert result["type"] is FlowResultType.CREATE_ENTRY
     # The secret check looked the profile up at the same pact (threaded, not re-derived).
-    assert profile.call_args.kwargs == {"pact": pact}
+    assert profile.call_args.kwargs == {"pact": pact, "allow_modelled": False}
 
 
 @PACT_CASES
@@ -365,7 +366,7 @@ async def test_user_flow_offers_only_devices_supported_at_their_pact(
             result["flow_id"], {CONF_ADDRESS: ADDRESS}
         )
     assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert profile.call_args.kwargs == {"pact": pact}
+    assert profile.call_args.kwargs == {"pact": pact, "allow_modelled": False}
 
 
 @pytest.mark.parametrize(
@@ -423,7 +424,141 @@ async def test_finish_rechecks_at_the_setup_advert_pact(
         assert hass.config_entries.async_entries(DOMAIN) == []
     else:
         assert result["type"] is FlowResultType.CREATE_ENTRY
-        assert profile.call_args.kwargs == {"pact": entry_pact}
+        assert profile.call_args.kwargs == {"pact": entry_pact, "allow_modelled": False}
+
+
+# -- modelled-only models ---------------------------------------------------------
+
+
+async def test_modelled_model_asks_before_setup_and_records_the_opt_in(
+    hass: HomeAssistant, setup_entry: AsyncMock, modelled: ModelledCase
+) -> None:
+    """Discovery asks before setting up a modelled-only model, and the entry records the yes."""
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": SOURCE_BLUETOOTH}, data=modelled.info()
+    )
+    assert result["type"] is FlowResultType.MENU
+    assert result["step_id"] == "modelled_confirm"
+    assert result["menu_options"] == ["modelled_accept", "modelled_decline"]
+    assert result["description_placeholders"] == {"name": modelled.name, "model": modelled.sku}
+
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"next_step_id": "modelled_accept"}
+    )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["data"] == {
+        CONF_ADDRESS: ADDRESS,
+        CONF_SKU: modelled.sku,
+        CONF_ALLOW_MODELLED: True,
+    }
+
+
+async def test_declining_a_modelled_model_aborts(
+    hass: HomeAssistant, modelled: ModelledCase
+) -> None:
+    """Declining the modelled-only model ends the flow without an entry."""
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": SOURCE_BLUETOOTH}, data=modelled.info()
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"next_step_id": "modelled_decline"}
+    )
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "modelled_declined"
+    assert not hass.config_entries.async_entries(DOMAIN)
+
+
+async def test_manual_setup_of_a_modelled_model_asks_too(
+    hass: HomeAssistant, setup_entry: AsyncMock, modelled: ModelledCase
+) -> None:
+    """Picking a modelled-only model from the manual list asks the same question."""
+    with patch(f"{FLOW}.async_discovered_service_info", return_value=[modelled.info()]):
+        result = await hass.config_entries.flow.async_init(DOMAIN, context={"source": SOURCE_USER})
+    assert next(iter(result["data_schema"].schema.values())).container == {ADDRESS: modelled.name}
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_ADDRESS: ADDRESS}
+    )
+    assert result["type"] is FlowResultType.MENU
+    assert result["step_id"] == "modelled_confirm"
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"next_step_id": "modelled_accept"}
+    )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["data"][CONF_ALLOW_MODELLED] is True
+
+
+async def test_modelled_opt_in_reaches_the_secret_check(
+    hass: HomeAssistant, setup_entry: AsyncMock, modelled: ModelledCase
+) -> None:
+    """The profile behind the secret decision is the modelled one the user accepted."""
+    with patch(f"{FLOW}.profile_for", wraps=config_flow.profile_for) as profile:
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": SOURCE_BLUETOOTH}, data=modelled.info()
+        )
+        await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"next_step_id": "modelled_accept"}
+        )
+    assert profile.call_args.kwargs == {"pact": modelled.pact, "allow_modelled": True}
+
+
+async def test_pactless_modelled_model_is_rechecked_with_the_opt_in(
+    hass: HomeAssistant, setup_entry: AsyncMock, modelled: ModelledCase
+) -> None:
+    """A pact-less modelled-only model is re-checked at setup's pact as modelled, not refused."""
+    info = modelled.info(manufacturer_data={})
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": SOURCE_BLUETOOTH}, data=info
+    )
+    assert result["step_id"] == "modelled_confirm"
+    with patch(f"{FLOW}.async_last_service_info", return_value=modelled.info()):
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"next_step_id": "modelled_accept"}
+        )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["data"][CONF_ALLOW_MODELLED] is True
+
+
+async def test_modelled_opt_in_reaches_the_secret_read(
+    hass: HomeAssistant, setup_entry: AsyncMock, modelled: ModelledCase
+) -> None:
+    """A modelled device that needs a secret is read with the modelled profile.
+
+    Pins both hand-offs: the read task passes the opt-in, and the read passes it to
+    create_device.
+    """
+    ble_device = BLEDevice(address=ADDRESS, name=modelled.name, details={})
+    with (
+        patch(f"{FLOW}._requires_secret", return_value=True),
+        patch(f"{FLOW}.async_ble_device_from_address", return_value=ble_device),
+        patch(f"{FLOW}.async_last_service_info", return_value=modelled.info()),
+        patch(f"{FLOW}.create_device", side_effect=GoveeBleConnectionError("no link")) as create,
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": SOURCE_BLUETOOTH}, data=modelled.info()
+        )
+        await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"next_step_id": "modelled_accept"}
+        )
+        await hass.async_block_till_done()
+    assert create.call_args.args[:2] == (ble_device, modelled.sku)
+    assert create.call_args.kwargs == {"allow_modelled": True}
+
+
+@pytest.mark.parametrize("opted_in", [True, False])
+async def test_reconfigure_checks_the_secret_with_the_entrys_opt_in(
+    hass: HomeAssistant, setup_entry: AsyncMock, modelled: ModelledCase, opted_in: bool
+) -> None:
+    """Reconfigure decides on the secret with the profile the entry was set up with."""
+    data: dict[str, Any] = {CONF_ADDRESS: ADDRESS, CONF_SKU: modelled.sku}
+    if opted_in:
+        data[CONF_ALLOW_MODELLED] = True
+    entry = MockConfigEntry(domain=DOMAIN, unique_id=ADDRESS, data=data)
+    entry.add_to_hass(hass)
+    with patch(f"{FLOW}.profile_for", wraps=config_flow.profile_for) as profile:
+        result = await entry.start_reconfigure_flow(hass)
+    assert result["step_id"] == "reconfigure"
+    assert profile.call_args.args == (modelled.sku,)
+    assert profile.call_args.kwargs == {"pact": None, "allow_modelled": opted_in}
 
 
 # -- user flow ----------------------------------------------------------------
@@ -949,6 +1084,25 @@ async def test_reauth_manual_updates_secret(hass: HomeAssistant, setup_entry: As
     await assert_set_up_once(hass, setup_entry)
 
 
+async def test_reauth_keeps_the_modelled_opt_in(
+    hass: HomeAssistant, setup_entry: AsyncMock
+) -> None:
+    """Replacing the secret keeps the entry's opt-in: without it, setup would refuse the model."""
+    entry = plug_entry(**{CONF_SECRET: OTHER_SECRET_HEX, CONF_ALLOW_MODELLED: True})
+    menu = await start_reauth(hass, entry)
+    form = await choose(hass, menu, "secret_manual")
+    result = await hass.config_entries.flow.async_configure(
+        form["flow_id"], {CONF_SECRET: SECRET_HEX}
+    )
+    assert result["reason"] == "reauth_successful"
+    assert entry.data == {
+        CONF_ADDRESS: PLUG_ADDRESS,
+        CONF_SKU: "H5083",
+        CONF_SECRET: SECRET_HEX,
+        CONF_ALLOW_MODELLED: True,
+    }
+
+
 async def test_reauth_manual_blank_rejected(hass: HomeAssistant) -> None:
     """A blank key can't replace a rejected one."""
     entry = plug_entry(**{CONF_SECRET: OTHER_SECRET_HEX})
@@ -1062,6 +1216,25 @@ async def test_reconfigure_blank_keeps_secret(
     assert result["reason"] == "reconfigure_successful"
     assert entry.data[CONF_SECRET] == SECRET_HEX
     await assert_set_up_once(hass, setup_entry)
+
+
+async def test_reconfigure_keeps_the_modelled_opt_in(
+    hass: HomeAssistant, setup_entry: AsyncMock
+) -> None:
+    """Changing the secret keeps the entry's opt-in: without it, setup would refuse the model."""
+    entry = plug_entry(**{CONF_SECRET: OTHER_SECRET_HEX, CONF_ALLOW_MODELLED: True})
+    entry.add_to_hass(hass)
+    result = await entry.start_reconfigure_flow(hass)
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_SECRET: SECRET_HEX}
+    )
+    assert result["reason"] == "reconfigure_successful"
+    assert entry.data == {
+        CONF_ADDRESS: PLUG_ADDRESS,
+        CONF_SKU: "H5083",
+        CONF_SECRET: SECRET_HEX,
+        CONF_ALLOW_MODELLED: True,
+    }
 
 
 async def test_reconfigure_replaces_secret(hass: HomeAssistant, setup_entry: AsyncMock) -> None:
