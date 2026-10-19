@@ -5,12 +5,16 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from datetime import timedelta
+import importlib.metadata
 import logging
+from pathlib import Path
 import zlib
 
+import govee_ble_local
 from govee_ble_local import (
     Capability,
     Device,
+    GoveeBleError,
     GoveeBleNotSupported,
     create_device,
     is_supported_sku,
@@ -32,6 +36,7 @@ from homeassistant.helpers import (
 )
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.typing import UNDEFINED, ConfigType
+from homeassistant.util.hass_dict import HassKey
 
 from .capture import LogCapture, SelfTestReport
 from .const import (
@@ -54,6 +59,8 @@ from .helpers import clean_mac, clean_text, is_colour_zone, parse_secret
 from .services import async_register_services
 
 _LOGGER = logging.getLogger(__name__)
+# Whether a broken scene store was already reported this run (once, not per device).
+_SCENE_STORE_REPORTED: HassKey[bool] = HassKey(f"{DOMAIN}_scene_store_reported")
 PLATFORMS: list[Platform] = [
     Platform.LIGHT,
     Platform.SWITCH,
@@ -76,6 +83,9 @@ class GoveeBleLocalRuntimeData:
     self_test: asyncio.Task[SelfTestReport] | None = field(default=None, repr=False)
     # Most recent self-test report (button / capture_session service), for diagnostics.
     last_self_test: SelfTestReport | None = field(default=None, repr=False)
+    # The bundled scene names, read once at setup; None when the library's scene
+    # store couldn't be read (the light then offers no effects).
+    scene_names: list[str] | None = field(default_factory=list)
 
 
 type GoveeBleLocalConfigEntry = ConfigEntry[GoveeBleLocalRuntimeData]
@@ -101,6 +111,27 @@ def _resolve_sku(
         translation_domain=DOMAIN,
         translation_key="sku_unknown",
         translation_placeholders={"address": entry.data[CONF_ADDRESS]},
+    )
+
+
+@callback
+def _async_report_scene_store(hass: HomeAssistant, err: GoveeBleError) -> None:
+    """Log, once per run, that the installed library's scene store can't be read."""
+    if hass.data.get(_SCENE_STORE_REPORTED):
+        _LOGGER.debug("Scene store still unreadable: %s", err)
+        return
+    hass.data[_SCENE_STORE_REPORTED] = True
+    try:
+        version = importlib.metadata.version("govee-ble-local")
+    except importlib.metadata.PackageNotFoundError:
+        version = "unknown version"
+    _LOGGER.error(
+        "The installed govee-ble-local (%s, %s) can't read its bundled scene store: %s. "
+        "Govee lights keep working without effects; reinstall govee-ble-local "
+        "(restart Home Assistant after removing it) to bring them back",
+        version,
+        Path(govee_ble_local.__file__).parent,
+        err,
     )
 
 
@@ -197,10 +228,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: GoveeBleLocalConfigEntry
     # background.
     entry.async_on_unload(device.stop)
 
-    # Warm the (blocking, cached) scene-catalog read off the event loop so the
-    # light platform's effect_list access doesn't do file IO in the loop.
+    # Read the (blocking, cached) scene catalog off the event loop, so the light
+    # platform's effect list doesn't do file IO in the loop.
+    scene_names: list[str] | None = []
     if Capability.SCENES in device.capabilities:
-        await hass.async_add_executor_job(lambda: device.scene_names)
+        try:
+            scene_names = await hass.async_add_executor_job(lambda: device.scene_names)
+        except GoveeBleError as err:
+            # From govee-ble-local 1.5.0 a missing or corrupt bundled scene store
+            # raises for every model (1.4.x gave no effects). The light works
+            # without effects; only a reinstall of the library brings them back.
+            _async_report_scene_store(hass, err)
+            scene_names = None
 
     _async_remove_legacy_zone_entities(hass, address, device)
 
@@ -211,7 +250,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: GoveeBleLocalConfigEntry
 
     coordinator = GoveeBleLocalCoordinator(hass, entry, device)
     entry.runtime_data = GoveeBleLocalRuntimeData(
-        device=device, coordinator=coordinator, log_capture=log_capture
+        device=device, coordinator=coordinator, log_capture=log_capture, scene_names=scene_names
     )
 
     # The device is advertising (async_ble_device_from_address above found it),

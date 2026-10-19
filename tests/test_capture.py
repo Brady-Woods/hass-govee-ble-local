@@ -15,6 +15,7 @@ from govee_ble_local import (
     Device,
     GoveeBleAuthError,
     GoveeBleConnectionError,
+    GoveeBleError,
     Segment,
     Zone,
 )
@@ -206,6 +207,22 @@ def child_levels() -> Generator[Callable[[str, int], None]]:
 
 
 # -- full-surface runs ------------------------------------------------------
+
+
+async def test_self_test_skips_scenes_when_the_scene_store_is_unreadable(
+    broken_scene_store: GoveeBleError,
+) -> None:
+    """A broken scene store skips the scene steps with the reason; the rest of the test runs."""
+    device = make_device("H60A6")
+    _prime(device)
+
+    report = await async_run_self_test(device)
+
+    steps = {s["step"]: s for s in report["steps"]}
+    assert steps["scenes"]["skipped"] == f"scene store unreadable: {broken_scene_store}"
+    assert not [name for name in steps if name.startswith("scene:")]
+    assert report["ok"] is True
+    assert report["restored"] is True
 
 
 async def test_full_surface_run_on_h60a6() -> None:

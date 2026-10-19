@@ -33,6 +33,7 @@ from govee_ble_local import (
     Device,
     DeviceState,
     GoveeBleAuthError,
+    GoveeBleError,
     GoveeBleNotSupported,
     Segment,
     Zone,
@@ -514,7 +515,13 @@ async def _exercise_fixture(device: Device, steps: _Steps) -> None:
             lambda: _match(device.state.color_temp_kelvin, kelvin),
         )
     if Capability.SCENES in caps:
-        for name in device.scene_names[:_MAX_SCENES]:
+        try:
+            names = device.scene_names[:_MAX_SCENES]
+        except GoveeBleError as err:
+            # The library's scene store can't be read (a broken install).
+            steps.skip("scenes", f"scene store unreadable: {err}")
+            names = []
+        for name in names:
             await steps.run(
                 f"scene:{name}",
                 partial(device.set_scene_by_name, name),

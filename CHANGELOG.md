@@ -31,6 +31,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `error` text is unchanged.
 
 ### Fixed
+- **A broken `govee-ble-local` install no longer stops lights from setting up.** From 1.5.0 the
+  library raises for every model when its bundled scene store is missing or corrupt (1.4.x just
+  had no effects), which made every device with scenes fail setup. Lights now set up and work
+  without effects, Home Assistant logs one error naming the installed library and how to fix it
+  (reinstall it), the diagnostics show no scene count, and the self-test skips its scene steps.
 - **Discovery checks support at the device's advertised protocol (needs the next `govee-ble-local`
   release):** the config flow now asks the library whether a model is supported at the protocol
   version ("pact") its advertisement carries, the same way setup routes it. Some models are

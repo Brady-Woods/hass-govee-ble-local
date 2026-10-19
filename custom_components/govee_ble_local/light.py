@@ -158,10 +158,12 @@ class GoveeBleLocalLight(GoveeBleLocalEntity, LightEntity):
             modes = {ColorMode.BRIGHTNESS if Capability.BRIGHTNESS in caps else ColorMode.ONOFF}
         self._attr_supported_color_modes = modes
         _apply_kelvin_range(self, self._device)
-        if Capability.SCENES in caps:
+        # None: the library's scene store couldn't be read at setup; no effects then.
+        scene_names = entry.runtime_data.scene_names
+        if Capability.SCENES in caps and scene_names is not None:
             self._attr_supported_features = LightEntityFeature.EFFECT
             # EFFECT_OFF lets the user clear a running scene from the UI.
-            self._attr_effect_list = [EFFECT_OFF, *self._device.scene_names]
+            self._attr_effect_list = [EFFECT_OFF, *scene_names]
 
         # Default color mode when the device hasn't reported/been set to one.
         if ColorMode.COLOR_TEMP in modes:

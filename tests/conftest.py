@@ -22,7 +22,7 @@ from unittest.mock import AsyncMock, PropertyMock, patch
 from bleak.backends.device import BLEDevice
 from bleak.backends.scanner import AdvertisementData
 import govee_ble_local
-from govee_ble_local import Device, create_device
+from govee_ble_local import Device, GoveeBleError, create_device
 from govee_ble_local.models import Encryption
 from homeassistant.components.bluetooth import BluetoothServiceInfoBleak
 from homeassistant.core import HomeAssistant
@@ -354,6 +354,20 @@ def modelled() -> ModelledCase:
                 assert not lib.is_supported_sku(sku, pact=unlisted, allow_modelled=True)
                 return ModelledCase(sku, pact, unlisted)
     pytest.fail("found no modelled-only model at one of its rows' pacts in the installed library")
+
+
+@pytest.fixture
+def broken_scene_store() -> Generator[GoveeBleError]:
+    """Make every scene lookup fail as on a broken install (1.5.0 raises for every SKU).
+
+    Patches the two catalog functions the library's Device reads its scenes through.
+    """
+    err = GoveeBleError("scene catalog for H60A6 could not be read: FileNotFoundError()")
+    with (
+        patch("govee_ble_local.devices.device.load_scenes", side_effect=err),
+        patch("govee_ble_local.devices.device.scene_names_by_code", side_effect=err),
+    ):
+        yield err
 
 
 @pytest.fixture

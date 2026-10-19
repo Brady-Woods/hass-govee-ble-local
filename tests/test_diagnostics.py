@@ -6,7 +6,7 @@ import json
 import logging
 from types import SimpleNamespace
 
-from govee_ble_local import Device
+from govee_ble_local import Device, GoveeBleError
 from homeassistant.core import HomeAssistant
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
@@ -72,6 +72,17 @@ def mock_config_entry() -> MockConfigEntry:
         unique_id=ADDRESS,
         data={"address": ADDRESS, CONF_SKU: "H60A6", CONF_SECRET: SECRET_HEX},
     )
+
+
+async def test_diagnostics_with_an_unreadable_scene_store(
+    hass: HomeAssistant,
+    hass_client: ClientSessionGenerator,
+    broken_scene_store: GoveeBleError,
+    setup_integration: MockConfigEntry,
+) -> None:
+    """A broken scene store shows as no scene count, instead of failing the download."""
+    diagnostics = await get_diagnostics_for_config_entry(hass, hass_client, setup_integration)
+    assert diagnostics["device"]["scene_count"] is None
 
 
 async def test_diagnostics_structure(

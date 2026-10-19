@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.metadata
 import logging
 from types import SimpleNamespace
 from typing import Any
@@ -13,6 +14,7 @@ from bleak.backends.device import BLEDevice
 from govee_ble_local import (
     Device,
     GoveeBleConnectionError,
+    GoveeBleError,
     create_device,
     profile_for,
 )
@@ -34,7 +36,11 @@ from homeassistant.helpers import device_registry as dr, entity_registry as er
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.govee_ble_local import _first_poll_stagger, capture
+from custom_components.govee_ble_local import (
+    _async_report_scene_store,
+    _first_poll_stagger,
+    capture,
+)
 from custom_components.govee_ble_local.const import (
     CONF_ALLOW_MODELLED,
     CONF_SECRET,
@@ -515,6 +521,55 @@ async def test_first_poll_waits_for_a_command_sent_during_its_stagger(
     await advance(hass, POLL_HOLDOFF_AFTER_COMMAND_SECONDS + 1)
     await hass.async_block_till_done(wait_background_tasks=True)
     mock_device.update.assert_awaited_once()  # type: ignore[attr-defined]
+
+
+async def test_unreadable_scene_store_sets_up_without_effects(
+    hass: HomeAssistant,
+    broken_scene_store: GoveeBleError,
+    mock_config_entry: MockConfigEntry,
+    mock_device: Device,
+    *,
+    mock_bluetooth: SimpleNamespace,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A broken scene store costs the light its effects, not its setup."""
+    mock_config_entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(mock_config_entry.entry_id)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert mock_config_entry.state is ConfigEntryState.LOADED
+    assert mock_config_entry.runtime_data.scene_names is None
+
+    [record] = [r for r in caplog.records if "scene store" in r.getMessage()]
+    assert record.levelno == logging.ERROR
+    assert "govee-ble-local" in record.getMessage()
+    assert str(broken_scene_store) in record.getMessage()
+
+    attrs = hass.states.get("light.test_ceiling").attributes
+    assert "effect_list" not in attrs
+    await hass.services.async_call(
+        "light", "turn_on", {"entity_id": "light.test_ceiling", "brightness": 128}, blocking=True
+    )
+    mock_device.turn_on.assert_awaited()  # type: ignore[attr-defined]
+
+
+async def test_unreadable_scene_store_is_reported_once_per_run(
+    hass: HomeAssistant, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Every device hits the same broken store: one error, then debug lines."""
+    err = GoveeBleError("scene catalog could not be read")
+    with (
+        caplog.at_level(logging.DEBUG, logger="custom_components.govee_ble_local"),
+        # No package metadata (a vendored copy): the error still names the location.
+        patch(
+            "custom_components.govee_ble_local.importlib.metadata.version",
+            side_effect=importlib.metadata.PackageNotFoundError("govee-ble-local"),
+        ),
+    ):
+        _async_report_scene_store(hass, err)
+        _async_report_scene_store(hass, err)
+    records = [r for r in caplog.records if "scene store" in r.getMessage().lower()]
+    assert [r.levelno for r in records] == [logging.ERROR, logging.DEBUG]
+    assert "unknown version" in records[0].getMessage()
 
 
 async def test_setup_not_ready_when_device_not_seen(
