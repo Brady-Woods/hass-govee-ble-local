@@ -537,7 +537,7 @@ async def test_first_poll_waits_for_a_command_sent_during_its_stagger(
         stagger_over.set()
         for _ in range(20):
             await real_sleep(0)
-    assert coordinator._poll_waiting
+    assert coordinator._first_poll_waiting
     mock_device.update.assert_not_awaited()  # type: ignore[attr-defined]
 
     coordinator.async_note_command_finished()

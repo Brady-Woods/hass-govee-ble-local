@@ -24,7 +24,7 @@ from govee_ble_local import (
 from homeassistant.components.bluetooth import BluetoothChange
 from homeassistant.components.light import DATA_COMPONENT as LIGHT_DATA
 from homeassistant.const import STATE_OFF, STATE_UNAVAILABLE
-from homeassistant.core import HomeAssistant
+from homeassistant.core import CoreState, HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.update_coordinator import UpdateFailed
@@ -767,6 +767,137 @@ def _due_in(hass: HomeAssistant, handle: asyncio.TimerHandle) -> float:
     return handle.when() - hass.loop.time()
 
 
+async def _run_clock(hass: HomeAssistant, freezer: Any, seconds: float, step: float = 0.5) -> None:
+    """Let ``seconds`` pass on a moving clock (wall and loop time), running what falls due."""
+    for _ in range(round(seconds / step)):
+        freezer.tick(timedelta(seconds=step))
+        async_fire_time_changed(hass)
+        await hass.async_block_till_done()
+
+
+async def _set_up_with_stagger(
+    hass: HomeAssistant, entry: MockConfigEntry, device: Device, stagger: int
+) -> list[float]:
+    """Set the entry up with a real first-poll stagger; return the loop times polls ran at."""
+    polls: list[float] = []
+
+    async def _update(**_kwargs: Any) -> Any:
+        polls.append(hass.loop.time())
+        device.state.optimistic = False
+        return device.state
+
+    device.update.side_effect = _update  # type: ignore[attr-defined]
+    with patch("custom_components.govee_ble_local._first_poll_stagger", return_value=stagger):
+        entry.add_to_hass(hass)
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done(wait_background_tasks=False)
+    return polls
+
+
+async def test_a_first_poll_held_then_released_leaves_one_poll_timer(
+    hass: HomeAssistant,
+    freezer: Any,
+    jitter: MagicMock,
+    *,
+    mock_config_entry: MockConfigEntry,
+    mock_device: Device,
+    mock_bluetooth: SimpleNamespace,
+) -> None:
+    """A command during the stagger holds the first poll; released before HA's first timer, it
+    must cancel that timer, or two timers would poll for good (one cadence, one live timer)."""
+    polls = await _set_up_with_stagger(hass, mock_config_entry, mock_device, 30)
+    await _run_clock(hass, freezer, 20)
+    await _turn_on(hass)  # holds the first poll (due at 30 s) until 45 s
+    await _run_clock(hass, freezer, 15 * BASE)
+    assert len(_live_timers(hass, "wrap_handle_refresh_interval")) == 1
+    assert len(polls) <= 15 + 2  # one poll per base interval, not two
+
+
+async def test_a_rearm_keeps_a_held_first_poll(
+    hass: HomeAssistant, coordinator: GoveeBleLocalCoordinator, mock_device: Device
+) -> None:
+    """A re-arm (or a policy step that stops polls) drops a held scheduled poll, but the first
+    poll after setup still runs once when the hold-off ends."""
+    await _turn_on(hass)
+    mock_device.update.reset_mock()  # type: ignore[attr-defined]
+    await coordinator.async_background_poll()  # the first poll, held
+    coordinator._set_poll_interval(timedelta(seconds=BASE))
+    coordinator._schedule_refresh()
+    assert coordinator._first_poll_waiting
+    assert len(_live_timers(hass, "_async_holdoff_cap_reached")) == 1
+    await advance(hass, HOLDOFF + 1)
+    mock_device.update.assert_awaited_once()  # type: ignore[attr-defined]
+
+
+async def test_unload_drops_a_held_first_poll(
+    hass: HomeAssistant,
+    coordinator: GoveeBleLocalCoordinator,
+    mock_device: Device,
+    setup_integration: MockConfigEntry,
+) -> None:
+    """Unloading drops a held first poll and its cap: it doesn't run after the entry is gone."""
+    await _turn_on(hass)
+    mock_device.update.reset_mock()  # type: ignore[attr-defined]
+    await coordinator.async_background_poll()
+    assert await hass.config_entries.async_unload(setup_integration.entry_id)
+    assert not coordinator._first_poll_waiting
+    assert _live_timers(hass, "_async_holdoff_cap_reached") == []
+    await advance(hass, POLL_HOLDOFF_MAX_SECONDS + 1)
+    mock_device.update.assert_not_awaited()  # type: ignore[attr-defined]
+
+
+async def test_a_held_poll_doesnt_run_while_home_assistant_stops(
+    hass: HomeAssistant, coordinator: GoveeBleLocalCoordinator, mock_device: Device
+) -> None:
+    """Released, a held poll runs as HA's timer would: not once HA is stopping."""
+    await _turn_on(hass)
+    mock_device.update.reset_mock()  # type: ignore[attr-defined]
+    await coordinator.async_background_poll()
+    hass.set_state(CoreState.stopping)
+    try:
+        await advance(hass, HOLDOFF + 1)
+        mock_device.update.assert_not_awaited()  # type: ignore[attr-defined]
+    finally:
+        hass.set_state(CoreState.running)
+
+
+@pytest.mark.parametrize("rejected", [False, True], ids=["read", "secret_rejected"])
+async def test_a_poll_that_runs_meanwhile_is_the_held_first_poll(
+    hass: HomeAssistant,
+    coordinator: GoveeBleLocalCoordinator,
+    mock_device: Device,
+    *,
+    rejected: bool,
+) -> None:
+    """A refresh while the first poll is held (update_entity, the turn-on poll) is that poll:
+    the hold-off end doesn't connect again, nor after that refresh halted polls (the secret)."""
+    await _turn_on(hass)
+    mock_device.update.reset_mock()  # type: ignore[attr-defined]
+    await coordinator.async_background_poll()  # the first poll, held
+    if rejected:
+        mock_device.update.side_effect = GoveeBleAuthError("rejected")  # type: ignore[attr-defined]
+    await coordinator.async_refresh()
+    assert not coordinator._first_poll_waiting
+    assert _live_timers(hass, "_async_holdoff_cap_reached") == []
+    await advance(hass, HOLDOFF + 1)
+    mock_device.update.assert_awaited_once()  # type: ignore[attr-defined]
+
+
+async def test_the_cap_runs_a_held_first_poll_while_a_command_runs(
+    hass: HomeAssistant, coordinator: GoveeBleLocalCoordinator, mock_device: Device
+) -> None:
+    """With background polls stopped (a light turned off) and only the first poll held, the
+    cap still runs it while a command keeps the hold-off going."""
+    coordinator._async_clear_poll_interval()
+    coordinator.async_note_command_started()
+    mock_device.update.reset_mock()  # type: ignore[attr-defined]
+    await coordinator.async_background_poll()  # the first poll, held
+    assert not coordinator._poll_waiting
+    await advance(hass, POLL_HOLDOFF_MAX_SECONDS + 1)
+    mock_device.update.assert_awaited_once()  # type: ignore[attr-defined]
+    coordinator.async_note_command_finished()
+
+
 def _arm_poll_soon(coordinator: GoveeBleLocalCoordinator) -> None:
     """Re-arm HA's own poll timer 5 s out (jitter is 0 in these tests)."""
     coordinator._set_poll_interval(timedelta(seconds=5))
@@ -887,6 +1018,20 @@ async def test_a_command_ending_after_unload_arms_no_hold_off(
     assert _live_timers(hass, "_async_end_holdoff") == []
 
 
+async def test_a_command_landing_after_unload_arms_no_poll(
+    hass: HomeAssistant,
+    coordinator: GoveeBleLocalCoordinator,
+    setup_integration: MockConfigEntry,
+) -> None:
+    """A command that lands after the unload (HA doesn't cancel service calls) re-arms no poll
+    on the shut-down coordinator, even with a failure backoff it would otherwise reset."""
+    coordinator.consecutive_failures = 2
+    coordinator._set_poll_interval(timedelta(seconds=BASE * 2))
+    assert await hass.config_entries.async_unload(setup_integration.entry_id)
+    coordinator.async_handle_command_success()
+    assert _live_timers(hass, "wrap_handle_refresh_interval") == []
+
+
 async def test_unload_drops_a_held_off_poll(
     hass: HomeAssistant,
     coordinator: GoveeBleLocalCoordinator,
@@ -1001,6 +1146,135 @@ async def test_slow_floor_holds_through_a_restart_and_a_policy_step(
     with patch.object(coordinator, "_async_policy_step", return_value=PollPolicy.FIXED):
         assert coordinator._async_apply_policy()  # ON -> FIXED: the base cadence
     assert coordinator.nominal_interval == timedelta(seconds=BASE * 4)
+
+
+async def test_a_restart_at_the_slow_floor_doesnt_re_arm(
+    hass: HomeAssistant, coordinator: GoveeBleLocalCoordinator
+) -> None:
+    """An on-backoff already at the slow floor has nothing to cut back: no re-arm."""
+    coordinator.slow_poll_steps = 2
+    coordinator.poll_policy = PollPolicy.ON
+    coordinator._set_poll_interval(timedelta(seconds=BASE * 4))  # == the floor
+    with patch.object(coordinator, "_schedule_refresh") as schedule:
+        assert not coordinator._async_restart_on_backoff()
+    schedule.assert_not_called()
+    assert coordinator.nominal_interval == timedelta(seconds=BASE * 4)
+
+
+async def test_a_command_doesnt_reset_a_backoff_at_the_slow_floor(
+    hass: HomeAssistant, coordinator: GoveeBleLocalCoordinator
+) -> None:
+    """After failures, a command cuts a backoff only down to the slow floor, never re-arming
+    one already there (it would just postpone the poll)."""
+    coordinator.slow_poll_steps = 2
+    coordinator.consecutive_failures = 2
+    coordinator._set_poll_interval(timedelta(seconds=BASE * 4))  # == the floor
+    with patch.object(coordinator, "_schedule_refresh") as schedule:
+        coordinator.async_handle_command_success()
+    schedule.assert_not_called()
+    assert not coordinator._command_reset_used
+
+
+def _timed_failure(
+    device: Device, clock: SimpleNamespace, seconds: float, error: Exception
+) -> None:
+    """Make the next polls fail with ``error`` after ``seconds`` on the Bluetooth clock."""
+
+    async def _update(**_kwargs: Any) -> Any:
+        clock.now += seconds
+        raise error
+
+    device.update.side_effect = _update  # type: ignore[attr-defined]
+
+
+async def test_a_connect_out_of_budget_backs_off_as_slow(
+    hass: HomeAssistant,
+    coordinator: GoveeBleLocalCoordinator,
+    mock_device: Device,
+    monotonic: SimpleNamespace,
+) -> None:
+    """A weak device whose connect keeps running out of its 15 s slows down to the slow cap
+    (8x), instead of the failure backoff taking it to the 30-minute cap; each such poll still
+    counts as a failed one."""
+    error = GoveeBleTimeout(f"{ADDRESS}: connect exceeded {POLL_CONNECT_TIMEOUT_SECONDS}s")
+    _timed_failure(mock_device, monotonic, POLL_CONNECT_TIMEOUT_SECONDS + 1, error)
+    await coordinator.async_refresh()
+    assert not coordinator.last_update_success
+    assert coordinator.slow_poll_steps == 1
+    assert coordinator.last_poll_seconds == POLL_CONNECT_TIMEOUT_SECONDS + 1
+    assert coordinator.consecutive_failures == coordinator.total_failures == 1
+    assert interval(coordinator) == BASE * 2
+    for _ in range(6):
+        await coordinator.async_refresh()
+    assert coordinator.slow_poll_steps == SLOW_POLL_MAX_STEPS
+    assert coordinator.consecutive_failures == 7
+    assert interval(coordinator) == BASE * (1 << SLOW_POLL_MAX_STEPS)
+
+
+@pytest.mark.parametrize(
+    ("seconds", "error", "slow"),
+    [
+        (SLOW_POLL_SECONDS, GoveeBleTimeout("connect exceeded 15s"), True),
+        (SLOW_POLL_SECONDS - 0.5, GoveeBleTimeout("no reply"), False),
+        (POLL_CONNECT_TIMEOUT_SECONDS + 1, GoveeBleConnectionError("link lost"), False),
+    ],
+    ids=["timeout_at_the_slow_threshold", "quick_timeout", "slow_connection_error"],
+)
+async def test_only_a_slow_timeout_backs_off_as_slow(
+    hass: HomeAssistant,
+    coordinator: GoveeBleLocalCoordinator,
+    mock_device: Device,
+    monotonic: SimpleNamespace,
+    *,
+    seconds: float,
+    error: Exception,
+    slow: bool,
+) -> None:
+    """A timeout after SLOW_POLL_SECONDS adds slow steps; a quicker one, or another error
+    however slow, backs off as an ordinary failure. Both count as failed polls."""
+    _timed_failure(mock_device, monotonic, seconds, error)
+    for _ in range(3):
+        await coordinator.async_refresh()
+    assert coordinator.consecutive_failures == 3
+    assert coordinator.slow_poll_steps == (3 if slow else 0)
+    assert interval(coordinator) == BASE * (8 if slow else 4)
+
+
+async def test_a_slow_timeout_amid_failures_keeps_their_backoff(
+    hass: HomeAssistant,
+    coordinator: GoveeBleLocalCoordinator,
+    mock_device: Device,
+    monotonic: SimpleNamespace,
+) -> None:
+    """A connect that runs out of its budget in a streak of quick failures keeps the streak's
+    backoff (floored by its slow step), instead of dropping back to the slow floor."""
+    _timed_failure(mock_device, monotonic, 1, GoveeBleConnectionError("no slot"))
+    for _ in range(3):
+        await coordinator.async_refresh()
+    assert interval(coordinator) == BASE * 4
+    error = GoveeBleTimeout(f"{ADDRESS}: connect exceeded {POLL_CONNECT_TIMEOUT_SECONDS}s")
+    _timed_failure(mock_device, monotonic, POLL_CONNECT_TIMEOUT_SECONDS + 1, error)
+    await coordinator.async_refresh()
+    assert coordinator.consecutive_failures == 4
+    assert coordinator.slow_poll_steps == 1
+    assert interval(coordinator) == BASE * 4
+
+
+async def test_a_device_gone_after_timed_out_connects_goes_unavailable_at_once(
+    coordinator: GoveeBleLocalCoordinator,
+    mock_device: Device,
+    monotonic: SimpleNamespace,
+    presence: SimpleNamespace,
+) -> None:
+    """Timed-out connects count toward availability: a device HA then stops hearing (switched
+    off at the wall) doesn't get UNAVAILABLE_AFTER_FAILURES more, slow-spaced, polls of grace."""
+    error = GoveeBleTimeout(f"{ADDRESS}: connect exceeded {POLL_CONNECT_TIMEOUT_SECONDS}s")
+    _timed_failure(mock_device, monotonic, POLL_CONNECT_TIMEOUT_SECONDS + 1, error)
+    for _ in range(UNAVAILABLE_AFTER_FAILURES):
+        await coordinator.async_refresh()
+    assert coordinator.device_available  # still heard
+    presence.connectable = False
+    assert not coordinator.device_available
 
 
 async def test_a_weak_signal_backs_polls_off_too(

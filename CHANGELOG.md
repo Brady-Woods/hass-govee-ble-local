@@ -82,7 +82,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Advertisements from passive (non-connectable) Bluetooth scanners now update on/off and presence
   too; only connectable ones are used for connecting.
 - After a run of failed polls, a command that reaches the device brings polling back to the normal
-  cadence (once per failure streak) instead of waiting out a backoff of up to 30 minutes.
+  cadence (once per failure streak; for a slow device, its own slower one) instead of waiting out a
+  backoff of up to 30 minutes.
 - **Self-test:** fails straight away with a clear error when no connectable scanner sees the device,
   instead of timing out step by step while blocking every other device's self-test. Reloading or
   unloading the entry while a self-test runs now waits (up to 60 s) for the test to restore the
@@ -138,9 +139,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hasn't been for 3 minutes, or that no connectable Bluetooth adapter or proxy hears, is polled
   every 2 minutes as before, and so is every H60A6 and H60A1 (a Bluetooth disconnect may end a music
   or group mode started over Wi-Fi; not yet checked on hardware). Failed polls still back off to 30
-  minutes. It needs a `govee-ble-local` release after 1.3.0 (the advertisement parser that matches
-  the Govee app); with 1.2.1 or 1.3.0 installed nothing changes. The poll interval sensor shows
-  unknown while a device has no background polls, and its diagnostics name the step (`poll_policy`).
+  minutes (a poll that timed out slowly, to 16; see below). It needs a `govee-ble-local` release
+  after 1.3.0 (the advertisement parser that matches the Govee app); with 1.2.1 or 1.3.0 installed
+  nothing changes. The poll interval sensor shows unknown while a device has no background polls,
+  and its diagnostics name the step (`poll_policy`).
   A light or plug with no background polls goes unavailable as soon as no connectable Bluetooth
   adapter or proxy hears it, instead of after three missed polls.
 - **Zone lights (H60A6 main panel and ring, H6047 bars) respond sooner, in the Govee app's
@@ -161,7 +163,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   failed poll or a change, and a fast poll at a usable signal resets it. After a restart the first
   polls spread over 5 s per active device (at least 30 s, at most 100 s) instead of always 30 s.
   A background poll's connect also gives up after 15 s, so a device that doesn't answer no longer
-  holds up a command to it for up to 45 s; commands keep the library's full connect budget. The
+  holds up a command to it for up to 45 s; commands keep the library's full connect budget. A poll
+  that times out after 10 s or more, such as one whose connect ran out of those 15 s, backs off as
+  a slow poll (so at most every 16 minutes) rather than to the 30-minute cap, and still counts as a
+  failed poll: a device that then stops being heard goes unavailable as soon as before. The
   diagnostics show the slow-poll steps and how long the last poll took.
 - The RSSI, last seen, last connected and poll interval diagnostic sensors are disabled by default
   for newly added devices (existing ones keep their setting).

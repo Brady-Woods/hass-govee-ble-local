@@ -45,7 +45,13 @@ import math
 import random
 from typing import TYPE_CHECKING, Any
 
-from govee_ble_local import Device, DeviceState, GoveeBleAuthError, const as lib_const
+from govee_ble_local import (
+    Device,
+    DeviceState,
+    GoveeBleAuthError,
+    GoveeBleTimeout,
+    const as lib_const,
+)
 from govee_ble_local.identify import parse_broadcast_onoff
 from homeassistant.components import bluetooth
 from homeassistant.const import CONF_ADDRESS
@@ -186,6 +192,9 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         self._device = device
         self._address = address
         self.consecutive_failures = 0
+        # The failures of the current streak that drive its backoff: all but the
+        # slow ones (a timeout after SLOW_POLL_SECONDS, ``_async_note_failure``).
+        self._backoff_failures = 0
         # Read-only diagnostics surfaced by the sensor/binary_sensor platforms.
         self.rssi: int | None = None
         self.total_failures = 0
@@ -237,12 +246,16 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         self._reoffered: dict[int, bytes] | None = None
         # Entity commands running now, and the timer that ends the hold-off
         # POLL_HOLDOFF_AFTER_COMMAND_SECONDS after the last one: background polls
-        # wait for both (``commands_holding_off``). Whether a background poll is
-        # waiting for the hold-off, and the timer that runs it anyway once it
-        # has waited POLL_HOLDOFF_MAX_SECONDS. Set once the entry is unloading.
+        # wait for both (``commands_holding_off``). Whether a scheduled poll, and
+        # the first poll after setup, are waiting for the hold-off (kept apart:
+        # a re-arm or a policy step that stops polls drops a held scheduled
+        # poll, never the first one), and the timer that runs the held poll
+        # anyway once it has waited POLL_HOLDOFF_MAX_SECONDS. Set once the entry
+        # is unloading.
         self._commands_running = 0
         self._unsub_holdoff_end: CALLBACK_TYPE | None = None
         self._poll_waiting = False
+        self._first_poll_waiting = False
         self._unsub_holdoff_cap: CALLBACK_TYPE | None = None
         self._shutting_down = False
         # Bluetooth monotonic time each zone's power (by power index) was last
@@ -486,6 +499,7 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         self._shutting_down = True
         self._async_cancel_flip_poll()
         self._async_cancel_holdoff_end()
+        self._async_drop_held_polls()
         await super().async_shutdown()
 
     @callback
@@ -632,11 +646,16 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
             self.hass, POLL_HOLDOFF_AFTER_COMMAND_SECONDS, self._async_end_holdoff
         )
 
+    @property
+    def _poll_held(self) -> bool:
+        """Whether a background poll (scheduled, or the first) waits for the hold-off."""
+        return self._poll_waiting or self._first_poll_waiting
+
     @callback
     def _async_end_holdoff(self, _now: datetime) -> None:
         """End the hold-off, and run the background poll it held back, if any."""
         self._unsub_holdoff_end = None
-        if self._poll_waiting:
+        if self._poll_held:
             self._async_release_poll()
 
     @callback
@@ -647,30 +666,45 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
             self._unsub_holdoff_end = None
 
     @callback
-    def _async_hold_poll(self) -> None:
+    def _async_hold_poll(self, *, first: bool = False) -> None:
         """Keep a background poll that came due until the hold-off ends, or for at most the cap.
 
-        Only the first poll to come due arms the cap: later ones join it, and one
-        poll runs when the hold-off is released, however many came due.
+        ``first``: the first poll after setup, which a re-arm doesn't drop. The
+        first poll held arms the cap: later ones join it, and one poll runs
+        when the hold-off is released, however many came due.
         """
-        if self._poll_waiting:
-            return
-        self._poll_waiting = True
-        self._unsub_holdoff_cap = async_call_later(
-            self.hass, POLL_HOLDOFF_MAX_SECONDS, self._async_holdoff_cap_reached
-        )
+        if first:
+            self._first_poll_waiting = True
+        else:
+            self._poll_waiting = True
+        if self._unsub_holdoff_cap is None:
+            self._unsub_holdoff_cap = async_call_later(
+                self.hass, POLL_HOLDOFF_MAX_SECONDS, self._async_holdoff_cap_reached
+            )
 
     @callback
     def _async_holdoff_cap_reached(self, _now: datetime) -> None:
-        """Run the held poll anyway: a stream of commands mustn't postpone it for ever."""
+        """Run the held poll anyway: a stream of commands mustn't postpone it for ever.
+
+        It can then run while one long command is still under way (a zone
+        light's several calls on a failing link): it waits for the device lock
+        like any other operation.
+        """
         self._unsub_holdoff_cap = None
-        if self._poll_waiting:
+        if self._poll_held:
             self._async_release_poll()
 
     @callback
     def _async_release_poll(self) -> None:
-        """Run the held background poll, as HA's timer would have."""
-        self._async_drop_held_poll()
+        """Run the held background poll in place of HA's armed timer, as that timer would have.
+
+        HA's _handle_refresh_interval forgets its timer without cancelling it (it
+        expects to be called by that timer firing). A held first poll ran with
+        HA's first timer still armed, so it is cancelled here: two timers would
+        otherwise poll for good. The poll then re-arms one timer as it ends.
+        """
+        self._async_drop_held_polls()
+        super()._async_unsub_refresh()
         self.config_entry.async_create_background_task(
             self.hass,
             super()._handle_refresh_interval(),
@@ -679,22 +713,30 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         )
 
     @callback
-    def _async_drop_held_poll(self) -> None:
-        """Forget the held background poll and its cap timer."""
+    def _async_drop_held_polls(self) -> None:
+        """Forget every held background poll and the cap timer."""
         self._poll_waiting = False
+        self._first_poll_waiting = False
+        self._async_cancel_holdoff_cap()
+
+    @callback
+    def _async_cancel_holdoff_cap(self) -> None:
+        """Drop the cap timer, if any."""
         if self._unsub_holdoff_cap is not None:
             self._unsub_holdoff_cap()
             self._unsub_holdoff_cap = None
 
     async def async_background_poll(self) -> None:
-        """Run a background poll now, or hold it while commands hold polls off.
+        """Run the first background poll after setup now, or hold it while commands do.
 
-        The first poll after setup comes here; HA's scheduled polls come through
-        ``_handle_refresh_interval``. Both hold the same way, so one hold-off
-        releases one poll.
+        HA's scheduled polls come through ``_handle_refresh_interval``. Both hold
+        the same way, so one hold-off releases one poll; but the held first poll
+        always runs once, even if polls stop meanwhile (a command turned the
+        light off): it is what reads the device's info. Any poll that runs
+        first (a manual refresh) is that poll (``_async_update_data``).
         """
         if self.commands_holding_off:
-            self._async_hold_poll()
+            self._async_hold_poll(first=True)
             return
         await self.async_refresh()
 
@@ -715,13 +757,18 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         await super()._handle_refresh_interval(_now)
 
     def _async_unsub_refresh(self) -> None:
-        """Cancel the scheduled poll, a held one included.
+        """Cancel the scheduled poll, a held scheduled one included.
 
-        HA calls this before arming a new timer (``_schedule_refresh``) and on
-        shutdown: the new timer replaces a held poll, so two never run.
+        HA calls this before arming a new timer (``_schedule_refresh``), and so
+        does a policy step that stops polls: the new timer, or no polls, replace
+        a held scheduled poll, so two never run. A held first poll stays (it
+        runs once whatever the schedule, unless another poll runs first);
+        shutdown drops it.
         """
         super()._async_unsub_refresh()
-        self._async_drop_held_poll()
+        self._poll_waiting = False
+        if not self._first_poll_waiting:
+            self._async_cancel_holdoff_cap()
 
     @callback
     def async_handle_command_success(self) -> None:
@@ -738,8 +785,11 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         repeated commands must not hold the device at the base cadence. Nothing
         is re-armed while no polls are scheduled (``polls_scheduled``), and the
         policy is re-checked first (a command that turns a light off stops its
-        background polls).
+        background polls). Nor once the entry is unloading: a command that lands
+        after the coordinator shut down must not arm a timer on it.
         """
+        if self._shutting_down:
+            return
         rescheduled = self._async_apply_policy()
         rescheduled = self._async_restart_on_backoff() or rescheduled
         interval = self.scheduled_interval
@@ -900,14 +950,19 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         """Return the failure backoff for the current streak of failed (or skipped) polls.
 
         The first failure keeps the base cadence (grace for a transient blip),
-        then it doubles up to the cap.
+        then it doubles up to the cap. Slow failures don't count: they add slow
+        steps instead (``_async_note_failure``), which floor every interval.
         """
-        steps = min(max(0, self.consecutive_failures - 1), _MAX_BACKOFF_STEPS)
+        steps = min(max(0, self._backoff_failures - 1), _MAX_BACKOFF_STEPS)
         return min(_BASE_INTERVAL * (1 << steps), _MAX_INTERVAL)
 
     # -- polling ------------------------------------------------------------
 
     async def _async_update_data(self) -> DeviceState:
+        # A poll that runs (a manual refresh, say) is any background poll held
+        # for the hold-off, the first one after setup included: it reads the
+        # device as they would.
+        self._async_drop_held_polls()
         # Any poll that runs (a manual refresh after an auth failure included)
         # means polling is scheduled again.
         self._auth_failed = False
@@ -942,7 +997,12 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
                 ) from err
             except BLE_ERRORS as err:
                 self.total_failures += 1
-                self._async_note_failure()
+                elapsed = bluetooth.MONOTONIC_TIME() - started
+                if isinstance(err, GoveeBleTimeout) and elapsed >= SLOW_POLL_SECONDS:
+                    # Typically the connect ran out of POLL_CONNECT_TIMEOUT_SECONDS.
+                    self._async_note_failure(slow_seconds=elapsed)
+                else:
+                    self._async_note_failure()
                 # A bare TimeoutError has no message.
                 raise self._update_failed(
                     "poll_failed", error=str(err) or type(err).__name__
@@ -961,6 +1021,7 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         if not data.optimistic:
             self.last_connected = dt_util.utcnow()
         self.consecutive_failures = 0
+        self._backoff_failures = 0
         self._skipped_absent = False
         self._command_reset_used = False
         self._lost_while_unpolled = False
@@ -1013,9 +1074,22 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
             self._set_poll_interval(self._healthy_interval())
 
     @callback
-    def _async_note_failure(self) -> None:
-        """Count a failed (or skipped) poll, back off, and publish the new status."""
+    def _async_note_failure(self, *, slow_seconds: float | None = None) -> None:
+        """Count a failed (or skipped) poll, back off, and publish the new status.
+
+        ``slow_seconds``: the poll timed out after SLOW_POLL_SECONDS or more
+        (typically its connect ran out of POLL_CONNECT_TIMEOUT_SECONDS). That is
+        a slow device as much as a failed poll: it counts toward availability
+        and the diagnostics like any failure, but adds a slow step (up to
+        SLOW_POLL_MAX_STEPS doublings) instead of a failure-backoff step, which
+        would take a weak device to MAX_POLL_INTERVAL_SECONDS.
+        """
         self.consecutive_failures += 1
+        if slow_seconds is None:
+            self._backoff_failures += 1
+        else:
+            self.last_poll_seconds = round(slow_seconds, 1)
+            self.slow_poll_steps = min(self.slow_poll_steps + 1, SLOW_POLL_MAX_STEPS)
         self._async_set_policy(self._async_policy_step())
         if self.poll_policy in _UNPOLLED:
             # A failed one-off poll (a manual refresh) of a device the policy

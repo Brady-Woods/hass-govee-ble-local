@@ -147,7 +147,10 @@ POLL_HOLDOFF_MAX_SECONDS = POLL_INTERVAL_SECONDS
 # the bench took 3-24 s. The time counts from the start of update(), so a poll
 # that waited for the library's device lock behind another operation (a command
 # or a self-test) counts that wait too. The connect itself is bounded by
-# POLL_CONNECT_TIMEOUT_SECONDS.
+# POLL_CONNECT_TIMEOUT_SECONDS. A poll that times out after SLOW_POLL_SECONDS or
+# more (a connect that ran out of that budget, typically) adds a slow step too
+# instead of a failure-backoff step; it still counts as a failed poll (toward
+# availability and in the diagnostics).
 SLOW_POLL_SECONDS = 10
 
 # A background poll's connect gets a tighter budget than a command's (the

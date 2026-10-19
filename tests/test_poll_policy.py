@@ -22,7 +22,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
-from govee_ble_local import Device, GoveeBleAuthError, GoveeBleConnectionError
+from govee_ble_local import Device, GoveeBleAuthError, GoveeBleConnectionError, GoveeBleTimeout
 from homeassistant.components.bluetooth import BluetoothChange, BluetoothServiceInfoBleak
 from homeassistant.components.bluetooth.const import (
     CONNECTABLE_FALLBACK_MAXIMUM_STALE_ADVERTISEMENT_SECONDS,
@@ -47,6 +47,7 @@ from custom_components.govee_ble_local.const import (
     LAST_SEEN_RESOLUTION_SECONDS,
     MAX_POLL_INTERVAL_SECONDS,
     ON_POLL_MAX_INTERVAL_SECONDS,
+    POLL_CONNECT_TIMEOUT_SECONDS,
     POLL_INTERVAL_SECONDS,
     UNAVAILABLE_AFTER_FAILURES,
 )
@@ -206,6 +207,32 @@ def sensor_id(hass: HomeAssistant, key: str) -> str:
     entity_id = er.async_get(hass).async_get_entity_id("sensor", DOMAIN, f"{ADDRESS}_{key}")
     assert entity_id is not None
     return entity_id
+
+
+async def test_a_held_first_poll_still_runs_when_polls_stop(
+    hass: HomeAssistant,
+    air: Air,
+    mock_config_entry: MockConfigEntry,
+    mock_device: Device,
+) -> None:
+    """A command holds the first poll; a turn-off then stops background polls (the light is
+    off): the first poll must still run once, or the device info would never be read."""
+    with patch("custom_components.govee_ble_local._first_poll_stagger", return_value=30):
+        mock_config_entry.add_to_hass(hass)
+        assert await hass.config_entries.async_setup(mock_config_entry.entry_id)
+        await hass.async_block_till_done(wait_background_tasks=False)
+    mock_device.update.reset_mock()  # type: ignore[attr-defined]
+    for _ in range(25):
+        await air.wait(1, settle=False)
+    await light_service(hass, "turn_on", brightness=50)
+    for _ in range(10):  # the stagger ends inside the hold-off
+        await air.wait(1, settle=False)
+    await light_service(hass, "turn_off")
+    air.advertise(on=False)
+    for _ in range(60):
+        await air.wait(30, settle=False)
+    await hass.async_block_till_done()
+    assert polls(mock_device) >= 1
 
 
 async def turned_on_outside_ha(air: Air) -> None:
@@ -754,6 +781,26 @@ async def test_turn_on_poll_is_dropped_while_no_entity_listens(
     with patch.dict(coordinator._listeners, clear=True):
         await air.wait(DELAY + SLACK)
     assert polls(mock_device) == before
+
+
+async def test_a_slow_connect_while_unpolled_arms_no_poll(
+    air: Air, coordinator: GoveeBleLocalCoordinator, mock_device: Device
+) -> None:
+    """A refresh of a light that's off whose connect runs out of its budget counts as a slow,
+    failed poll, and arms no background poll for it."""
+    air.advertise(on=False)
+    assert coordinator.poll_policy is PollPolicy.OFF
+
+    async def _update(**_kwargs: Any) -> Any:
+        air.clock.now += POLL_CONNECT_TIMEOUT_SECONDS + 1
+        raise GoveeBleTimeout(f"{ADDRESS}: connect exceeded {POLL_CONNECT_TIMEOUT_SECONDS}s")
+
+    mock_device.update.side_effect = _update  # type: ignore[attr-defined]
+    await coordinator.async_refresh()
+    assert coordinator.slow_poll_steps == 1
+    assert coordinator.consecutive_failures == 1
+    assert coordinator.poll_policy is PollPolicy.OFF
+    assert coordinator.update_interval is None
 
 
 async def test_off_flip_stops_background_polls(
