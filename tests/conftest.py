@@ -34,7 +34,7 @@ from pytest_homeassistant_custom_component.common import (
 )
 
 from custom_components.govee_ble_local import capture as capture_module
-from custom_components.govee_ble_local.const import CONF_SKU, DOMAIN
+from custom_components.govee_ble_local.const import CONF_ALLOW_MODELLED, CONF_SKU, DOMAIN
 from custom_components.govee_ble_local.coordinator import GoveeBleLocalCoordinator
 
 from .const import ADDRESS, LOCAL_NAME, TITLE, govee_mfg, pact_mfg
@@ -120,10 +120,19 @@ def make_device(
     address: str = ADDRESS,
     name: str = LOCAL_NAME,
     secret: bytes | None = None,
+    allow_modelled: bool = False,
 ) -> Device:
-    """Build a real library Device for ``sku`` on a FakeConnection."""
+    """Build a real library Device for ``sku`` on a FakeConnection.
+
+    ``allow_modelled`` builds an opt-in-only ("modelled") model, as setup does for an entry
+    that opted in; it is passed only when set, so the 1.2.1 floor still builds the rest.
+    """
     device = create_device(
-        BLEDevice(address=address, name=name, details={}), sku, None, secret=secret
+        BLEDevice(address=address, name=name, details={}),
+        sku,
+        None,
+        secret=secret,
+        **({"allow_modelled": True} if allow_modelled else {}),
     )
     device._conn = FakeConnection()  # type: ignore[assignment]
     for method in _WRAPPED_COMMANDS:
@@ -351,21 +360,31 @@ def device_sku() -> str:
 
 
 @pytest.fixture
-def mock_device(device_sku: str) -> Generator[Device]:
+def allow_modelled() -> bool:
+    """Whether the device under test is an opted-in "modelled" model (override per test)."""
+    return False
+
+
+@pytest.fixture
+def mock_device(device_sku: str, allow_modelled: bool) -> Generator[Device]:
     """Patch create_device to return a real Device on a fake transport."""
-    device = make_device(device_sku)
+    device = make_device(device_sku, allow_modelled=allow_modelled)
     with patch("custom_components.govee_ble_local.create_device", return_value=device):
         yield device
 
 
 @pytest.fixture
-def mock_config_entry(device_sku: str) -> MockConfigEntry:
-    """A config entry for the device under test."""
+def mock_config_entry(device_sku: str, allow_modelled: bool) -> MockConfigEntry:
+    """A config entry for the device under test (with the opt-in, for a modelled model)."""
     return MockConfigEntry(
         domain=DOMAIN,
         title=TITLE,
         unique_id=ADDRESS,
-        data={"address": ADDRESS, CONF_SKU: device_sku},
+        data={
+            "address": ADDRESS,
+            CONF_SKU: device_sku,
+            **({CONF_ALLOW_MODELLED: True} if allow_modelled else {}),
+        },
     )
 
 

@@ -157,6 +157,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Tests: assertions that couldn't fail now discriminate, and new tests cover the presence timer,
   availability without polling, diagnostics redaction, the logger integration, flow cancellation,
   reauth/reconfigure reloads and the manifest requirement shape.
+- Tests: the every-profile entity-structure check also runs over each model the library offers only
+  as an opt-in (unverified) one, set up with the opt-in, taken from the library rather than a
+  fixed list.
 - `docs/library-review.md` lists the problems whose fix depends on the `govee-ble-local` library
   (self-test restore and read-back, the segment/zone light state model, connection-slot use and
   more), to be decided after the library refactor.

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import inspect
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
@@ -33,6 +34,24 @@ from .conftest import connection, make_device
 from .const import ADDRESS
 
 PLUG = "switch.test_ceiling"
+
+
+def _every_sku() -> list[Any]:
+    """(device_sku, allow_modelled) for every SKU the library supports, then the opt-in-only ones.
+
+    The opt-in list is the library's own (supported_skus with allow_modelled, minus without),
+    never a fixed one: an opted-in device is set up through the flow's confirmation, so it gets
+    the same entity checks. A library without the opt-in contributes none, rather than failing
+    the module's collection.
+    """
+    default = supported_skus()
+    opt_in: list[str] = []
+    if "allow_modelled" in inspect.signature(supported_skus).parameters:
+        opt_in = sorted(set(supported_skus(allow_modelled=True)) - set(default))
+    return [
+        *(pytest.param(sku, False, id=sku) for sku in default),
+        *(pytest.param(sku, True, id=f"{sku}-opted_in") for sku in opt_in),
+    ]
 
 
 # -- helpers --------------------------------------------------------------------------
@@ -239,14 +258,14 @@ async def test_light_fixtures_have_no_power_switch(
     assert hass.states.async_all("switch") == []
 
 
-@pytest.mark.parametrize("device_sku", supported_skus())
+@pytest.mark.parametrize(("device_sku", "allow_modelled"), _every_sku())
 async def test_every_profile_gets_one_entity_per_relay(
     hass: HomeAssistant,
     mock_config_entry: MockConfigEntry,
     mock_device: Device,
     mock_bluetooth: SimpleNamespace,
 ) -> None:
-    """Across every library profile, light.py, switch.py and the legacy cleanup agree.
+    """Across every library profile, opt-in ones too, light.py, switch.py and the cleanup agree.
 
     Each zone is a light or a switch (never both or neither), the whole device
     gets at most one control (a light or an outlet switch, one if it has no
