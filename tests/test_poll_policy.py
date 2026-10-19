@@ -234,7 +234,7 @@ def reads_power(device: Device) -> None:
     """Make each poll read power back, as a real one does: the library then ignores adverts."""
     read = device.update.side_effect  # type: ignore[attr-defined]
 
-    async def _update() -> Any:
+    async def _update(**_kwargs: Any) -> Any:
         state = await read()
         device._mark_authoritative()
         return state
@@ -545,7 +545,7 @@ async def test_turned_on_right_after_a_poll_is_taken_from_the_repeats(
 
     read = mock_device.update.side_effect  # type: ignore[attr-defined]
 
-    async def _reads_off() -> Any:
+    async def _reads_off(**_kwargs: Any) -> Any:
         mock_device.state.is_on = False
         return await read()
 
@@ -628,7 +628,7 @@ async def test_a_turn_on_during_a_poll_that_reads_off_leaves_no_timer_armed(
     before = polls(mock_device)
     read = mock_device.update.side_effect  # type: ignore[attr-defined]
 
-    async def _read() -> Any:
+    async def _read(**_kwargs: Any) -> Any:
         air.advertise(on=True)  # mid-read: the policy moves to on and arms HA's timer
         mock_device.state.is_on = False  # but the read, taken before, says off
         return await read()

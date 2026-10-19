@@ -148,14 +148,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   back by a poll in the last 2 minutes (it may have been switched off in the Govee app), is
   switched on first and then changed, which is the order the app takes. A plain turn on still
   always sends the zone's power.
-- **Background polls give way to commands.** A scheduled poll that comes due while a command to the
-  same device is running, or within 30 s after one (while the command's connection is still open
-  for follow-ups), now waits until then, so a second tap or a slider step doesn't queue behind the
-  poll's reads. A device whose polls take 10 s or more, or that is heard at -90 dBm or weaker, is
-  polled less often: the interval doubles with each slow poll, up to 8 times and within the
-  30-minute cap, and a fast poll at a usable signal resets it. After a restart the first polls
-  spread over 5 s per configured device (at least 30 s, at most 2 minutes) instead of always 30 s.
-  The diagnostics show the slow-poll steps and how long the last poll took.
+- **Background polls give way to commands.** A background poll that comes due while a command to
+  the same device is running, or within 25 s after one, now waits until then (while the command's
+  connection is still open, so the poll reuses it), and a second tap or a slider step doesn't queue
+  behind the poll's reads. A steady stream of commands holds a poll off for at most 2 minutes. A
+  device whose polls take 10 s or more, or that is heard at -90 dBm or weaker, is polled less often:
+  its interval doubles with each slow poll, up to 8 times and within the 30-minute cap, also after a
+  failed poll or a change, and a fast poll at a usable signal resets it. After a restart the first
+  polls spread over 5 s per active device (at least 30 s, at most 100 s) instead of always 30 s.
+  A background poll's connect also gives up after 15 s, so a device that doesn't answer no longer
+  holds up a command to it for up to 45 s; commands keep the library's full connect budget. The
+  diagnostics show the slow-poll steps and how long the last poll took.
 - The RSSI, last seen, last connected and poll interval diagnostic sensors are disabled by default
   for newly added devices (existing ones keep their setting).
 - Poll errors and the rejected-secret error are translated.

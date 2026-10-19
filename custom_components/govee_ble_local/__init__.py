@@ -141,7 +141,9 @@ def _first_poll_stagger(hass: HomeAssistant, address: str) -> int:
     Derived from the address, so it is the same on every restart, over a window
     that grows with the number of configured devices (see FIRST_POLL_STAGGER_*).
     """
-    devices = len(hass.config_entries.async_entries(DOMAIN))
+    devices = len(
+        hass.config_entries.async_entries(DOMAIN, include_ignore=False, include_disabled=False)
+    )
     window = min(
         max(FIRST_POLL_STAGGER_SECONDS, FIRST_POLL_STAGGER_PER_DEVICE_SECONDS * devices),
         FIRST_POLL_STAGGER_MAX_SECONDS,
@@ -266,9 +268,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: GoveeBleLocalConfigEntry
     async def _staggered_first_poll() -> None:
         _LOGGER.debug("Waiting %ds stagger before first poll of %s", stagger, address)
         await asyncio.sleep(stagger)
-        # A command sent meanwhile holds the first poll off too, as it does the later ones.
-        await coordinator.async_wait_for_commands()
-        await coordinator.async_refresh()
+        # The same dispatch as HA's timer: a command sent meanwhile holds it off,
+        # and one hold-off releases one poll however many came due during it.
+        await coordinator.async_background_poll()
 
     entry.async_create_background_task(
         hass, _staggered_first_poll(), name=f"{DOMAIN}_first_poll_{address}"

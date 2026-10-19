@@ -63,7 +63,7 @@ class GoveeBleLocalEntity(CoordinatorEntity[GoveeBleLocalCoordinator]):
         after a failure part-way too: the library already applied what landed.
         The coordinator also notes that HA talked to the device (see
         ``async_note_device_io``), and holds background polls off while the
-        command runs and for a while after (``command_holdoff``).
+        command runs and for a while after (``commands_holding_off``).
         """
         self.coordinator.async_note_command_started()
         try:

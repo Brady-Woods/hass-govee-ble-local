@@ -225,6 +225,18 @@ async def test_self_test_skips_scenes_when_the_scene_store_is_unreadable(
     assert report["restored"] is True
 
 
+async def test_self_test_reads_with_the_library_default_connect_budget() -> None:
+    """Only background polls tighten the connect: the user-run self-test keeps the defaults."""
+    device = make_device("H60A6")
+    _prime(device)
+
+    await async_run_self_test(device)
+
+    assert device.update.await_count > 1  # type: ignore[attr-defined]
+    for awaited in device.update.await_args_list:  # type: ignore[attr-defined]
+        assert awaited.kwargs == {}
+
+
 async def test_full_surface_run_on_h60a6() -> None:
     """Every capability is exercised, read-backs match and the state is restored."""
     device = make_device("H60A6")
@@ -356,7 +368,7 @@ async def test_readback_mismatch_fails_the_step_and_run() -> None:
     _prime(device)
     real_update = device.update.side_effect
 
-    async def _reverting_update() -> Any:
+    async def _reverting_update(**_kwargs: Any) -> Any:
         state = await real_update()
         if state.brightness == capture._TEST_BRIGHTNESS:
             state.brightness = 7  # the device reports something else
@@ -431,7 +443,7 @@ async def test_unreported_value_leaves_readback_unknown() -> None:
     _prime(device)
     real_update = device.update.side_effect
 
-    async def _silent_update() -> Any:
+    async def _silent_update(**_kwargs: Any) -> Any:
         state = await real_update()
         state.brightness = None  # the device reports no brightness
         return state
@@ -741,7 +753,7 @@ async def test_auth_error_on_step_readback_is_raised() -> None:
     real_update = device.update.side_effect
     calls = 0
 
-    async def _update() -> Any:
+    async def _update(**_kwargs: Any) -> Any:
         nonlocal calls
         calls += 1
         if calls == 2:  # initial read passes; the first step's read-back fails

@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+from bleak.backends.device import BLEDevice
 from bleak.exc import BleakError
 from govee_ble_local import (
     Device,
@@ -18,6 +19,7 @@ from govee_ble_local import (
     GoveeBleHandshakeError,
     GoveeBleNotSupported,
     GoveeBleTimeout,
+    create_device,
 )
 from homeassistant.components.bluetooth import BluetoothChange
 from homeassistant.components.light import DATA_COMPONENT as LIGHT_DATA
@@ -39,16 +41,20 @@ from custom_components.govee_ble_local.const import (
     LAST_SEEN_RESOLUTION_SECONDS,
     MAX_CONCURRENT_POLLS,
     MAX_POLL_INTERVAL_SECONDS,
+    POLL_CONNECT_ATTEMPTS,
+    POLL_CONNECT_TIMEOUT_SECONDS,
     POLL_HOLDOFF_AFTER_COMMAND_SECONDS,
+    POLL_HOLDOFF_MAX_SECONDS,
     POLL_INTERVAL_SECONDS,
     SLOW_POLL_MAX_STEPS,
     SLOW_POLL_SECONDS,
     UNAVAILABLE_AFTER_FAILURES,
     WEAK_SIGNAL_RSSI,
 )
-from custom_components.govee_ble_local.coordinator import GoveeBleLocalCoordinator
+from custom_components.govee_ble_local.coordinator import GoveeBleLocalCoordinator, PollPolicy
 
 from .conftest import (
+    FakeConnection,
     advance,
     advertisement_callback,
     allow_adverts,
@@ -97,7 +103,7 @@ async def coordinator(
 def succeed(device: Device, *, optimistic: bool = False) -> None:
     """Make the device's next polls succeed, optionally returning optimistic state."""
 
-    async def _update() -> Any:
+    async def _update(**_kwargs: Any) -> Any:
         device.state.optimistic = optimistic
         return device.state
 
@@ -149,6 +155,32 @@ async def test_successful_poll_resets_state_and_schedules_base_interval(
     assert coordinator.total_failures == 3  # cumulative: never reset
     assert interval(coordinator) == BASE + 17
     assert coordinator.last_connected == dt_util.utcnow()
+
+
+async def test_a_poll_connects_with_its_own_tighter_budget(
+    hass: HomeAssistant, coordinator: GoveeBleLocalCoordinator, mock_device: Device
+) -> None:
+    """A poll passes its connect budget, so a device that doesn't answer frees the lock sooner."""
+    mock_device.update.reset_mock()  # type: ignore[attr-defined]
+    await coordinator.async_refresh()
+    mock_device.update.assert_awaited_once_with(  # type: ignore[attr-defined]
+        connect_attempts=POLL_CONNECT_ATTEMPTS, connect_timeout=POLL_CONNECT_TIMEOUT_SECONDS
+    )
+
+
+async def test_the_library_takes_the_poll_connect_budget() -> None:
+    """The installed library's real update() accepts the budget the coordinator passes.
+
+    The coordinator tests mock update(), and a poll that raises is only logged, so without
+    this a library lacking the keywords would fail every poll unnoticed.
+    """
+    device = create_device(
+        BLEDevice(address=ADDRESS, name="GVH60A6ABCD", details={}), "H60A6", None
+    )
+    device._conn = FakeConnection()  # type: ignore[assignment]
+    await device.update(
+        connect_attempts=POLL_CONNECT_ATTEMPTS, connect_timeout=POLL_CONNECT_TIMEOUT_SECONDS
+    )
 
 
 async def test_optimistic_state_does_not_count_as_connected(
@@ -595,7 +627,7 @@ async def test_poll_concurrency_is_capped_across_devices(hass: HomeAssistant) ->
         address = f"AA:BB:CC:DD:EE:{index:02X}"
         device = make_device(address=address)
 
-        async def _update() -> Any:
+        async def _update(**_kwargs: Any) -> Any:
             nonlocal running, max_running
             running += 1
             max_running = max(max_running, running)
@@ -711,24 +743,143 @@ async def test_scheduled_poll_waits_for_a_running_command_and_the_hold_off(
     assert coordinator.last_update_success
 
 
-async def test_a_new_command_extends_the_hold_off(
+def test_hold_off_ends_while_the_command_link_is_still_up() -> None:
+    """The held poll runs a few seconds before the library drops a command's link."""
+    from govee_ble_local import const as lib_const  # noqa: PLC0415
+
+    assert lib_const.ACTIVE_IDLE_DELAY - 10 <= HOLDOFF < lib_const.ACTIVE_IDLE_DELAY
+
+
+def _live_timers(hass: HomeAssistant, name: str) -> list[asyncio.TimerHandle]:
+    """The event loop's live timers whose callback, or HA job target, is called ``name``."""
+    found = []
+    for handle in hass.loop._scheduled:  # type: ignore[attr-defined]
+        if handle.cancelled():
+            continue
+        names = {getattr(handle._callback, "__name__", "")}
+        names |= {getattr(getattr(arg, "target", None), "__name__", "") for arg in handle._args}
+        if any(name in n for n in names):
+            found.append(handle)
+    return found
+
+
+def _due_in(hass: HomeAssistant, handle: asyncio.TimerHandle) -> float:
+    return handle.when() - hass.loop.time()
+
+
+def _arm_poll_soon(coordinator: GoveeBleLocalCoordinator) -> None:
+    """Re-arm HA's own poll timer 5 s out (jitter is 0 in these tests)."""
+    coordinator._set_poll_interval(timedelta(seconds=5))
+    coordinator._schedule_refresh()
+
+
+async def _poll_comes_due(hass: HomeAssistant, coordinator: GoveeBleLocalCoordinator) -> None:
+    """Make HA's real poll timer fire now, as it would at the end of an interval."""
+    _arm_poll_soon(coordinator)
+    await advance(hass, 6)
+
+
+async def test_a_new_command_restarts_the_hold_off(
+    hass: HomeAssistant, coordinator: GoveeBleLocalCoordinator
+) -> None:
+    """Each command restarts the hold-off from its own end: the earlier timer is cancelled."""
+    await _turn_on(hass)
+    [first] = _live_timers(hass, "_async_end_holdoff")
+    assert _due_in(hass, first) == pytest.approx(HOLDOFF, abs=1)
+
+    coordinator.async_note_command_started()
+    assert first.cancelled()
+    assert _live_timers(hass, "_async_end_holdoff") == []  # held while it runs
+    assert coordinator.commands_holding_off
+    coordinator.async_note_command_finished()
+    [second] = _live_timers(hass, "_async_end_holdoff")
+    assert second is not first
+
+
+async def test_overlapping_commands_hold_off_until_the_last_one_ends(
+    hass: HomeAssistant, coordinator: GoveeBleLocalCoordinator
+) -> None:
+    """Two commands to the device at once (a zone and the main light): the hold-off starts last."""
+    coordinator.async_note_command_started()
+    coordinator.async_note_command_started()
+    coordinator.async_note_command_finished()
+    assert coordinator.commands_holding_off
+    assert _live_timers(hass, "_async_end_holdoff") == []
+    coordinator.async_note_command_finished()
+    assert len(_live_timers(hass, "_async_end_holdoff")) == 1
+
+
+async def test_a_stream_of_commands_holds_a_poll_off_at_most_the_cap(
     hass: HomeAssistant,
     coordinator: GoveeBleLocalCoordinator,
     mock_device: Device,
 ) -> None:
-    """A poll held off by one command waits out the hold-off of the next one too."""
+    """Commands that keep coming can't postpone a due poll past POLL_HOLDOFF_MAX_SECONDS."""
+    mock_device.update.reset_mock()  # type: ignore[attr-defined]
+    coordinator.async_note_command_started()
+    await _poll_comes_due(hass, coordinator)  # held
+    [cap] = _live_timers(hass, "_async_holdoff_cap_reached")
+    # advance() fires due timers without moving the loop's clock.
+    assert _due_in(hass, cap) == pytest.approx(POLL_HOLDOFF_MAX_SECONDS, abs=1)
+    for _ in range(4):  # one command after another
+        coordinator.async_note_command_finished()
+        coordinator.async_note_command_started()
+    await coordinator.async_background_poll()  # another poll due: it joins the held one
+    assert _live_timers(hass, "_async_holdoff_cap_reached") == [cap]
+
+    await advance(hass, POLL_HOLDOFF_MAX_SECONDS + 1)
+    mock_device.update.assert_awaited_once()  # type: ignore[attr-defined]
+    assert coordinator.commands_holding_off  # it ran although commands still hold polls off
+    coordinator.async_note_command_finished()
+
+
+async def test_rearming_the_schedule_replaces_a_held_poll(
+    hass: HomeAssistant,
+    coordinator: GoveeBleLocalCoordinator,
+    mock_device: Device,
+) -> None:
+    """A schedule re-armed during a hold-off (a policy step, say) replaces the held poll."""
     await _turn_on(hass)
     mock_device.update.reset_mock()  # type: ignore[attr-defined]
-    await coordinator._handle_refresh_interval()  # the scheduled poll fires in the hold-off
+    await _poll_comes_due(hass, coordinator)
+    assert coordinator._poll_waiting
+    assert _live_timers(hass, "wrap_handle_refresh_interval") == []  # the one that fired
+
+    coordinator._set_poll_interval(timedelta(seconds=BASE))
+    coordinator._schedule_refresh()  # the next poll a base interval out, as a policy step sets it
+    assert not coordinator._poll_waiting
+    assert _live_timers(hass, "_async_holdoff_cap_reached") == []
+    assert len(_live_timers(hass, "wrap_handle_refresh_interval")) == 1
+    await advance(hass, HOLDOFF + 1)  # the hold-off ends with nothing held
     mock_device.update.assert_not_awaited()  # type: ignore[attr-defined]
 
-    await advance(hass, HOLDOFF - 10)
-    await _turn_on(hass)  # restarts the hold-off
-    await advance(hass, 15)  # past the first command's hold-off, inside the second's
-    mock_device.update.assert_not_awaited()  # type: ignore[attr-defined]
 
+async def test_first_and_scheduled_poll_held_together_run_once(
+    hass: HomeAssistant,
+    coordinator: GoveeBleLocalCoordinator,
+    mock_device: Device,
+) -> None:
+    """The first poll and HA's timer, both due in one hold-off, end it with a single poll."""
+    await _turn_on(hass)
+    mock_device.update.reset_mock()  # type: ignore[attr-defined]
+    _arm_poll_soon(coordinator)
+    await coordinator.async_background_poll()  # the first poll, at the end of its stagger
+    await advance(hass, 6)  # HA's timer, in the same hold-off
+    assert coordinator._poll_waiting
     await advance(hass, HOLDOFF + 1)
     mock_device.update.assert_awaited_once()  # type: ignore[attr-defined]
+
+
+async def test_a_command_ending_after_unload_arms_no_hold_off(
+    hass: HomeAssistant,
+    coordinator: GoveeBleLocalCoordinator,
+    setup_integration: MockConfigEntry,
+) -> None:
+    """A command that outlives the unload doesn't leave a hold-off timer behind."""
+    coordinator.async_note_command_started()
+    assert await hass.config_entries.async_unload(setup_integration.entry_id)
+    coordinator.async_note_command_finished()
+    assert _live_timers(hass, "_async_end_holdoff") == []
 
 
 async def test_unload_drops_a_held_off_poll(
@@ -740,7 +891,8 @@ async def test_unload_drops_a_held_off_poll(
     """Unloading during a hold-off cancels it and the poll it held back."""
     await _turn_on(hass)
     mock_device.update.reset_mock()  # type: ignore[attr-defined]
-    await coordinator._handle_refresh_interval()
+    await _poll_comes_due(hass, coordinator)
+    assert coordinator._poll_waiting
     assert await hass.config_entries.async_unload(setup_integration.entry_id)
     assert not coordinator.commands_holding_off  # its timer is gone, not just yet to fire
     await advance(hass, HOLDOFF + 1)
@@ -760,7 +912,7 @@ def _timed_polls(device: Device, clock: SimpleNamespace, *seconds: float) -> Non
     """Make the next polls succeed, each taking the given seconds on the Bluetooth clock."""
     durations = iter(seconds)
 
-    async def _update() -> Any:
+    async def _update(**_kwargs: Any) -> Any:
         clock.now += next(durations)
         device.state.optimistic = False
         return device.state
@@ -788,6 +940,62 @@ async def test_slow_polls_back_off_and_a_fast_one_resets(
     assert coordinator.slow_poll_steps == 0
     assert interval(coordinator) == BASE
     assert coordinator.last_poll_seconds == 2.0
+
+
+@pytest.mark.parametrize(
+    ("seconds", "steps"),
+    [(SLOW_POLL_SECONDS, 1), (SLOW_POLL_SECONDS - 0.5, 0)],
+    ids=["at", "below"],
+)
+async def test_slow_poll_threshold(
+    hass: HomeAssistant,
+    coordinator: GoveeBleLocalCoordinator,
+    mock_device: Device,
+    monotonic: SimpleNamespace,
+    *,
+    seconds: float,
+    steps: int,
+) -> None:
+    """A poll of SLOW_POLL_SECONDS counts as slow; one just under it doesn't."""
+    _timed_polls(mock_device, monotonic, seconds)
+    await coordinator.async_refresh()
+    assert coordinator.slow_poll_steps == steps
+
+
+async def test_slow_floor_holds_through_a_failure_and_stays_within_the_cap(
+    hass: HomeAssistant,
+    coordinator: GoveeBleLocalCoordinator,
+    mock_device: Device,
+    monotonic: SimpleNamespace,
+) -> None:
+    """A failed poll doesn't drop a slow device to the base cadence; the cap still holds."""
+    _timed_polls(mock_device, monotonic, SLOW_POLL_SECONDS + 2, SLOW_POLL_SECONDS + 2)
+    await coordinator.async_refresh()
+    await coordinator.async_refresh()
+    assert interval(coordinator) == BASE * 4
+
+    fail(mock_device, GoveeBleConnectionError("no slot"))
+    await coordinator.async_refresh()  # the first failure keeps the base cadence...
+    assert interval(coordinator) == BASE * 4  # ...but not below the slow floor
+    for _ in range(6):
+        await coordinator.async_refresh()
+    assert interval(coordinator) == MAX_POLL_INTERVAL_SECONDS
+
+
+async def test_slow_floor_holds_through_a_restart_and_a_policy_step(
+    hass: HomeAssistant, coordinator: GoveeBleLocalCoordinator
+) -> None:
+    """The on-backoff starting over and a policy step keep a slow device at its floor."""
+    coordinator.slow_poll_steps = 2
+    coordinator.poll_policy = PollPolicy.ON
+    coordinator._set_poll_interval(timedelta(seconds=BASE * 8))
+    assert coordinator._async_restart_on_backoff()  # a change: the on-backoff starts over
+    assert coordinator.nominal_interval == timedelta(seconds=BASE * 4)
+
+    coordinator._set_poll_interval(timedelta(seconds=BASE * 8))
+    with patch.object(coordinator, "_async_policy_step", return_value=PollPolicy.FIXED):
+        assert coordinator._async_apply_policy()  # ON -> FIXED: the base cadence
+    assert coordinator.nominal_interval == timedelta(seconds=BASE * 4)
 
 
 async def test_a_weak_signal_backs_polls_off_too(
@@ -968,7 +1176,7 @@ async def test_availability_flip_pushes_to_every_entity(
     # own availability push can bring the entities back.
     gate = asyncio.Event()
 
-    async def _slow_update() -> Any:
+    async def _slow_update(**_kwargs: Any) -> Any:
         await gate.wait()
         mock_device.state.optimistic = False
         return mock_device.state

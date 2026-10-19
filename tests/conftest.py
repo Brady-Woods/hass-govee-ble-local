@@ -89,7 +89,9 @@ class FakeConnection:
                 self.fail_after -= 1
             self.sent.append(frame)
 
-    async def send(self, frame: bytes, *, expect_ack: bool = True) -> bytes | None:
+    async def send(
+        self, frame: bytes, *, expect_ack: bool = True, connect_budget: Any = None
+    ) -> bytes | None:
         self._write([frame])
         return None
 
@@ -138,7 +140,7 @@ def make_device(
     for method in _WRAPPED_COMMANDS:
         setattr(device, method, AsyncMock(wraps=getattr(device, method)))
 
-    async def _update() -> Any:
+    async def _update(**_kwargs: Any) -> Any:
         # Like a real read-back poll: the state object is updated in place and
         # is no longer merely optimistic.
         device.state.optimistic = False

@@ -230,7 +230,7 @@ async def test_connection_failures_count_failed_polls(
         await coordinator.async_refresh()
         assert sensor_state(hass, "connection_failures") == expected
 
-    async def _ok() -> Any:
+    async def _ok(**_kwargs: Any) -> Any:
         mock_device.state.optimistic = False
         return mock_device.state
 
@@ -310,7 +310,7 @@ async def test_poll_interval_is_unknown_while_a_rejected_secret_halts_polling(
     await coordinator.async_refresh()
     assert sensor_state(hass, "poll_interval") == STATE_UNKNOWN
 
-    async def _ok() -> Any:
+    async def _ok(**_kwargs: Any) -> Any:
         return mock_device.state
 
     mock_device.update.side_effect = _ok  # type: ignore[attr-defined]
@@ -365,7 +365,7 @@ async def test_last_connected_stays_unknown_for_optimistic_devices(
 ) -> None:
     """A device that never reads back real state never reports a last-connected time."""
 
-    async def _optimistic() -> Any:
+    async def _optimistic(**_kwargs: Any) -> Any:
         mock_device.state.optimistic = True
         return mock_device.state
 

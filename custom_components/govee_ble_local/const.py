@@ -114,31 +114,52 @@ POLL_IDLE_DISCONNECT_SECONDS = 1.0
 POLL_JITTER_SECONDS = (0, 30)
 
 # Spread (seconds) of the per-device stagger before the first background poll:
-# FIRST_POLL_STAGGER_PER_DEVICE_SECONDS for each configured device, at least
+# FIRST_POLL_STAGGER_PER_DEVICE_SECONDS for each active device entry, at least
 # FIRST_POLL_STAGGER_SECONDS and at most FIRST_POLL_STAGGER_MAX_SECONDS. Every
 # entry sets up when Home Assistant starts, so with a fixed 30 s a larger install
 # packed all its first connects (and the connection slots they hold) into the
 # same half minute, and a command to any of those devices queued behind its poll.
+# The cap stays a margin below the base interval, so a first poll never comes
+# after the poll HA schedules next.
 FIRST_POLL_STAGGER_SECONDS = 30
 FIRST_POLL_STAGGER_PER_DEVICE_SECONDS = 5
-FIRST_POLL_STAGGER_MAX_SECONDS = 120
+FIRST_POLL_STAGGER_MAX_SECONDS = POLL_INTERVAL_SECONDS - 20
 
 # A background poll that comes due while an entity command to the device is
-# running, or within this long after one ended, waits until then. The library
-# keeps a command's link up this long for quick follow-ups (its
-# ACTIVE_IDLE_DELAY): a poll then would take the device for its reads just when
-# the user is likely to adjust again, and Home Assistant already shows what the
-# command did.
-POLL_HOLDOFF_AFTER_COMMAND_SECONDS = 30
+# running, or within this long after one ended, waits until then: a poll then
+# would take the device for its reads just when the user is likely to adjust
+# again, and Home Assistant already shows what the command did. It ends a few
+# seconds before the library drops a command's link (its 30 s ACTIVE_IDLE_DELAY
+# after a write), so the held-off poll still finds the link up. A stream of
+# commands holds a poll off at most POLL_HOLDOFF_MAX_SECONDS from when it came
+# due; then it runs anyway.
+POLL_HOLDOFF_AFTER_COMMAND_SECONDS = 25
+POLL_HOLDOFF_MAX_SECONDS = POLL_INTERVAL_SECONDS
 
 # A successful poll that took at least SLOW_POLL_SECONDS (connect, handshake and
 # reads), or a device whose connectable advertisement is at or below
 # WEAK_SIGNAL_RSSI, counts as slow: its background polls back off, doubling per
 # slow poll up to SLOW_POLL_MAX_STEPS doublings (and MAX_POLL_INTERVAL_SECONDS),
 # so its long connects don't keep holding a connection slot and the device that
-# a command would wait behind. A fast poll at a usable signal resets it. A
-# typical poll takes 1-5 s; a device at -92 dBm on the bench took 3-24 s.
+# a command would wait behind. The steps set a floor, BASE x 2^steps (capped), on
+# every interval: after a failure, a change or a policy step too. A fast poll at
+# a usable signal resets them. A typical poll takes 1-5 s; a device at -92 dBm on
+# the bench took 3-24 s. The time counts from the start of update(), so a poll
+# that waited for the library's device lock behind another operation (a command
+# or a self-test) counts that wait too. The connect itself is bounded by
+# POLL_CONNECT_TIMEOUT_SECONDS.
 SLOW_POLL_SECONDS = 10
+
+# A background poll's connect gets a tighter budget than a command's (the
+# library's defaults: 3 attempts per establishment, within its 45 s operation
+# limit): a poll at a device that doesn't answer gives the device up after
+# POLL_CONNECT_TIMEOUT_SECONDS (plus up to 5 s to tear the link down), instead
+# of holding it, and a command queued behind it, for up to 45 s. The timeout is
+# what bounds it: bleak-retry-connector retries transient failures (no free
+# slot, device not found) up to 9 times whatever the attempts say. It bounds the
+# connect only, not the reads. Commands keep the library's defaults.
+POLL_CONNECT_ATTEMPTS = 1
+POLL_CONNECT_TIMEOUT_SECONDS = 15
 WEAK_SIGNAL_RSSI = -90
 SLOW_POLL_MAX_STEPS = 3
 
