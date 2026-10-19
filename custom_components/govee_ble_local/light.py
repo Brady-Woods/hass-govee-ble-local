@@ -53,6 +53,19 @@ def _clamp_kelvin(device: Device, kelvin: int) -> int:
     return max(lo, min(hi, kelvin))
 
 
+def _apply_kelvin_range(light: LightEntity, device: Device) -> None:
+    """Publish the device's current colour-temperature range on a light that offers one.
+
+    Re-read on every update: the library can change the range after setup, once a poll
+    has read the hardware or soft version, or once a later advert has given the device
+    its pact (published at the next update). The range is a capability attribute, so a
+    setup-time copy left the state attributes, the entity registry's capabilities and
+    the frontend's colour-temperature slider on the old range.
+    """
+    if ColorMode.COLOR_TEMP in (light.supported_color_modes or ()):
+        light._attr_min_color_temp_kelvin, light._attr_max_color_temp_kelvin = kelvin_range(device)
+
+
 def _sub_light_modes(device: Device) -> set[ColorMode]:
     """Return the colour modes of a zone/segment sub-light.
 
@@ -104,10 +117,7 @@ class _SubLight(GoveeBleLocalEntity, LightEntity):
     def __init__(self, entry: GoveeBleLocalConfigEntry, key: str) -> None:
         super().__init__(entry, key)
         self._attr_supported_color_modes = _sub_light_modes(self._device)
-        if ColorMode.COLOR_TEMP in self._attr_supported_color_modes:
-            self._attr_min_color_temp_kelvin, self._attr_max_color_temp_kelvin = kelvin_range(
-                self._device
-            )
+        _apply_kelvin_range(self, self._device)
         self._attr_color_mode = ColorMode.RGB  # updated on command
 
     @abstractmethod
@@ -116,6 +126,7 @@ class _SubLight(GoveeBleLocalEntity, LightEntity):
 
     @callback
     def _handle_coordinator_update(self) -> None:
+        _apply_kelvin_range(self, self._device)
         self._sync_from_readback()
         super()._handle_coordinator_update()
 
@@ -141,12 +152,10 @@ class GoveeBleLocalLight(GoveeBleLocalEntity, LightEntity):
             modes.add(ColorMode.RGB)
         if Capability.COLOR_TEMP in caps:
             modes.add(ColorMode.COLOR_TEMP)
-            self._attr_min_color_temp_kelvin, self._attr_max_color_temp_kelvin = kelvin_range(
-                self._device
-            )
         if not modes:
             modes = {ColorMode.BRIGHTNESS if Capability.BRIGHTNESS in caps else ColorMode.ONOFF}
         self._attr_supported_color_modes = modes
+        _apply_kelvin_range(self, self._device)
         if Capability.SCENES in caps:
             self._attr_supported_features = LightEntityFeature.EFFECT
             # EFFECT_OFF lets the user clear a running scene from the UI.
@@ -213,6 +222,7 @@ class GoveeBleLocalLight(GoveeBleLocalEntity, LightEntity):
         data = self.coordinator.data
         if data.rgb_color is not None or data.color_temp_kelvin is not None:
             self._optimistic_effect = None
+        _apply_kelvin_range(self, self._device)
         super()._handle_coordinator_update()
 
     def _exit_scene_colour(self) -> tuple[tuple[int, int, int] | None, int | None]:

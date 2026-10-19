@@ -10,8 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - **H61A8 colour temperature (with the next library release):** a `govee-ble-local` release after
   1.3.0 gives the H61A8 colour temperature and per-segment brightness. The main and segment lights
-  then offer colour temperature over the library's range (2700-6500 K), and the self-test runs the
-  colour-temperature steps. Nothing changes with 1.2.1 or 1.3.0.
+  then offer colour temperature over the range the library gives that unit (2700-6500 K, widening
+  to 2000-9000 K on hardware below 3.08.01 once its version is read; see Fixed), and the self-test
+  runs the colour-temperature steps. Nothing changes with 1.2.1 or 1.3.0.
 - **Wrong Govee password shown as such (needs a future library release):** once a
   `govee-ble-local` release adds `GoveeCloudAuthError` (none has yet: 1.2.1 and 1.3.0 don't have
   it), the cloud secret step says the account rejected the email or password (`invalid_auth`)
@@ -22,6 +23,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `error` text is unchanged.
 
 ### Fixed
+- **Colour-temperature range follows the device:** lights re-read the range from the library on
+  every update instead of only at setup. With `govee-ble-local` 1.4.0 an H61A8's range depends on
+  its hardware version, which the first poll reads after the lights are built. An older unit
+  (hardware below 3.08.01) supports 2000-9000 K, but its lights reported 2700-6500 K on every
+  start, so their state, their entity registry entries and the colour-temperature slider stopped
+  there; a restart didn't help. Commands with a temperature outside that range already reached the
+  device.
 - **Bluetooth discovery follows the library's own discovery lists** (`govee-ble-local` 1.4.0): it
   also matches Govee's encrypted broadcast headers (manufacturer IDs 0x8841 and 0x8842) and plain
   `GV` + digit names (`GV6047…` is an H6047; Home Assistant can't match the library's two-letter

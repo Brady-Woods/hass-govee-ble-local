@@ -55,6 +55,8 @@ HAS_RUNTIME_SEGMENT_COUNT = Version(importlib.metadata.version("govee-ble-local"
 )
 # Library releases after 1.3.0 give the H61A8 colour temperature and per-segment brightness.
 H61A8_HAS_CCT = Capability.COLOR_TEMP in make_device("H61A8").capabilities
+# ...and a range that depends on its hardware version (kelvin_by_hardware), known only once read.
+H61A8_RANGE_BY_HARDWARE = bool(getattr(make_device("H61A8").profile, "kelvin_by_hardware", ()))
 
 # Colour-temperature ranges to run the range-dependent tests over: one unlike
 # DEFAULT_MIN/MAX_KELVIN (so the device's own range is told apart from the
@@ -154,6 +156,28 @@ def _lights(hass: HomeAssistant, entry: MockConfigEntry) -> dict[str, er.Registr
         for e in er.async_entries_for_config_entry(er.async_get(hass), entry.entry_id)
         if e.domain == "light"
     }
+
+
+def _kelvin_ranges(hass: HomeAssistant, *entity_ids: str) -> dict[str, tuple[int, int]]:
+    """The (min, max) kelvin each light publishes, in its state and in the entity registry.
+
+    Keyed "<entity id> state" / "<entity id> registry", so a failed comparison names the
+    light, and the place, still showing a stale range.
+    """
+    registry = er.async_get(hass)
+    ranges: dict[str, tuple[int, int]] = {}
+    for entity_id in entity_ids:
+        attrs = hass.states.get(entity_id).attributes
+        caps = registry.async_get(entity_id).capabilities or {}
+        ranges[f"{entity_id} state"] = (
+            attrs["min_color_temp_kelvin"],
+            attrs["max_color_temp_kelvin"],
+        )
+        ranges[f"{entity_id} registry"] = (
+            caps["min_color_temp_kelvin"],
+            caps["max_color_temp_kelvin"],
+        )
+    return ranges
 
 
 async def _setup_custom(
@@ -778,6 +802,48 @@ async def test_color_mode_never_reports_unsupported_color_temp(
     assert attrs["color_mode"] == "rgb"
     assert attrs["supported_color_modes"] == ["rgb"]
     assert "min_color_temp_kelvin" not in attrs or attrs["min_color_temp_kelvin"] is None
+
+
+async def test_kelvin_range_follows_the_device_on_each_update(
+    hass: HomeAssistant, enabled_entry: MockConfigEntry, mock_device: Device
+) -> None:
+    """A range the library changes after setup reaches every light's state and registry entry."""
+    zone = next(z.name for z in mock_device.zones if z.segments)
+    ranges = _kelvin_ranges(hass, MAIN, _zone(hass, zone), _segment(hass, 0))
+    assert ranges == dict.fromkeys(ranges, (mock_device.min_kelvin, mock_device.max_kelvin))
+
+    # As if the library had just read a hardware version that widens the range.
+    mock_device.profile = dataclasses.replace(mock_device.profile, min_kelvin=2000, max_kelvin=9000)
+    enabled_entry.runtime_data.coordinator.async_publish_device_state()
+    await hass.async_block_till_done()
+    assert _kelvin_ranges(hass, MAIN, _zone(hass, zone), _segment(hass, 0)) == dict.fromkeys(
+        ranges, (2000, 9000)
+    )
+
+    # A request in the widened range reaches the device unclamped (_clamp_kelvin reads it live).
+    await _call(hass, "turn_on", MAIN, color_temp_kelvin=8500)
+    assert mock_device.turn_on.await_args.kwargs["kelvin"] == 8500
+
+
+@pytest.mark.skipif(
+    not H61A8_RANGE_BY_HARDWARE, reason="the installed library has no hardware-dependent range"
+)
+@pytest.mark.parametrize("device_sku", ["H61A8"])
+async def test_h61a8_range_is_refreshed_after_the_hardware_read(
+    hass: HomeAssistant, enabled_entry: MockConfigEntry, mock_device: Device
+) -> None:
+    """An older H61A8 (hardware below 3.08.01) offers its wider range once that is read."""
+    ranges = _kelvin_ranges(hass, MAIN, _segment(hass, 0))
+    assert ranges == dict.fromkeys(ranges, (2700, 6500))  # valid on every revision until read
+    _seed(enabled_entry, hardware_version="3.00.00")
+    await hass.async_block_till_done()
+    widened = (mock_device.min_kelvin, mock_device.max_kelvin)
+    assert widened == (2000, 9000)
+    assert _kelvin_ranges(hass, MAIN, _segment(hass, 0)) == dict.fromkeys(ranges, widened)
+
+    # A request in the widened range reaches the device unclamped.
+    await _call(hass, "turn_on", MAIN, color_temp_kelvin=2200)
+    assert mock_device.turn_on.await_args.kwargs["kelvin"] == 2200
 
 
 @pytest.mark.skipif(not H61A8_HAS_CCT, reason="the installed library has no H61A8 colour temp")
