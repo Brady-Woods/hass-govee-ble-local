@@ -5,10 +5,13 @@
     { "manufacturer_id": 34817 },
     { "manufacturer_id": 34818 },
     { "manufacturer_id": 34819 },
+    { "manufacturer_id": 34881 },
+    { "manufacturer_id": 34882 },
     { "manufacturer_id": 34883 },
     { "local_name": "ihoment_*" },
     { "local_name": "Govee_*" },
     { "local_name": "Minger_*" },
+    { "local_name": "GVB*" },
     { "local_name": "GVH*" },
     { "local_name": "GVR*" },
     { "local_name": "GBK_*" }

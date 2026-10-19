@@ -16,6 +16,7 @@ from govee_ble_local import (
     cloud as govee_cloud,
 )
 from govee_ble_local.cloud import CloudDevice, GoveeCloudError
+from govee_ble_local.identify import identify
 from homeassistant.config_entries import (
     SOURCE_BLUETOOTH,
     SOURCE_REAUTH,
@@ -274,6 +275,39 @@ async def test_bluetooth_discovery_not_supported(hass: HomeAssistant, info: Any)
     )
     assert result["type"] is FlowResultType.ABORT
     assert result["reason"] == "not_supported"
+
+
+_GOVEE_PAYLOAD = next(iter(make_service_info().manufacturer_data.values()))
+
+
+@pytest.mark.parametrize(
+    ("name", "company_id"),
+    [
+        ("GVB70801A2B", 0x8841),  # B7080: matched by GVB*, admitted only by a later library
+        ("GVB70821A2B", 0x8842),
+        ("GVH50751A2B", 0x8801),  # a Govee thermometer: matched by GVH*, never a light
+        (LOCAL_NAME, 0x8841),  # a supported light on the encrypted-header variants
+        (LOCAL_NAME, 0x8842),
+    ],
+)
+async def test_bluetooth_discovery_follows_the_librarys_supported_check(
+    hass: HomeAssistant, name: str, company_id: int
+) -> None:
+    """The matchers may catch more than the library drives; only what it supports is offered."""
+    info = make_service_info(name=name, manufacturer_data={company_id: _GOVEE_PAYLOAD})
+    adv = identify(info.name, info.manufacturer_data)
+    supported = adv is not None and govee_ble_local.is_supported_sku(adv.sku)
+    if name == LOCAL_NAME:
+        assert supported  # the encrypted-header variants must not hide a supported light
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": SOURCE_BLUETOOTH}, data=info
+    )
+    if supported:
+        assert result["type"] is FlowResultType.FORM
+        assert result["step_id"] == "bluetooth_confirm"
+    else:
+        assert result["type"] is FlowResultType.ABORT
+        assert result["reason"] == "not_supported"
 
 
 # -- user flow ----------------------------------------------------------------
