@@ -539,8 +539,10 @@ async def test_unreadable_scene_store_sets_up_without_effects(
     assert mock_config_entry.state is ConfigEntryState.LOADED
     assert mock_config_entry.runtime_data.scene_names is None
 
-    [record] = [r for r in caplog.records if "scene store" in r.getMessage()]
-    assert record.levelno == logging.ERROR
+    # The report is the only error: no entity update failed on a scene read either
+    # (the coordinator would log that, not raise it).
+    [record] = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert "scene store" in record.getMessage()
     assert "govee-ble-local" in record.getMessage()
     assert str(broken_scene_store) in record.getMessage()
 
@@ -550,6 +552,8 @@ async def test_unreadable_scene_store_sets_up_without_effects(
         "light", "turn_on", {"entity_id": "light.test_ceiling", "brightness": 128}, blocking=True
     )
     mock_device.turn_on.assert_awaited()  # type: ignore[attr-defined]
+    assert hass.states.get("light.test_ceiling").attributes["brightness"] == 128
+    assert [r for r in caplog.records if r.levelno >= logging.ERROR] == [record]
 
 
 async def test_unreadable_scene_store_is_reported_once_per_run(

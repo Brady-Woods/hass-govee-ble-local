@@ -9,7 +9,7 @@ import importlib.metadata
 import logging
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import PropertyMock, patch
 
 from bleak.exc import BleakError
 from govee_ble_local import (
@@ -539,6 +539,30 @@ async def test_unknown_effect_is_rejected(
     mock_device.turn_on.assert_not_awaited()
     mock_device.set_scene_by_name.assert_not_awaited()
     assert hass.states.get(MAIN).state == STATE_OFF
+
+
+async def test_effect_list_follows_the_device_on_each_update(
+    hass: HomeAssistant, entry: MockConfigEntry, mock_device: Device
+) -> None:
+    """Scenes the device stops offering (its scene set, read after setup) leave the effect list."""
+    full = list(mock_device.scene_names)
+    assert hass.states.get(MAIN).attributes["effect_list"] == ["off", *full]
+    dropped = full[-1]
+    light = hass.data[DATA_COMPONENT].get_entity(MAIN)
+    light._optimistic_effect = dropped  # as if it had just been activated
+
+    offered = full[: len(full) // 2]
+    with patch.object(Device, "scene_names", new_callable=PropertyMock, return_value=offered):
+        entry.runtime_data.coordinator.async_publish_device_state()
+        await hass.async_block_till_done()
+
+    assert hass.states.get(MAIN).attributes["effect_list"] == ["off", *offered]
+    capabilities = er.async_get(hass).async_get(MAIN).capabilities
+    assert capabilities["effect_list"] == ["off", *offered]
+    assert light._optimistic_effect is None  # no longer one the device offers
+    with pytest.raises(ServiceValidationError):
+        await _call(hass, "turn_on", MAIN, effect=dropped)
+    mock_device.set_scene_by_name.assert_not_awaited()
 
 
 async def test_effect_off_in_rgb_mode_restores_the_colour(

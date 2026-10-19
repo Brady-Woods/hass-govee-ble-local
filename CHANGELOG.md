@@ -52,6 +52,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   there; a restart didn't help. Commands with a temperature outside that range already reached the
   device. A range that depends on the protocol version a device advertises now shows as soon as an
   advertisement carries it, instead of at the next poll, which can be 15 minutes away.
+- **The effect list follows the device:** lights re-read the scenes the library offers on every
+  update. With `govee-ble-local` 1.5.0 the scenes an RGBIC light (the H61A8 and other dreamcolor
+  models) offers depend on its firmware and protocol versions, which are read after setup, so the
+  list can get shorter then; it used to stay at the full list read at setup, on every start.
 - **Bluetooth discovery follows the library's own discovery lists** (`govee-ble-local` 1.4.0): it
   also matches Govee's encrypted broadcast headers (manufacturer IDs 0x8841 and 0x8842) and plain
   `GV` + digit names (`GV6047…` is an H6047; Home Assistant can't match the library's two-letter

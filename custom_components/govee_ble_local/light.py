@@ -220,6 +220,22 @@ class GoveeBleLocalLight(GoveeBleLocalEntity, LightEntity):
             return ColorMode.RGB
         return self._default_color_mode
 
+    def _apply_effect_list(self) -> None:
+        """Offer the scenes the device offers now, on a light that offers effects.
+
+        Re-read on every update: from govee-ble-local 1.5.0 the scenes a device
+        offers follow its scene set, which the hardware/soft versions read after
+        setup (and the advertised pact) decide, so the list can shrink then. Like
+        the Kelvin range it is a capability attribute: the state, the entity
+        registry's capabilities and the effect picker follow. Not on a light set
+        up without effects (an unreadable scene store), whose reads would fail.
+        """
+        if self._attr_effect_list is None:
+            return
+        self._attr_effect_list = [EFFECT_OFF, *self._device.scene_names]
+        if self._optimistic_effect not in self._attr_effect_list:
+            self._optimistic_effect = None
+
     @callback
     def _handle_coordinator_update(self) -> None:
         # A poll showing a solid colour/temp means the fixture left our scene.
@@ -227,6 +243,7 @@ class GoveeBleLocalLight(GoveeBleLocalEntity, LightEntity):
         if data.rgb_color is not None or data.color_temp_kelvin is not None:
             self._optimistic_effect = None
         _apply_kelvin_range(self, self._device)
+        self._apply_effect_list()
         super()._handle_coordinator_update()
 
     def _exit_scene_colour(self) -> tuple[tuple[int, int, int] | None, int | None]:
