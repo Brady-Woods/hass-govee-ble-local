@@ -131,6 +131,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unknown while a device has no background polls, and its diagnostics name the step (`poll_policy`).
   A light or plug with no background polls goes unavailable as soon as no connectable Bluetooth
   adapter or proxy hears it, instead of after three missed polls.
+- **Zone lights (H60A6 main panel and ring, H6047 bars) respond sooner, in the Govee app's
+  order.** Changing the colour, colour temperature or brightness of a zone that is lit now sends
+  only that change, as the app does, instead of re-sending the zone's power after it; on an H6047
+  that also skips reading the other bar first. A zone that is off, or whose "on" hasn't been read
+  back by a poll in the last 2 minutes (it may have been switched off in the Govee app), is
+  switched on first and then changed, which is the order the app takes. A plain turn on still
+  always sends the zone's power.
 - **Background polls give way to commands.** A scheduled poll that comes due while a command to the
   same device is running, or within 30 s after one (while the command's connection is still open
   for follow-ups), now waits until then, so a second tap or a slider step doesn't queue behind the

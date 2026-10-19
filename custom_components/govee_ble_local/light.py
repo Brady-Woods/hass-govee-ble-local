@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from abc import abstractmethod
+from datetime import timedelta
 import logging
 from typing import TYPE_CHECKING, Any
 
@@ -20,8 +21,9 @@ from homeassistant.components.light import (
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+from homeassistant.util import dt as dt_util
 
-from .const import DOMAIN
+from .const import DOMAIN, ZONE_STATE_FRESH_SECONDS
 from .entity import GoveeBleLocalEntity
 from .helpers import (
     brightness_to_pct,
@@ -424,9 +426,33 @@ class GoveeBleLocalZoneLight(_SubLight):
             return False
         return self._device.zone_is_on(self._zone_name)
 
+    def _known_lit(self) -> bool:
+        """Return whether the zone is known to be on, by a poll recent enough to trust.
+
+        Advertisements carry only the whole fixture's on/off: a zone switched off
+        in the Govee app while the fixture stays on reads "on" here until the next
+        poll, which can be many minutes away.
+        """
+        polled = self.coordinator.last_connected
+        return (
+            self.is_on is True
+            and polled is not None
+            and dt_util.utcnow() - polled < timedelta(seconds=ZONE_STATE_FRESH_SECONDS)
+        )
+
     async def async_turn_on(self, **kwargs: Any) -> None:
-        """Power the zone on, optionally setting colour/temperature/brightness."""
+        """Power the zone on, optionally setting colour/temperature/brightness.
+
+        Follows the Govee app, which never sends a zone's power with a colour or
+        brightness change and only lets an off zone be changed once switched on:
+        a change to a zone known to be lit sends just that change, and a zone that
+        is off (or not known to be on) is switched on first, then changed. A plain
+        turn_on always sends the power: it is the zone's on switch.
+        """
+        plain = not (kwargs.keys() & _COLOUR_KWARGS)
         async with self._command():
+            if plain or not self._known_lit():
+                await self._run_client_command(self._device.set_zone_power(self._zone_name, True))
             if ATTR_COLOR_TEMP_KELVIN in kwargs:
                 kelvin = _clamp_kelvin(self._device, kwargs[ATTR_COLOR_TEMP_KELVIN])
                 _LOGGER.debug(
@@ -460,7 +486,6 @@ class GoveeBleLocalZoneLight(_SubLight):
                     self._device.set_segment_brightness(list(self._segments), pct)
                 )
                 self._attr_brightness = kwargs[ATTR_BRIGHTNESS]
-            await self._run_client_command(self._device.set_zone_power(self._zone_name, True))
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Power the zone off."""

@@ -142,6 +142,13 @@ SLOW_POLL_SECONDS = 10
 WEAK_SIGNAL_RSSI = -90
 SLOW_POLL_MAX_STEPS = 3
 
+# A zone light trusts its zone's read-back "on" this long after the last
+# successful poll: then a colour or brightness change sends only that change,
+# without the zone's power frame (as the Govee app does). Older, the zone may
+# have been switched off elsewhere since (advertisements carry only the whole
+# fixture's on/off), so it is switched on first.
+ZONE_STATE_FRESH_SECONDS = 120
+
 # A device that has vanished from every connectable scanner goes unavailable
 # after this many consecutive failed (or skipped) polls. A device still
 # advertising stays available.
