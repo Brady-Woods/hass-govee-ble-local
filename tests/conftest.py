@@ -19,6 +19,7 @@ from typing import Any
 from unittest.mock import AsyncMock, PropertyMock, patch
 
 from bleak.backends.device import BLEDevice
+from bleak.backends.scanner import AdvertisementData
 from govee_ble_local import Device, create_device
 from govee_ble_local.models import Encryption
 from homeassistant.components.bluetooth import BluetoothServiceInfoBleak
@@ -173,21 +174,35 @@ def make_service_info(
     source: str = "local",
     connectable: bool = True,
     seen_at: float | None = None,
+    advertisement: bool = False,
 ) -> BluetoothServiceInfoBleak:
     """Build a real BluetoothServiceInfoBleak for a Govee advertisement.
 
-    ``seen_at`` is its (monotonic) receive time; by default, now.
+    ``seen_at`` is its (monotonic) receive time; by default, now. ``advertisement`` also
+    attaches bleak's AdvertisementData, which the library's create_device reads the pact
+    from; by default there is none.
     """
+    mfg = govee_mfg(on=on) if manufacturer_data is None else manufacturer_data
     return BluetoothServiceInfoBleak(
         name=name,
         address=address,
         rssi=rssi,
-        manufacturer_data=govee_mfg(on=on) if manufacturer_data is None else manufacturer_data,
+        manufacturer_data=mfg,
         service_data={},
         service_uuids=[],
         source=source,
         device=BLEDevice(address=address, name=name, details={}),
-        advertisement=None,
+        advertisement=AdvertisementData(
+            local_name=name,
+            manufacturer_data=mfg,
+            service_data={},
+            service_uuids=[],
+            tx_power=None,  # type: ignore[arg-type]
+            rssi=rssi,
+            platform_data=(),
+        )
+        if advertisement
+        else None,
         connectable=connectable,
         time=time.monotonic() if seen_at is None else seen_at,
         tx_power=None,

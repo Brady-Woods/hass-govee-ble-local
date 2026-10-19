@@ -13,8 +13,8 @@ from bleak.backends.device import BLEDevice
 from govee_ble_local import (
     Device,
     GoveeBleConnectionError,
-    GoveeBleNotSupported,
     create_device,
+    profile_for,
 )
 from homeassistant.components.bluetooth import (
     BluetoothChange,
@@ -37,6 +37,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from custom_components.govee_ble_local import capture
 from custom_components.govee_ble_local.const import (
     CONF_SECRET,
+    CONF_SKU,
     DOMAIN,
     LAST_SEEN_RESOLUTION_SECONDS,
     MAX_POLL_INTERVAL_SECONDS,
@@ -45,6 +46,7 @@ from custom_components.govee_ble_local.const import (
 from custom_components.govee_ble_local.coordinator import GoveeBleLocalCoordinator
 
 from .conftest import (
+    FakeConnection,
     advance,
     advertisement_callback,
     allow_adverts,
@@ -53,7 +55,7 @@ from .conftest import (
     make_service_info,
     unavailable_callback,
 )
-from .const import ADDRESS, LOCAL_NAME, SECRET_HEX, TITLE
+from .const import ADDRESS, LOCAL_NAME, SECRET_HEX, TITLE, pact_mfg
 
 MAIN_LIGHT = "light.test_ceiling"
 SELF_TEST_BUTTON = "button.test_ceiling_run_self_test"
@@ -527,16 +529,71 @@ async def test_setup_retries_when_sku_unknown(
 
 
 async def test_unsupported_model_is_a_permanent_error(
-    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_bluetooth: SimpleNamespace
+    hass: HomeAssistant, mock_bluetooth: SimpleNamespace
 ) -> None:
     """An unsupported SKU fails setup for good instead of retrying forever."""
-    mock_config_entry.add_to_hass(hass)
+    entry = MockConfigEntry(
+        domain=DOMAIN, title=TITLE, unique_id=ADDRESS, data={"address": ADDRESS, CONF_SKU: "H9999"}
+    )
+    entry.add_to_hass(hass)
     with patch(
-        "custom_components.govee_ble_local.create_device",
-        side_effect=GoveeBleNotSupported("H9999"),
+        "custom_components.govee_ble_local.create_device", wraps=create_device
+    ) as create:  # the real library refuses it
+        await hass.config_entries.async_setup(entry.entry_id)
+    assert create.call_args.args[1] == "H9999"
+    assert entry.state is ConfigEntryState.SETUP_ERROR
+    assert (
+        entry.reason == "The Govee model H9999 is not supported by this version of the integration"
+    )
+
+
+@pytest.mark.parametrize(
+    ("pact", "state"),
+    [((1, 1), ConfigEntryState.LOADED), ((2, 3), ConfigEntryState.SETUP_RETRY)],
+    ids=["accepted_pact", "refused_pact"],
+)
+async def test_setup_with_the_real_library_routes_by_the_advertised_pact(
+    hass: HomeAssistant,
+    presence: SimpleNamespace,
+    mock_bluetooth: SimpleNamespace,
+    pact: tuple[int, int],
+    state: ConfigEntryState,
+) -> None:
+    """The real create_device builds the H6009 at its advertised pact, or setup retries.
+
+    Only the BLE transport is faked, so the keyword arguments setup passes and the
+    library's pact routing both run for real. The H6009 is served only at its row's
+    pacts: at another one the model is supported but refused, which can change with a
+    later advert, so setup retries instead of failing for good.
+    """
+    info = make_service_info(
+        name="GVH6009ABCD", manufacturer_data=pact_mfg(*pact), advertisement=True
+    )
+    presence.service_info = mock_bluetooth.last_info.return_value = info
+    entry = MockConfigEntry(
+        domain=DOMAIN, title=TITLE, unique_id=ADDRESS, data={"address": ADDRESS, CONF_SKU: "H6009"}
+    )
+    entry.add_to_hass(hass)
+    with patch(
+        "govee_ble_local.devices.device.GoveeConnection",
+        side_effect=lambda *_a, **_k: FakeConnection(),
     ):
-        await hass.config_entries.async_setup(mock_config_entry.entry_id)
-    assert mock_config_entry.state is ConfigEntryState.SETUP_ERROR
+        await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done(wait_background_tasks=True)
+        assert entry.state is state
+        if state is ConfigEntryState.LOADED:
+            assert entry.runtime_data.device.profile == profile_for("H6009", pact=pact)
+            assert isinstance(entry.runtime_data.device._conn, FakeConnection)
+            assert await hass.config_entries.async_unload(entry.entry_id)
+        else:
+            assert entry.error_reason_translation_domain == DOMAIN
+            assert entry.error_reason_translation_key == "protocol_not_supported"
+            assert entry.error_reason_translation_placeholders == {
+                "sku": "H6009",
+                "protocol": "2,3",
+            }
+            assert entry.reason is not None
+            assert "advertises protocol version 2,3" in entry.reason
 
 
 async def test_setup_passes_secret_to_library(

@@ -8,7 +8,13 @@ from datetime import timedelta
 import logging
 import zlib
 
-from govee_ble_local import Capability, Device, GoveeBleNotSupported, create_device
+from govee_ble_local import (
+    Capability,
+    Device,
+    GoveeBleNotSupported,
+    create_device,
+    is_supported_sku,
+)
 from govee_ble_local.identify import identify
 from homeassistant.components import bluetooth
 from homeassistant.config_entries import ConfigEntry
@@ -140,6 +146,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: GoveeBleLocalConfigEntry
             idle_disconnect=POLL_IDLE_DISCONNECT_SECONDS,
         )
     except GoveeBleNotSupported as err:
+        adv = identify(service_info.name, service_info.manufacturer_data) if service_info else None
+        if adv is not None and adv.pact is not None and is_supported_sku(sku):
+            # The library serves the model, only not at the pact the device advertises now.
+            # A later advert can carry another, so retry instead of giving up for good.
+            raise ConfigEntryNotReady(
+                translation_domain=DOMAIN,
+                translation_key="protocol_not_supported",
+                translation_placeholders={"sku": sku, "protocol": "{},{}".format(*adv.pact)},
+            ) from err
         # Permanent: retrying can't make an unsupported model supported.
         raise ConfigEntryError(
             translation_domain=DOMAIN,

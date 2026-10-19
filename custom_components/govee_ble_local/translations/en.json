@@ -56,6 +56,7 @@
       "no_devices_found": "No unconfigured supported Govee devices found.",
       "already_configured": "Device is already configured.",
       "not_supported": "This Govee model isn't supported by this integration yet.",
+      "protocol_not_supported": "This Govee model is supported, but not at the protocol version the device is advertising now, so it can't be set up.",
       "reconfigure_successful": "Device reloaded successfully.",
       "reauth_successful": "Secret key updated.",
       "unknown": "Unexpected error: the setup flow lost track of the device. Please start again."
@@ -155,6 +156,9 @@
     },
     "model_not_supported": {
       "message": "The Govee model {sku} is not supported by this version of the integration."
+    },
+    "protocol_not_supported": {
+      "message": "The Govee {sku} advertises protocol version {protocol}, which this version of the integration doesn't support for that model. Setup will be retried in case the device advertises another."
     },
     "secret_malformed": {
       "message": "The stored secret key for {device_name} is malformed; enter it again via the re-authentication prompt."

@@ -40,7 +40,7 @@ from custom_components.govee_ble_local.const import (
 )
 
 from .conftest import make_device, make_service_info
-from .const import ADDRESS, LOCAL_NAME, PLUG_ADDRESS, PLUG_NAME, SECRET_HEX
+from .const import ADDRESS, LOCAL_NAME, PLUG_ADDRESS, PLUG_NAME, SECRET_HEX, pact_mfg
 
 FLOW = "custom_components.govee_ble_local.config_flow"
 UNSUPPORTED_NAME = "GVH9999ABCD"
@@ -297,7 +297,7 @@ async def test_bluetooth_discovery_follows_the_librarys_supported_check(
     """The matchers may catch more than the library drives; only what it supports is offered."""
     info = make_service_info(name=name, manufacturer_data={company_id: _GOVEE_PAYLOAD})
     adv = identify(info.name, info.manufacturer_data)
-    supported = adv is not None and govee_ble_local.is_supported_sku(adv.sku)
+    supported = adv is not None and govee_ble_local.is_supported_sku(adv.sku, pact=adv.pact)
     if name in (LOCAL_NAME, "GV60471A2B"):
         assert supported  # supported lights on every library: these must reach the confirm step
     result = await hass.config_entries.flow.async_init(
@@ -309,6 +309,121 @@ async def test_bluetooth_discovery_follows_the_librarys_supported_check(
     else:
         assert result["type"] is FlowResultType.ABORT
         assert result["reason"] == "not_supported"
+
+
+# H6009 is routed only by the library's catalogue: it is served at its row's pacts alone.
+PACT_CASES = pytest.mark.parametrize(
+    ("name", "pact", "offered"),
+    [
+        ("GVH6009ABCD", (1, 1), True),  # a pact its row accepts
+        ("GVH6009ABCD", (2, 3), False),  # a pact it doesn't: setup would refuse the model
+        (LOCAL_NAME, (9, 9), True),  # a 1.4.0 model still routes at a pact no row lists
+    ],
+    ids=["catalogue_accepted_pact", "catalogue_other_pact", "known_model_unlisted_pact"],
+)
+
+
+@PACT_CASES
+async def test_bluetooth_discovery_checks_support_at_the_advertised_pact(
+    hass: HomeAssistant, setup_entry: AsyncMock, name: str, pact: tuple[int, int], offered: bool
+) -> None:
+    """Discovery offers a model only where setup would route it: at its advertised pact."""
+    info = make_service_info(name=name, manufacturer_data=pact_mfg(*pact))
+    assert identify(info.name, info.manufacturer_data).pact == pact
+    with patch(f"{FLOW}.profile_for", wraps=config_flow.profile_for) as profile:
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": SOURCE_BLUETOOTH}, data=info
+        )
+        if not offered:
+            assert result["type"] is FlowResultType.ABORT
+            assert result["reason"] == "not_supported"
+            return
+        assert result["type"] is FlowResultType.FORM
+        assert result["step_id"] == "bluetooth_confirm"
+        result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    # The secret check looked the profile up at the same pact (threaded, not re-derived).
+    assert profile.call_args.kwargs == {"pact": pact}
+
+
+@PACT_CASES
+async def test_user_flow_offers_only_devices_supported_at_their_pact(
+    hass: HomeAssistant, setup_entry: AsyncMock, name: str, pact: tuple[int, int], offered: bool
+) -> None:
+    """The manual picker lists a model only at a pact it is served at, and sets it up there."""
+    infos = [make_service_info(name=name, manufacturer_data=pact_mfg(*pact))]
+    with patch(f"{FLOW}.async_discovered_service_info", return_value=infos):
+        result = await hass.config_entries.flow.async_init(DOMAIN, context={"source": SOURCE_USER})
+    if not offered:
+        assert result["type"] is FlowResultType.ABORT
+        assert result["reason"] == "no_devices_found"
+        return
+    assert result["step_id"] == "user"
+    assert next(iter(result["data_schema"].schema.values())).container == {ADDRESS: name}
+    with patch(f"{FLOW}.profile_for", wraps=config_flow.profile_for) as profile:
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {CONF_ADDRESS: ADDRESS}
+        )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert profile.call_args.kwargs == {"pact": pact}
+
+
+@pytest.mark.parametrize(
+    ("name", "flow_mfg", "latest_mfg", "entry_pact"),
+    [
+        ("GVH6009ABCD", {}, pact_mfg(1, 1), (1, 1)),  # no pact, then one its row accepts
+        ("GVH6009ABCD", {}, pact_mfg(2, 3), None),  # no pact, then one it doesn't: refused
+        ("GVH6009ABCD", {}, {}, None),  # still no pact: any pact, as setup will take it
+        ("GVH6009ABCD", {}, None, None),  # no connectable advert to check against
+        ("GVH6009ABCD", pact_mfg(1, 1), pact_mfg(2, 3), None),  # the pact changed: refused
+        (LOCAL_NAME, pact_mfg(1, 1), pact_mfg(9, 9), (9, 9)),  # changed, still served
+        ("GVH6009ABCD", pact_mfg(1, 1), {}, (1, 1)),  # setup's advert has none: flow's stands
+        ("GVH6009ABCD", pact_mfg(1, 1), None, (1, 1)),  # no connectable advert: flow's stands
+    ],
+    ids=[
+        "none_then_accepted",
+        "none_then_refused",
+        "still_none",
+        "none_no_advert",
+        "changed_refused",
+        "changed_accepted",
+        "pact_then_none",
+        "pact_no_advert",
+    ],
+)
+async def test_finish_rechecks_at_the_setup_advert_pact(
+    hass: HomeAssistant,
+    setup_entry: AsyncMock,
+    *,
+    name: str,
+    flow_mfg: dict[int, bytes],
+    latest_mfg: dict[int, bytes] | None,
+    entry_pact: tuple[int, int] | None,
+) -> None:
+    """The entry follows the pact setup will route by, and isn't created where it's refused."""
+    info = make_service_info(name=name, manufacturer_data=flow_mfg)
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": SOURCE_BLUETOOTH}, data=info
+    )
+    assert result["step_id"] == "bluetooth_confirm"
+    latest = (
+        None if latest_mfg is None else make_service_info(name=name, manufacturer_data=latest_mfg)
+    )
+    with (
+        patch(f"{FLOW}.async_last_service_info", return_value=latest) as last,
+        patch(f"{FLOW}.profile_for", wraps=config_flow.profile_for) as profile,
+    ):
+        result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+    assert last.call_args.args[1:] == (ADDRESS,)
+    assert last.call_args.kwargs == {"connectable": True}
+    refused = latest_mfg not in (None, {}) and entry_pact is None
+    if refused:
+        assert result["type"] is FlowResultType.ABORT
+        assert result["reason"] == "protocol_not_supported"
+        assert hass.config_entries.async_entries(DOMAIN) == []
+    else:
+        assert result["type"] is FlowResultType.CREATE_ENTRY
+        assert profile.call_args.kwargs == {"pact": entry_pact}
 
 
 # -- user flow ----------------------------------------------------------------

@@ -23,6 +23,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `error` text is unchanged.
 
 ### Fixed
+- **Discovery checks support at the device's advertised protocol (needs the next `govee-ble-local`
+  release):** the config flow now asks the library whether a model is supported at the protocol
+  version ("pact") its advertisement carries, the same way setup routes it. Some models are
+  served only at certain protocol versions; before, such a device could be offered and then fail
+  setup with "model not supported". Before the entry is created, the device is checked again at
+  the advertisement setup will use, in case that one carries another protocol version (or the first
+  had none). A model that is supported, but not at the protocol version its device advertises at
+  setup, now retries setup instead of failing for good.
 - **Colour-temperature range follows the device:** lights re-read the range from the library on
   every update instead of only at setup. With `govee-ble-local` 1.4.0 an H61A8's range depends on
   its hardware version, which the first poll reads after the lights are built. An older unit

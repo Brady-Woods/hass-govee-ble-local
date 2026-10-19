@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import logging
 from typing import TYPE_CHECKING, Any
 
@@ -76,6 +76,11 @@ class _PendingDevice:
     address: str
     sku: str
     title: str
+    # The advertised (pact_type, pact_code): the library serves some models only at their
+    # row's pacts, so support and the profile are looked up at it. None (an advert with no
+    # parseable pact, or reauth) looks the SKU up at any pact. _finish() re-checks the
+    # device at the pact of the advert setup will route by, when that one differs.
+    pact: tuple[int, int] | None = None
 
 
 class _CloudAuthErrorUnavailable(GoveeCloudError):
@@ -98,17 +103,21 @@ class _CloudSecretError(Exception):
         self.reason = reason
 
 
-def _supported_sku(info: BluetoothServiceInfoBleak) -> str | None:
-    """Return the SKU if this advertisement is a supported Govee device."""
+def _supported_device(info: BluetoothServiceInfoBleak) -> _PendingDevice | None:
+    """Return the device to set up if this advertisement is a supported Govee device.
+
+    Support is checked at the advertised pact, as setup's create_device() routes by it:
+    a model the library serves only at some pacts is not offered at another one.
+    """
     adv = identify(info.name, info.manufacturer_data)
-    if adv is not None and is_supported_sku(adv.sku):
-        return adv.sku
-    return None
+    if adv is None or not is_supported_sku(adv.sku, pact=adv.pact):
+        return None
+    return _PendingDevice(address=info.address, sku=adv.sku, title=info.name, pact=adv.pact)
 
 
-def _requires_secret(sku: str) -> bool:
-    """Return True if this SKU's device profile gates commands behind a secret key."""
-    profile = profile_for(sku)
+def _requires_secret(sku: str, pact: tuple[int, int] | None = None) -> bool:
+    """Return True if this SKU's device profile (at ``pact``) gates commands behind a secret."""
+    profile = profile_for(sku, pact=pact)
     return bool(profile and profile.requires_secret)
 
 
@@ -137,12 +146,10 @@ class GoveeBleLocalConfigFlow(ConfigFlow, domain=DOMAIN):
         """Handle a Govee device discovered over Bluetooth."""
         await self.async_set_unique_id(discovery_info.address)
         self._abort_if_unique_id_configured()
-        sku = _supported_sku(discovery_info)
-        if sku is None:
+        pending = _supported_device(discovery_info)
+        if pending is None:
             return self.async_abort(reason="not_supported")
-        self._pending = _PendingDevice(
-            address=discovery_info.address, sku=sku, title=discovery_info.name
-        )
+        self._pending = pending
         self.context["title_placeholders"] = {"name": discovery_info.name}
         return await self.async_step_bluetooth_confirm()
 
@@ -172,10 +179,8 @@ class GoveeBleLocalConfigFlow(ConfigFlow, domain=DOMAIN):
         for info in async_discovered_service_info(self.hass):
             if info.address in current or not info.name:
                 continue
-            if (info_sku := _supported_sku(info)) is not None:
-                self._discovered[info.address] = _PendingDevice(
-                    address=info.address, sku=info_sku, title=info.name
-                )
+            if (device := _supported_device(info)) is not None:
+                self._discovered[info.address] = device
         if not self._discovered:
             return self.async_abort(reason="no_devices_found")
 
@@ -192,10 +197,23 @@ class GoveeBleLocalConfigFlow(ConfigFlow, domain=DOMAIN):
 
     async def _finish(self, device: _PendingDevice) -> ConfigFlowResult:
         """Create the entry, or first collect the secret key if the device needs one."""
-        if _requires_secret(device.sku):
+        if (pact := self._setup_pact(device.address)) is not None and pact != device.pact:
+            # Setup routes by the latest connectable advert, whose pact can differ from the
+            # flow's (which may have had none: any pact), so don't create an entry it would
+            # refuse. Without one, setup waits for the device and the flow's pact stands.
+            if not is_supported_sku(device.sku, pact=pact):
+                return self.async_abort(reason="protocol_not_supported")
+            device = replace(device, pact=pact)
+        if _requires_secret(device.sku, device.pact):
             self._pending = device
             return await self.async_step_secret()
         return self._create_entry(device)
+
+    def _setup_pact(self, address: str) -> tuple[int, int] | None:
+        """Return the pact of the advert setup will route by (the latest connectable one)."""
+        info = async_last_service_info(self.hass, address, connectable=True)
+        adv = identify(info.name, info.manufacturer_data) if info else None
+        return adv.pact if adv else None
 
     def _create_entry(self, device: _PendingDevice, secret: str | None = None) -> ConfigFlowResult:
         """Create the entry for ``device``, with its secret key if it has one."""
