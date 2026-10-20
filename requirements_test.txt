@@ -3,7 +3,7 @@
 # homeassistant is pinned to the release the lab/production instance runs, so
 # the tests (and mypy) see the same APIs as the code that ships. Bump both HA
 # pins together (pytest-homeassistant-custom-component pins homeassistant exactly).
-pytest-homeassistant-custom-component==0.13.371
+pytest-homeassistant-custom-component==0.13.373
 homeassistant==2026.10.0
 pytest-cov==7.1.0
 pytest-timeout==2.4.0
