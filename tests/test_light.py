@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
-import importlib.metadata
 import logging
 import time
 from types import SimpleNamespace
@@ -35,7 +34,6 @@ from homeassistant.const import STATE_OFF, STATE_ON, STATE_UNAVAILABLE, STATE_UN
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import entity_registry as er
-from packaging.version import Version
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
@@ -48,7 +46,6 @@ from custom_components.govee_ble_local.const import (
     UNAVAILABLE_AFTER_FAILURES,
     ZONE_STATE_FRESH_SECONDS,
 )
-from custom_components.govee_ble_local.helpers import segment_count
 
 from .conftest import (
     FakeConnection,
@@ -67,14 +64,6 @@ BLACK = (0, 0, 0)
 RED = (255, 0, 0)
 GREEN = (0, 255, 0)
 WHITE = (255, 255, 255)
-# Device.segment_count / set_segment_count arrived in govee-ble-local 1.3.0.
-HAS_RUNTIME_SEGMENT_COUNT = Version(importlib.metadata.version("govee-ble-local")) >= Version(
-    "1.3.0"
-)
-# Library releases after 1.3.0 give the H61A8 colour temperature and per-segment brightness.
-H61A8_HAS_CCT = Capability.COLOR_TEMP in make_device("H61A8").capabilities
-# ...and a range that depends on its hardware version (kelvin_by_hardware), known only once read.
-H61A8_RANGE_BY_HARDWARE = bool(getattr(make_device("H61A8").profile, "kelvin_by_hardware", ()))
 
 # Colour-temperature ranges to run the range-dependent tests over: one unlike
 # DEFAULT_MIN/MAX_KELVIN (so the device's own range is told apart from the
@@ -304,22 +293,13 @@ async def test_segment_lights_follow_a_count_known_at_setup(
     assert {u for u in lights if "_segment_" in u} == {f"{ADDRESS}_segment_{i}" for i in range(10)}
 
 
-@pytest.mark.skipif(
-    not HAS_RUNTIME_SEGMENT_COUNT, reason="Device.segment_count arrived in govee-ble-local 1.3.0"
-)
 async def test_segment_lights_use_the_librarys_set_segment_count(
     hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_bluetooth: SimpleNamespace
 ) -> None:
-    """On a library with a runtime count, the real API (not a patch) sets the lights.
-
-    Gated on the installed version rather than ``hasattr``, so a library that renamed or
-    dropped ``Device.segment_count`` fails here instead of the getattr in
-    ``helpers.segment_count`` quietly falling back to the profile count.
-    """
-    assert isinstance(getattr(Device, "segment_count", None), property)
+    """The library's runtime count, set through its real API (not a patch), sets the lights."""
     device = make_device("H60A6")
     device.set_segment_count(10)
-    assert segment_count(device) == 10
+    assert device.segment_count == 10
 
     await _setup_custom(hass, mock_config_entry, device, mock_bluetooth)
 
@@ -925,7 +905,7 @@ async def test_color_mode_never_reports_unsupported_color_temp(
 ) -> None:
     """An RGB-only fixture never reports color_temp, even if a kelvin is in its state.
 
-    No shipped profile is RGB-only any more (newer libraries give the H61A8 colour
+    No shipped profile is RGB-only any more (the library gives the H61A8 colour
     temperature), so the H61A8 profile is modelled without it.
     """
     _seed(entry, is_on=True, color_temp_kelvin=4000, rgb_color=None)
@@ -956,9 +936,6 @@ async def test_kelvin_range_follows_the_device_on_each_update(
     assert mock_device.turn_on.await_args.kwargs["kelvin"] == 8500
 
 
-@pytest.mark.skipif(
-    not H61A8_RANGE_BY_HARDWARE, reason="the installed library has no hardware-dependent range"
-)
 @pytest.mark.parametrize("device_sku", ["H61A8"])
 async def test_h61a8_range_is_refreshed_after_the_hardware_read(
     hass: HomeAssistant, enabled_entry: MockConfigEntry, mock_device: Device
@@ -1076,9 +1053,8 @@ async def test_a_learned_pact_is_not_an_on_off_flip(
     assert ranges == dict.fromkeys(ranges, picked)
 
 
-@pytest.mark.skipif(not H61A8_HAS_CCT, reason="the installed library has no H61A8 colour temp")
 @pytest.mark.parametrize("device_sku", ["H61A8"])
-async def test_h61a8_offers_color_temp_when_the_library_supports_it(
+async def test_h61a8_offers_color_temp(
     hass: HomeAssistant, enabled_entry: MockConfigEntry, mock_device: Device
 ) -> None:
     """The H61A8's main and segment lights gain colour temp with the library's range."""

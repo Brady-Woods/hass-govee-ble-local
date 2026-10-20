@@ -49,4 +49,4 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # Pinned to a commit (the action only publishes a moving `master`); bumped by Dependabot.
-      - uses: home-assistant/actions/hassfest@50baf3a307f87100cf550d4ae127746595030d5d # master @ 2026-10-12
+      - uses: home-assistant/actions/hassfest@cd6f3635a740c84d8a14f6121a90068b8ece6bf6 # master @ 2026-10-12

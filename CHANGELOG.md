@@ -7,10 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.5.1] - 2026-10-20
-
-Requires `govee-ble-local` 1.5.0 or newer (any 1.x) **from PyPI** and Home Assistant 2026.10+.
-
 ### Fixed
 - **Rejected commands and secret keys are back in the diagnostics.** `govee-ble-local` 1.5.0 logs
   a refused write only at DEBUG and raises `GoveeBleCommandRejected` instead, so refusals had
@@ -20,6 +16,14 @@ Requires `govee-ble-local` 1.5.0 or newer (any 1.x) **from PyPI** and Home Assis
   polls), as well as the library's.
 
 ### Changed
+- Removed the code that only existed for `govee-ble-local` before 1.5.0 or Home Assistant before
+  2026.10, which 1.5.0 already requires. The config flow catches the library's
+  `GoveeCloudAuthError` directly and imports `probatio` instead of Home Assistant's `voluptuous`
+  alias; segment lights read the library's `Device.segment_count`; the advertisement policy no
+  longer checks for the app-matching advertisement parser, which every supported library has.
+  The tests lose their library-version gates and skips, and a new one pins the window after a
+  command or read in which a repeated advertisement isn't offered to the library again. Nothing
+  changes on supported versions.
 - `scripts/check.sh` in a dev checkout: when `../govee-ble-local` no longer tracks its generated
   Kaitai classes (it then builds them from `spec/*.ksy` on install), the gate requires the JVM
   `kaitai-struct-compiler` 0.11 and stops with install instructions if it is missing, instead of

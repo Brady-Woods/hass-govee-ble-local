@@ -121,7 +121,6 @@ def _async_report_scene_store(hass: HomeAssistant, err: GoveeBleError) -> None:
         return
     hass.data[_SCENE_STORE_REPORTED] = True
     # Both in memory: no package-metadata read on the event loop.
-    version = getattr(govee_ble_local, "__version__", "unknown version")
     _LOGGER.error(
         "The installed govee-ble-local (%s, %s) can't read its bundled scene store: %s. "
         "Govee lights keep working without effects. To fix it: on Home Assistant OS the "
@@ -129,7 +128,7 @@ def _async_report_scene_store(hass: HomeAssistant, err: GoveeBleError) -> None:
         "the container (a restart keeps the broken copy); in a Python virtual environment, "
         "run 'pip install --force-reinstall govee-ble-local' and restart. If it persists, "
         "report it with this device's diagnostics",
-        version,
+        govee_ble_local.__version__,
         Path(govee_ble_local.__file__).parent,
         err,
     )
@@ -237,9 +236,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: GoveeBleLocalConfigEntry
         try:
             await hass.async_add_executor_job(lambda: device.scene_names)
         except GoveeBleError as err:
-            # From govee-ble-local 1.5.0 a missing or corrupt bundled scene store
-            # raises for every model (1.4.x gave no effects). The light works
-            # without effects; only a reinstall of the library brings them back.
+            # A missing or corrupt bundled scene store raises for every model.
+            # The light works without effects; only a reinstall of the library
+            # brings them back.
             scene_store_error = str(err)
             _async_report_scene_store(hass, err)
 

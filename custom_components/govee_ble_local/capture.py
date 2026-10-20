@@ -41,7 +41,7 @@ from govee_ble_local import (
     Zone,
 )
 
-from .helpers import BLE_ERRORS, mid_kelvin, segment_count
+from .helpers import BLE_ERRORS, mid_kelvin
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -68,8 +68,7 @@ _SELF_TEST_LOCK = asyncio.Lock()
 
 _WIRE_FIELD = re.compile(r" wire=[0-9a-f]*", re.IGNORECASE)
 # A frame line with an empty plaintext view: a handshake frame, or one that
-# arrived before the session was ready (labelled "cipher", or "withheld" by
-# newer libraries).
+# arrived before the session was ready (labelled "cipher" or "withheld").
 _NO_PLAINTEXT = re.compile(r" plain=(?: |$)")
 
 
@@ -554,7 +553,7 @@ async def _exercise_fixture(
 
 async def _exercise_segments(device: Device, steps: _Steps) -> None:
     """Segment 0 colour, brightness and (where supported) colour temperature."""
-    if Capability.SEGMENTS not in device.capabilities or not segment_count(device):
+    if Capability.SEGMENTS not in device.capabilities or not device.segment_count:
         return
     await steps.run(
         "segment_0_rgb",

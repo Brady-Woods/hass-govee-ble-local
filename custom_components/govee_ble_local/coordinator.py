@@ -99,10 +99,6 @@ _ON_MAX_INTERVAL = timedelta(seconds=ON_POLL_MAX_INTERVAL_SECONDS)
 # that only risk overflowing timedelta.
 _MAX_BACKOFF_STEPS = math.ceil(math.log2(_MAX_INTERVAL / _BASE_INTERVAL))
 _MAX_ON_BACKOFF_STEPS = math.ceil(math.log2(_ON_MAX_INTERVAL / _BASE_INTERVAL))
-# How long the library ignores advertisements after a command or a read that
-# returned power. govee_ble_local.const has it on the libraries the
-# advertisement policy runs with; the 1.2.1 floor keeps the same 15 s elsewhere.
-_ADVERT_SUPPRESS_SECONDS = float(getattr(lib_const, "ADVERT_SUPPRESS_SECONDS", 15.0))
 
 
 class PollPolicy(StrEnum):
@@ -137,26 +133,12 @@ def _poll_semaphore(hass: HomeAssistant) -> asyncio.Semaphore:
     return semaphore
 
 
-def has_app_advert_parser(device: Device) -> bool:
-    """Return whether the library reads the advertised on/off byte the way the Govee app does.
-
-    The libraries with ``DeviceProfile.advert_on_mask`` trust only a broadcast
-    whose header says it carries a switch state, as the app does, and decode a
-    plug's byte with the plug's mask (added after 1.3.0). Older ones (the 1.2.1
-    floor, 1.3.0) read the byte after the pact fields of any Govee broadcast,
-    which may not be a switch state, so the advertisement policy stays off there
-    and every device keeps the fixed cadence.
-    """
-    return hasattr(device.profile, "advert_on_mask")
-
-
 def _polled_state(state: DeviceState) -> dict[str, Any]:
     """Return a copy of what a poll read, to tell whether the next one found anything new."""
     polled = asdict(state)
     # Bookkeeping, not device state: a read that only confirms the zones again
     # stamps them anew (zone_power_confirmed), which is nothing new.
-    polled.pop("optimistic", None)
-    polled.pop("zone_power_confirmed", None)
+    del polled["optimistic"], polled["zone_power_confirmed"]
     return polled
 
 
@@ -237,10 +219,8 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         # A command already dropped the backoff during this failure streak.
         self._command_reset_used = False
         # Whether the advertisement policy covers this device at all: never an
-        # excluded model, nor with a library whose parser doesn't match the app's.
-        self._advert_policy = (
-            has_app_advert_parser(device) and device.sku not in EXCLUDED_FROM_ADVERT_POLICY
-        )
+        # excluded model.
+        self._advert_policy = device.sku not in EXCLUDED_FROM_ADVERT_POLICY
         # The policy's current step (in the diagnostics).
         self.poll_policy = PollPolicy.FIXED
         # Doublings of a light's on-backoff (polls in a row that found nothing new).
@@ -576,7 +556,7 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         if not (
             self._advert_policy
             and self._io_at is not None
-            and info.time > self._io_at + _ADVERT_SUPPRESS_SECONDS
+            and info.time > self._io_at + lib_const.ADVERT_SUPPRESS_SECONDS
             and info.manufacturer_data != self._reoffered
             and self._async_advert_power_fresh()
         ):
@@ -771,8 +751,8 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         command did. It is held until the hold-off ends (``_async_end_holdoff``),
         or for at most POLL_HOLDOFF_MAX_SECONDS (``_async_holdoff_cap_reached``).
         Nor while a poll already runs: that poll re-arms the timer as it ends.
-        Overrides DataUpdateCoordinator's scheduled-refresh entry point (present
-        since before 2025.10; from 2026.10 it also takes the debouncer's lock).
+        Overrides DataUpdateCoordinator's scheduled-refresh entry point, which
+        takes the debouncer's lock.
         """
         if self._poll_running:
             # A refresh started meanwhile reads the device now, and HA re-arms

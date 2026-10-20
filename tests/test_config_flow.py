@@ -13,7 +13,7 @@ from govee_ble_local import (
     Device,
     GoveeBleConnectionError,
     GoveeBleNotSupported,
-    cloud as govee_cloud,
+    GoveeCloudAuthError,
 )
 from govee_ble_local.cloud import CloudDevice, GoveeCloudError
 from govee_ble_local.identify import identify
@@ -53,15 +53,6 @@ PLUG_DEVICE_ID = "86:9D:AA:BB:CC:DD:EE:06"
 PLUG_WIFI_MAC = "AA:BB:CC:DD:EE:06"
 OTHER_DEVICE_ID = "86:9D:98:17:3C:B1:A2:D0"
 OTHER_BLE_MAC = "98:17:3C:B1:A2:D1"
-# The library's GoveeCloudAuthError (rejected credentials), where it has one: from the
-# cloud module the flow reads it from, and from the top-level export (the library's
-# semver-stable API), a source independent of the flow's own lookup.
-LIBRARY_CLOUD_AUTH_ERROR: type[GoveeCloudError] | None = getattr(
-    govee_cloud, "GoveeCloudAuthError", None
-)
-TOP_LEVEL_CLOUD_AUTH_ERROR: type[GoveeCloudError] | None = getattr(
-    govee_ble_local, "GoveeCloudAuthError", None
-)
 
 
 @pytest.fixture
@@ -942,34 +933,15 @@ async def test_cloud_secret_login_error(
     cloud_account.close.assert_awaited_once()
 
 
-def test_cloud_auth_error_is_the_librarys_where_it_has_one() -> None:
-    """Newer libraries' GoveeCloudAuthError is caught; the 1.2.1 floor gets a stand-in.
-
-    The stand-in is private to the flow, so on the floor nothing raises it and every cloud
-    failure stays cannot_connect, as before. Checked against the top-level export first:
-    a library that still has the class but dropped the cloud module's re-export fails
-    here instead of quietly showing cannot_connect for a wrong password again.
-    """
-    if TOP_LEVEL_CLOUD_AUTH_ERROR is not None:
-        assert config_flow._CLOUD_AUTH_ERROR is TOP_LEVEL_CLOUD_AUTH_ERROR
-    elif LIBRARY_CLOUD_AUTH_ERROR is not None:
-        assert config_flow._CLOUD_AUTH_ERROR is LIBRARY_CLOUD_AUTH_ERROR
-    else:
-        assert config_flow._CLOUD_AUTH_ERROR is config_flow._CloudAuthErrorUnavailable
-    assert issubclass(config_flow._CLOUD_AUTH_ERROR, GoveeCloudError)
-
-
 async def test_cloud_secret_rejected_credentials_show_invalid_auth(
     hass: HomeAssistant, plug_device: Device, cloud_account: MagicMock
 ) -> None:
     """Credentials the account rejects (GoveeCloudAuthError) show invalid_auth.
 
-    The library's own class where it has one; on the floor, the stand-in the flow catches.
+    Raised as the library's top-level export (its semver-stable API), a source independent
+    of the cloud module the flow imports it from.
     """
-    auth_error = (
-        TOP_LEVEL_CLOUD_AUTH_ERROR or LIBRARY_CLOUD_AUTH_ERROR or config_flow._CLOUD_AUTH_ERROR
-    )
-    cloud_account.get_devices.side_effect = auth_error("login rejected")
+    cloud_account.get_devices.side_effect = GoveeCloudAuthError("login rejected")
     form = await open_cloud_form(hass, plug_device)
     result = await hass.config_entries.flow.async_configure(form["flow_id"], CREDENTIALS)
     assert result["type"] is FlowResultType.FORM
