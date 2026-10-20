@@ -17,7 +17,7 @@ ruff==0.17.0
 aiousbwatcher==1.1.2
 pyserial==3.5
 serialx==1.11.0
-aioesphomeapi==46.10.0
+aioesphomeapi==46.12.1
 dbus-fast==5.2.0
 
 # The integration's runtime dependency (govee-ble-local) is installed
