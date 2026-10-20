@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from types import SimpleNamespace
 
 from govee_ble_local import Device
@@ -123,6 +124,23 @@ async def test_diagnostics_structure(
     )
     assert "is_on" in diagnostics["state"]
     assert diagnostics["recent_warnings"] == []
+
+
+async def test_diagnostics_show_zone_confirmations_as_ages(
+    hass: HomeAssistant,
+    hass_client: ClientSessionGenerator,
+    setup_integration: MockConfigEntry,
+    mock_device: Device,
+) -> None:
+    """Zone confirmations are monotonic times, meaningless in a shared dump: shown as ages."""
+    mock_device.state.zone_power = {0: True, 1: False}
+    mock_device.state.zone_power_confirmed = {0: time.monotonic() - 30}
+    diagnostics = await get_diagnostics_for_config_entry(hass, hass_client, setup_integration)
+    state = diagnostics["state"]
+    assert "zone_power_confirmed" not in state
+    [(index, age)] = state["zone_power_confirmed_seconds_ago"].items()
+    assert index == "0"  # JSON keys
+    assert 30 <= age < 40
 
 
 async def test_diagnostics_without_self_test(

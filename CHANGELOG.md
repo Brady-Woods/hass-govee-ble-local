@@ -152,9 +152,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   confirmed in the last 2 minutes (by reporting that zone's power, or acking Home Assistant
   switching that zone; it may have been switched off in the Govee app since), is switched on first
   and then changed, which is the order the app takes. The confirmation times are the ones
-  `govee-ble-local` 1.5.0 keeps per zone. If switching the zone on fails, the change isn't sent.
-  A plain turn on still always sends the zone's power. The self-test puts a device back in the
-  same order: on first, then its colours, then off last.
+  `govee-ble-local` 1.5.0 keeps per zone; diagnostics show how many seconds ago each zone was
+  confirmed. If switching the zone on fails, the change isn't sent. A plain turn on still always
+  sends the zone's power. The self-test puts a device back in the same order: on first, then its
+  colours, then off last.
 - **Background polls give way to commands.** A background poll that comes due while a command to
   the same device is running, or within 25 s after one, now waits until then (while the command's
   connection is still open, so the poll reuses it), and a second tap or a slider step doesn't queue

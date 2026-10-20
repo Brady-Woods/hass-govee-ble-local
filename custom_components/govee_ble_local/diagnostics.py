@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 import re
+import time
 from typing import TYPE_CHECKING, Any
 
 from homeassistant.components.diagnostics import REDACTED, async_redact_data
@@ -13,6 +14,8 @@ from homeassistant.core import HomeAssistant
 from .const import CONF_SECRET
 
 if TYPE_CHECKING:
+    from govee_ble_local import DeviceState
+
     from . import GoveeBleLocalConfigEntry
 
 # Identifiers of a specific physical unit (and the account-lock key) stay out of
@@ -28,6 +31,20 @@ _MIN_IDENTIFIER_LEN = 6
 # by-value pattern can find it, so every hex run this long goes. The raw frames
 # stay available to admins in the capture_session response.
 _HEX_RUN = re.compile(r"[0-9A-Fa-f]{8,}")
+
+
+def _state_dump(state: DeviceState) -> dict[str, Any]:
+    """Return the device state, its zone confirmations as ages.
+
+    ``zone_power_confirmed`` holds monotonic times, which mean nothing outside
+    this process: the dump says how many seconds ago each zone was confirmed.
+    """
+    dump = asdict(state)
+    now = time.monotonic()
+    dump["zone_power_confirmed_seconds_ago"] = {
+        index: round(now - at, 1) for index, at in dump.pop("zone_power_confirmed").items()
+    }
+    return dump
 
 
 def _identifier_pattern(values: list[str]) -> re.Pattern[str] | None:
@@ -112,7 +129,7 @@ async def async_get_config_entry_diagnostics(
             "scene_count": None if data.scene_store_error else len(device.scene_names),
             "scene_store_error": data.scene_store_error,
         },
-        "state": asdict(state),
+        "state": _state_dump(state),
         "recent_warnings": _scrub(data.log_capture.records(), _HEX_RUN),
         "last_self_test": _scrub(data.last_self_test, _HEX_RUN),
     }
