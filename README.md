@@ -82,7 +82,7 @@ automatically, so no manual `pip install` is needed. `manifest.json` (`requireme
 release in the current major series (`>=1.5.0,<2`): the library follows semantic versioning,
 so only a new major version can break the integration, and library fixes don't need an
 integration release. The library's own dependencies (e.g. `cryptography`) carry no upper bounds,
-so they always follow Home Assistant's pinned versions and won't disturb your install. Requires Home Assistant 2025.10 or newer.
+so they always follow Home Assistant's pinned versions and won't disturb your install. Requires Home Assistant 2026.10 or newer.
 
 ### Upgrading
 - **HACS:** open the integration in HACS → **Update** → restart Home Assistant.

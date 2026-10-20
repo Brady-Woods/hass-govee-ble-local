@@ -27,7 +27,7 @@ optimized (e.g. `pngquant`/`optipng`). Icons must be square.
 ## Where they go
 Home Assistant 2026.3 and later serves the images bundled with the integration, from
 `custom_components/govee_ble_local/brand/`, so they arrive with every install (HACS included).
-Older supported releases (2025.10 to 2026.2) only look them up on the
+Releases before 2026.3 (which this integration no longer supports) only look them up on the
 **[home-assistant/brands](https://github.com/home-assistant/brands)** CDN, which has none for this
 integration, so they show Home Assistant's generic placeholder. That repo now treats its
 `custom_integrations` folder as legacy; a PR there would add the files from `brand/` as:

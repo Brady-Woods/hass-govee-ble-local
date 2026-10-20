@@ -117,6 +117,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sent 1-8 s after a poll now opens a new connection instead of reusing the poll's.
 
 ### Changed
+- **Requires Home Assistant 2026.10.0 or newer** (`hacs.json`, was 2025.10.0), the version every
+  test and check runs on.
 - **Requires `govee-ble-local` 1.5.0 or newer** (`>=1.5.0,<2`, was `>=1.2.1,<2`): the
   advertised-protocol support check and the opt-in for unverified models use what 1.5.0 adds. Home
   Assistant installs the new library itself on the next restart.
