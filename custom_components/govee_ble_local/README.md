@@ -106,8 +106,10 @@ profile's capabilities:
 - **Availability = reachability**: an entity stays available while the device
   is advertising, regardless of poll failures (commands can still reach it).
   A device that vanished from every connectable scanner goes unavailable
-  after `UNAVAILABLE_AFTER_FAILURES` failed polls, or as soon as it vanishes
-  when no background polls are scheduled (polling turned off in the entry's
+  after `UNAVAILABLE_AFTER_FAILURES` failed polls or once it hasn't been heard
+  or reached (a command that landed, a poll that read it) for
+  `UNAVAILABLE_AFTER_UNHEARD_SECONDS`, whichever comes first, or as soon as it
+  vanishes when no background polls are scheduled (polling turned off in the entry's
   system options, halted by a rejected key, or off under the policy); polls
   resuming before it is heard again don't make it available. When it starts
   advertising again after skipped polls it is polled at once and the backoff

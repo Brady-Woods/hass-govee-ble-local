@@ -134,8 +134,10 @@ rules:
       Availability follows reachability (a connectable scanner sees the
       device's advertisements), not last-poll success: an advertising device
       stays controllable through transient poll failures; a vanished one goes
-      unavailable after UNAVAILABLE_AFTER_FAILURES failed polls, or as soon as
-      it vanishes when no background polls are scheduled to count them
+      unavailable after UNAVAILABLE_AFTER_FAILURES failed polls or once it
+      hasn't been heard or reached for UNAVAILABLE_AFTER_UNHEARD_SECONDS,
+      whichever comes first, or as soon as it vanishes when no background
+      polls are scheduled to count them
       (polling disabled in the entry's system options, halted by a rejected
       secret, or off under the advertisement poll policy), and stays so if
       polls resume before it is heard again.

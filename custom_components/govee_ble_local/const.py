@@ -174,10 +174,15 @@ SLOW_POLL_MAX_STEPS = 3
 # whole fixture's on/off), so it is switched on first.
 ZONE_STATE_FRESH_SECONDS = 120
 
-# A device that has vanished from every connectable scanner goes unavailable
-# after this many consecutive failed (or skipped) polls. A device still
-# advertising stays available.
+# A device that has vanished from every connectable scanner (HA drops it from
+# its history 195-525 s after its last advertisement) goes unavailable after
+# this many consecutive failed (or skipped) polls, or once it has gone
+# UNAVAILABLE_AFTER_UNHEARD_SECONDS without being heard or reached (a command
+# that landed, a poll that read it), whichever comes first: a slow device's
+# polls are spaced up to 8x apart, so counting them alone could take most of an
+# hour. A device still advertising stays available.
 UNAVAILABLE_AFTER_FAILURES = 3
+UNAVAILABLE_AFTER_UNHEARD_SECONDS = UNAVAILABLE_AFTER_FAILURES * POLL_INTERVAL_SECONDS
 
 # Refresh the "last seen" / RSSI diagnostics from HA's advertisement history this
 # often (advertisements arrive several times a second; one recorder row per

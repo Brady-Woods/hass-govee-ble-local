@@ -49,6 +49,7 @@ from custom_components.govee_ble_local.const import (
     SLOW_POLL_MAX_STEPS,
     SLOW_POLL_SECONDS,
     UNAVAILABLE_AFTER_FAILURES,
+    UNAVAILABLE_AFTER_UNHEARD_SECONDS,
     WEAK_SIGNAL_RSSI,
 )
 from custom_components.govee_ble_local.coordinator import GoveeBleLocalCoordinator, PollPolicy
@@ -427,7 +428,8 @@ async def test_device_unavailable_after_enough_skipped_polls(
     coordinator: GoveeBleLocalCoordinator,
     presence: SimpleNamespace,
 ) -> None:
-    """A vanished device goes unavailable only after UNAVAILABLE_AFTER_FAILURES skips."""
+    """Within its unheard grace, a vanished device goes unavailable only after
+    UNAVAILABLE_AFTER_FAILURES skips."""
     presence.connectable = presence.any = False
     for _ in range(UNAVAILABLE_AFTER_FAILURES - 1):
         await coordinator.async_refresh()
@@ -456,7 +458,8 @@ async def test_present_device_stays_available_through_failed_polls(
 async def test_failure_count_alone_does_not_decide_availability(
     coordinator: GoveeBleLocalCoordinator, presence: SimpleNamespace
 ) -> None:
-    """Availability needs absence AND failures: either one alone keeps the device available."""
+    """Within its unheard grace, availability needs absence AND failures: either one alone
+    keeps the device available."""
     coordinator.consecutive_failures = UNAVAILABLE_AFTER_FAILURES
     assert coordinator.device_available  # still present
     presence.connectable = False
@@ -883,6 +886,85 @@ async def test_a_poll_that_runs_meanwhile_is_the_held_first_poll(
     mock_device.update.assert_awaited_once()  # type: ignore[attr-defined]
 
 
+@pytest.mark.parametrize(
+    "outcome",
+    [None, GoveeBleConnectionError("link lost"), GoveeBleAuthError("rejected")],
+    ids=["read", "failed", "secret_rejected"],
+)
+@pytest.mark.parametrize("released_by", [None, "holdoff_end", "cap"])
+async def test_a_poll_running_when_the_hold_off_ends_is_the_held_first_poll(
+    hass: HomeAssistant,
+    coordinator: GoveeBleLocalCoordinator,
+    mock_device: Device,
+    *,
+    outcome: Exception | None,
+    released_by: str | None,
+) -> None:
+    """A refresh (update_entity, the turn-on poll) that starts while the first poll is held
+    reads the device as that poll would, however it ends: the hold-off ending, or its cap,
+    while it still runs doesn't release the held poll alongside it, nor does its end."""
+    gate = asyncio.Event()
+    read = mock_device.update.side_effect  # type: ignore[attr-defined]
+
+    async def _held(**kwargs: Any) -> Any:
+        await gate.wait()
+        if outcome is not None:
+            raise outcome
+        return await read(**kwargs)
+
+    if released_by == "cap":
+        coordinator.async_note_command_started()  # still running: only the cap releases
+    else:
+        await _turn_on(hass)
+    mock_device.update.reset_mock()  # type: ignore[attr-defined]
+    await coordinator.async_background_poll()  # the first poll, held
+    mock_device.update.side_effect = _held  # type: ignore[attr-defined]
+    refresh = hass.async_create_task(coordinator.async_refresh())
+    for _ in range(5):
+        await asyncio.sleep(0)
+    if released_by is not None:  # while the refresh still reads (no waiting for it to end)
+        due = POLL_HOLDOFF_MAX_SECONDS if released_by == "cap" else HOLDOFF
+        async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=due + 1))
+        for _ in range(5):
+            await asyncio.sleep(0)
+        assert coordinator._first_poll_waiting  # not released while the refresh runs
+    gate.set()
+    await refresh
+    assert not coordinator._first_poll_waiting
+    assert _live_timers(hass, "_async_holdoff_cap_reached") == []
+    await advance(hass, HOLDOFF + 1)  # before HA's next scheduled poll
+    mock_device.update.assert_awaited_once()  # type: ignore[attr-defined]
+    if released_by == "cap":
+        coordinator.async_note_command_finished()
+
+
+async def test_the_first_poll_due_while_a_poll_runs_is_that_poll(
+    hass: HomeAssistant, coordinator: GoveeBleLocalCoordinator, mock_device: Device
+) -> None:
+    """The first poll coming due, with no command holding polls off, while a refresh already
+    reads the device doesn't queue a second one behind it."""
+    gate = asyncio.Event()
+    read = mock_device.update.side_effect  # type: ignore[attr-defined]
+
+    async def _held(**kwargs: Any) -> Any:
+        await gate.wait()
+        return await read(**kwargs)
+
+    mock_device.update.reset_mock()  # type: ignore[attr-defined]
+    mock_device.update.side_effect = _held  # type: ignore[attr-defined]
+    refresh = hass.async_create_task(coordinator.async_refresh())
+    for _ in range(5):
+        await asyncio.sleep(0)
+    first = hass.async_create_task(coordinator.async_background_poll())
+    for _ in range(5):
+        await asyncio.sleep(0)
+    gate.set()
+    await refresh
+    await first
+    await hass.async_block_till_done()
+    mock_device.update.assert_awaited_once()  # type: ignore[attr-defined]
+
+
 async def test_the_cap_runs_a_held_first_poll_while_a_command_runs(
     hass: HomeAssistant, coordinator: GoveeBleLocalCoordinator, mock_device: Device
 ) -> None:
@@ -1260,21 +1342,87 @@ async def test_a_slow_timeout_amid_failures_keeps_their_backoff(
     assert interval(coordinator) == BASE * 4
 
 
-async def test_a_device_gone_after_timed_out_connects_goes_unavailable_at_once(
+async def test_a_failure_after_a_recovery_starts_the_backoff_over(
+    hass: HomeAssistant,
     coordinator: GoveeBleLocalCoordinator,
     mock_device: Device,
+) -> None:
+    """A successful poll ends the failure streak: the next quick failure keeps the base
+    cadence (the first failure's grace) instead of picking up the old streak's backoff."""
+    fail(mock_device, GoveeBleConnectionError("no slot"))
+    for _ in range(4):
+        await coordinator.async_refresh()
+    assert interval(coordinator) == BASE * 8
+    succeed(mock_device)
+    await coordinator.async_refresh()
+    fail(mock_device, GoveeBleConnectionError("no slot"))
+    await coordinator.async_refresh()
+    assert coordinator.consecutive_failures == 1
+    assert interval(coordinator) == BASE
+
+
+async def test_an_absent_device_is_unavailable_once_unheard_long_enough(
+    hass: HomeAssistant,
     monotonic: SimpleNamespace,
+    coordinator: GoveeBleLocalCoordinator,
+    *,
+    mock_bluetooth: SimpleNamespace,
     presence: SimpleNamespace,
 ) -> None:
-    """Timed-out connects count toward availability: a device HA then stops hearing (switched
-    off at the wall) doesn't get UNAVAILABLE_AFTER_FAILURES more, slow-spaced, polls of grace."""
-    error = GoveeBleTimeout(f"{ADDRESS}: connect exceeded {POLL_CONNECT_TIMEOUT_SECONDS}s")
-    _timed_failure(mock_device, monotonic, POLL_CONNECT_TIMEOUT_SECONDS + 1, error)
-    for _ in range(UNAVAILABLE_AFTER_FAILURES):
-        await coordinator.async_refresh()
-    assert coordinator.device_available  # still heard
+    """Dropped from the connectable history before its polls failed, a device stays available
+    until UNAVAILABLE_AFTER_UNHEARD_SECONDS after HA last heard it (the advertisement HA hands
+    over as it drops it); the presence tick then publishes it unavailable."""
+    monotonic.now += 100
+    last_heard = monotonic.now
+    monotonic.now += UNAVAILABLE_AFTER_UNHEARD_SECONDS - 0.5
     presence.connectable = False
-    assert not coordinator.device_available
+    unavailable_callback(mock_bluetooth, connectable=True)(make_service_info(seen_at=last_heard))
+    assert coordinator.consecutive_failures == 0
+    assert hass.states.get(MAIN_LIGHT).state != STATE_UNAVAILABLE
+    monotonic.now += 0.5
+    coordinator.async_refresh_presence()
+    assert hass.states.get(MAIN_LIGHT).state == STATE_UNAVAILABLE
+
+
+async def test_a_poll_that_read_the_device_counts_as_hearing_it(
+    hass: HomeAssistant,
+    monotonic: SimpleNamespace,
+    coordinator: GoveeBleLocalCoordinator,
+    *,
+    mock_bluetooth: SimpleNamespace,
+    presence: SimpleNamespace,
+) -> None:
+    """A poll that read the device back shows it reachable, though it didn't advertise around
+    it: the unheard time counts from that poll, not its last advertisement."""
+    monotonic.now += 100
+    last_heard = monotonic.now
+    monotonic.now += UNAVAILABLE_AFTER_UNHEARD_SECONDS - 60
+    await coordinator.async_refresh()  # reads it back (while HA still lists it)
+    monotonic.now += 120  # 420 s since its last advertisement, 120 s since the poll
+    presence.connectable = False
+    unavailable_callback(mock_bluetooth, connectable=True)(make_service_info(seen_at=last_heard))
+    assert hass.states.get(MAIN_LIGHT).state != STATE_UNAVAILABLE
+
+
+async def test_a_device_dropped_before_its_first_poll_gets_its_grace_from_setup(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_device: Device,
+    *,
+    mock_bluetooth: SimpleNamespace,
+    presence: SimpleNamespace,
+) -> None:
+    """After a restart HA's history may hold an advertisement from long before. A device HA
+    drops with it before the (staggered) first poll has reached it still gets
+    UNAVAILABLE_AFTER_UNHEARD_SECONDS from setup, as it would three skipped polls."""
+    polls = await _set_up_with_stagger(hass, mock_config_entry, mock_device, 30)
+    assert polls == []
+    presence.connectable = False
+    old = make_service_info()
+    unavailable_callback(mock_bluetooth, connectable=True)(
+        make_service_info(seen_at=old.time - 10_000)
+    )
+    assert hass.states.get(MAIN_LIGHT).state != STATE_UNAVAILABLE
 
 
 async def test_a_weak_signal_backs_polls_off_too(

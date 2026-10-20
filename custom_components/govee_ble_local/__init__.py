@@ -420,8 +420,8 @@ def _async_track_bluetooth(hass: HomeAssistant, entry: GoveeBleLocalConfigEntry)
     # the connectable history (commands need a connectable scanner), the
     # connectivity sensor any scanner at all. Track the loss of each.
     @callback
-    def _async_connectable_lost(_info: bluetooth.BluetoothServiceInfoBleak) -> None:
-        coordinator.async_handle_unavailable(connectable=True)
+    def _async_connectable_lost(info: bluetooth.BluetoothServiceInfoBleak) -> None:
+        coordinator.async_handle_unavailable(connectable=True, last=info)
 
     @callback
     def _async_all_lost(_info: bluetooth.BluetoothServiceInfoBleak) -> None:

@@ -50,7 +50,10 @@ from custom_components.govee_ble_local.const import (
     ON_POLL_MAX_INTERVAL_SECONDS,
     POLL_CONNECT_TIMEOUT_SECONDS,
     POLL_INTERVAL_SECONDS,
+    SLOW_POLL_MAX_STEPS,
+    SLOW_POLL_SECONDS,
     UNAVAILABLE_AFTER_FAILURES,
+    UNAVAILABLE_AFTER_UNHEARD_SECONDS,
 )
 from custom_components.govee_ble_local.coordinator import (
     GoveeBleLocalCoordinator,
@@ -1294,6 +1297,124 @@ async def test_polls_resuming_for_an_absent_device_keep_it_unavailable(
     assert hass.states.get(MAIN_LIGHT).state == "off"
     assert polls(mock_device) == before + 1  # the return poll
     assert coordinator.poll_policy is PollPolicy.OFF
+
+
+async def _went_silent(air: Air) -> float:
+    """The device is heard one last time; return when (on the Bluetooth clock)."""
+    await air.wait(1)
+    return float(air.clock.now)
+
+
+def _dropped(mock_bluetooth: SimpleNamespace, presence: SimpleNamespace, last_heard: float) -> None:
+    """HA drops the device from its connectable history (no connectable scanner has it),
+    passing the advertisement it last had, heard at ``last_heard``."""
+    presence.connectable = False
+    presence.connectable_service_info = None
+    unavailable_callback(mock_bluetooth, connectable=True)(make_service_info(seen_at=last_heard))
+
+
+@pytest.mark.parametrize("app_parser", [False])  # the fixed cadence
+async def test_a_slow_device_gone_unheard_goes_unavailable_within_minutes(
+    hass: HomeAssistant,
+    air: Air,
+    coordinator: GoveeBleLocalCoordinator,
+    mock_device: Device,
+    *,
+    mock_bluetooth: SimpleNamespace,
+    presence: SimpleNamespace,
+) -> None:
+    """A weak device at the slow floor (polled every 16 minutes) that stops being heard goes
+    unavailable within UNAVAILABLE_AFTER_UNHEARD_SECONDS of its last advertisement (plus a
+    presence tick), not after three of its far-apart polls."""
+    for _ in range(60):  # heard for half an hour first: counted from its last advert, not setup
+        await air.wait(30)
+    read = mock_device.update.side_effect  # type: ignore[attr-defined]
+
+    async def _slow(**kwargs: Any) -> Any:
+        air.clock.now += SLOW_POLL_SECONDS
+        return await read(**kwargs)
+
+    mock_device.update.side_effect = _slow  # type: ignore[attr-defined]
+    for _ in range(SLOW_POLL_MAX_STEPS):
+        await coordinator.async_refresh()
+    assert nominal(coordinator) == BASE * (1 << SLOW_POLL_MAX_STEPS)
+
+    last_heard = await _went_silent(air)
+    await air.wait(200, heard=False)  # HA keeps it in its history meanwhile
+    _dropped(mock_bluetooth, presence, last_heard)
+    assert hass.states.get(MAIN_LIGHT).state != STATE_UNAVAILABLE  # not unheard long enough
+    while hass.states.get(MAIN_LIGHT).state != STATE_UNAVAILABLE:
+        await air.wait(10, heard=False)
+        bound = UNAVAILABLE_AFTER_UNHEARD_SECONDS + LAST_SEEN_RESOLUTION_SECONDS
+        assert air.clock.now - last_heard <= bound
+    assert air.clock.now - last_heard >= UNAVAILABLE_AFTER_UNHEARD_SECONDS
+
+
+@pytest.mark.parametrize("app_parser", [False])  # the fixed cadence
+async def test_a_device_gone_while_its_connects_time_out_is_unavailable_once_ha_drops_it(
+    hass: HomeAssistant,
+    air: Air,
+    coordinator: GoveeBleLocalCoordinator,
+    mock_device: Device,
+    *,
+    mock_bluetooth: SimpleNamespace,
+    presence: SimpleNamespace,
+) -> None:
+    """Switched off at the wall: HA keeps it in its history for up to 525 s, and the polls in
+    that window run out their connect budget (slow failures, spaced further apart). When HA
+    drops it, it has gone unheard for longer than UNAVAILABLE_AFTER_UNHEARD_SECONDS: it is
+    unavailable at once, as when those polls counted as plain failures."""
+
+    async def _timeout(**_kwargs: Any) -> Any:
+        air.clock.now += POLL_CONNECT_TIMEOUT_SECONDS + 1
+        raise GoveeBleTimeout(f"{ADDRESS}: connect exceeded {POLL_CONNECT_TIMEOUT_SECONDS}s")
+
+    last_heard = await _went_silent(air)
+    mock_device.update.side_effect = _timeout  # type: ignore[attr-defined]
+    for _ in range(525 // 15):
+        await air.wait(15, heard=False)
+    assert coordinator.slow_poll_steps  # its polls timed out, slowly
+    assert coordinator.consecutive_failures < UNAVAILABLE_AFTER_FAILURES
+    assert hass.states.get(MAIN_LIGHT).state != STATE_UNAVAILABLE  # still in HA's history
+    _dropped(mock_bluetooth, presence, last_heard)
+    assert hass.states.get(MAIN_LIGHT).state == STATE_UNAVAILABLE
+
+
+@pytest.mark.parametrize("app_parser", [False])  # the fixed cadence
+async def test_a_device_commanded_over_a_held_link_stays_available(
+    hass: HomeAssistant,
+    air: Air,
+    coordinator: GoveeBleLocalCoordinator,
+    mock_device: Device,
+    *,
+    mock_bluetooth: SimpleNamespace,
+    presence: SimpleNamespace,
+) -> None:
+    """A device doesn't advertise while HA holds its link, so commands under 30 s apart can
+    outlast HA's history of it. Each command that lands shows it reachable: it stays available
+    (HA would skip the commands of an unavailable entity). Here its polls read nothing back,
+    so only the commands show it."""
+    read = mock_device.update.side_effect  # type: ignore[attr-defined]
+
+    async def _unanswered(**kwargs: Any) -> Any:
+        state = await read(**kwargs)
+        state.optimistic = True
+        return state
+
+    mock_device.update.side_effect = _unanswered  # type: ignore[attr-defined]
+    last_heard = await _went_silent(air)
+    dropped = False
+    for step in range(24):  # a command every 20 s for 8 minutes
+        await light_service(hass, "turn_on", brightness=10 + step)
+        assert hass.states.get(MAIN_LIGHT).state == "on", step
+        await air.wait(20, heard=False)
+        if not dropped and air.clock.now - last_heard >= 300:
+            _dropped(mock_bluetooth, presence, last_heard)
+            dropped = True
+    assert dropped
+    unheard = air.clock.now - last_heard
+    assert unheard > UNAVAILABLE_AFTER_UNHEARD_SECONDS + LAST_SEEN_RESOLUTION_SECONDS
+    assert coordinator.consecutive_failures < UNAVAILABLE_AFTER_FAILURES  # skipped polls
 
 
 # -- the poll interval sensor -----------------------------------------------------

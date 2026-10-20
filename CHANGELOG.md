@@ -167,8 +167,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   holds up a command to it for up to 45 s; commands keep the library's full connect budget. A poll
   that times out after 10 s or more, such as one whose connect ran out of those 15 s, backs off as
   a slow poll (so at most every 16 minutes) rather than to the 30-minute cap, and still counts as a
-  failed poll: a device that then stops being heard goes unavailable as soon as before. The
-  diagnostics show the slow-poll steps and how long the last poll took.
+  failed poll. However far apart a device's polls are, it now goes unavailable within about 9
+  minutes of last being heard: once Home Assistant's Bluetooth stops listing it (3 to 9 minutes
+  after its last advertisement), as soon as it has also gone 6 minutes without being heard or
+  reached by a command or poll, or has failed three polls. The diagnostics show the slow-poll
+  steps and how long the last poll took.
 - The RSSI, last seen, last connected and poll interval diagnostic sensors are disabled by default
   for newly added devices (existing ones keep their setting).
 - Poll errors and the rejected-secret error are translated.

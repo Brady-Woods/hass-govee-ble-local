@@ -79,6 +79,7 @@ from .const import (
     SLOW_POLL_MAX_STEPS,
     SLOW_POLL_SECONDS,
     UNAVAILABLE_AFTER_FAILURES,
+    UNAVAILABLE_AFTER_UNHEARD_SECONDS,
     WEAK_SIGNAL_RSSI,
 )
 from .helpers import BLE_ERRORS, kelvin_range
@@ -214,6 +215,13 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         self._state_listeners: list[CALLBACK_TYPE] = []
         # Receive time (monotonic) of the advertisement last_seen/RSSI came from.
         self._presence_time: float | None = None
+        # When the device was last known reachable (monotonic): the last
+        # advertisement a connectable scanner heard before HA dropped it from its
+        # connectable history (``async_handle_unavailable``), or HA reaching it
+        # since (a command that landed, a poll that read it back: it doesn't
+        # advertise while HA holds the link), and no earlier than setup.
+        # Availability once it is gone counts from it (``device_available``).
+        self._connectable_heard_at = bluetooth.MONOTONIC_TIME()
         # Availability as last pushed to the entities (None = never pushed).
         self._published_available: bool | None = None
         # A poll was skipped because the device wasn't advertising; when it
@@ -261,6 +269,9 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         self._first_poll_waiting = False
         self._unsub_holdoff_cap: CALLBACK_TYPE | None = None
         self._shutting_down = False
+        # A poll is running (``_async_update_data``): it uses up the polls held
+        # meanwhile, so the hold-off ending doesn't release one alongside it.
+        self._poll_running = False
         # Doublings of the poll interval for a slow-connecting or weak-signal
         # device, and how long the last successful poll took (diagnostics).
         self.slow_poll_steps = 0
@@ -308,15 +319,21 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         A device that is advertising stays available through transient poll
         failures (commands can still reach it); one that has vanished from every
         connectable scanner goes unavailable once polls have also failed (or
-        been skipped) a few times - or at once when no background polls are
-        scheduled to count those failures (see ``polls_scheduled``), and it
+        been skipped) a few times, or it hasn't been heard or reached for
+        UNAVAILABLE_AFTER_UNHEARD_SECONDS (a slow device's polls are far apart;
+        the presence tick re-checks it) - or at once when no background polls
+        are scheduled to count those failures (see ``polls_scheduled``), and it
         stays so when they resume before it is heard again.
         """
         if self.async_address_present():
             return True
         if not self.polls_scheduled or self._lost_while_unpolled:
             return False
-        return self.consecutive_failures < UNAVAILABLE_AFTER_FAILURES
+        unheard = bluetooth.MONOTONIC_TIME() - self._connectable_heard_at
+        return (
+            self.consecutive_failures < UNAVAILABLE_AFTER_FAILURES
+            and unheard < UNAVAILABLE_AFTER_UNHEARD_SECONDS
+        )
 
     # -- notifications ------------------------------------------------------
 
@@ -505,7 +522,9 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
 
         Runs every LAST_SEEN_RESOLUTION_SECONDS (see __init__): HA's history
         records every advertisement, while the advertisement callback fires once
-        for a device that keeps repeating the same one. It re-offers that
+        for a device that keeps repeating the same one. It also publishes
+        availability that lapsed with time since the last push
+        (``device_available``). It re-offers that
         advertisement to the library (``_async_reoffer_advertisement``) and
         re-checks the poll policy too, so a device whose on/off byte goes stale
         is back on the fixed cadence within one tick (its first poll follows one
@@ -515,7 +534,8 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         took = info is not None and self._take_presence(info)
         if info is not None and self._async_reoffer_advertisement(info):
             return  # published to every entity
-        if self._async_apply_policy():
+        # Availability can lapse with time alone (``device_available``).
+        if self._async_apply_policy() or self.device_available != self._published_available:
             self._async_publish_status()
         elif took:
             self.async_update_diagnostics()
@@ -583,8 +603,16 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         return True
 
     @callback
-    def async_handle_unavailable(self, *, connectable: bool) -> None:
-        """React to the device dropping out of the (connectable) scanner history."""
+    def async_handle_unavailable(
+        self, *, connectable: bool, last: bluetooth.BluetoothServiceInfoBleak | None = None
+    ) -> None:
+        """React to the device dropping out of the (connectable) scanner history.
+
+        ``last`` is the advertisement HA last had for it there: when it was last
+        heard, which availability counts from (``device_available``).
+        """
+        if connectable and last is not None:
+            self._connectable_heard_at = max(self._connectable_heard_at, last.time)
         if not connectable:
             # No scanner at all sees it any more: the last RSSI is meaningless.
             self.rssi = None
@@ -642,7 +670,7 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
     def _async_end_holdoff(self, _now: datetime) -> None:
         """End the hold-off, and run the background poll it held back, if any."""
         self._unsub_holdoff_end = None
-        if self._poll_held:
+        if self._poll_held and not self._poll_running:
             self._async_release_poll()
 
     @callback
@@ -678,7 +706,7 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         like any other operation.
         """
         self._unsub_holdoff_cap = None
-        if self._poll_held:
+        if self._poll_held and not self._poll_running:
             self._async_release_poll()
 
     @callback
@@ -720,8 +748,11 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         the same way, so one hold-off releases one poll; but the held first poll
         always runs once, even if polls stop meanwhile (a command turned the
         light off): it is what reads the device's info. Any poll that runs
-        first (a manual refresh) is that poll (``_async_update_data``).
+        first (a manual refresh), or is running now, is that poll
+        (``_async_update_data``).
         """
+        if self._poll_running:
+            return
         if self.commands_holding_off:
             self._async_hold_poll(first=True)
             return
@@ -777,6 +808,8 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         """
         if self._shutting_down:
             return
+        # It answered: reachable, though it doesn't advertise while HA holds the link.
+        self._connectable_heard_at = bluetooth.MONOTONIC_TIME()
         rescheduled = self._async_apply_policy()
         rescheduled = self._async_restart_on_backoff() or rescheduled
         interval = self.scheduled_interval
@@ -946,10 +979,20 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
     # -- polling ------------------------------------------------------------
 
     async def _async_update_data(self) -> DeviceState:
-        # A poll that runs (a manual refresh, say) is any background poll held
-        # for the hold-off, the first one after setup included: it reads the
-        # device as they would.
-        self._async_drop_held_polls()
+        # The poll that runs (a manual refresh, say) uses up every background
+        # poll held for the hold-off, the first one after setup included: it
+        # reads the device as they would. Held ones wait while it runs (the
+        # hold-off end and the cap don't release them, ``_poll_running``), and
+        # are dropped as it ends, however it ends.
+        self._poll_running = True
+        try:
+            return await self._async_poll()
+        finally:
+            self._poll_running = False
+            self._async_drop_held_polls()
+
+    async def _async_poll(self) -> DeviceState:
+        """Read the device (``_async_update_data``), counting the outcome for the backoff."""
         # Any poll that runs (a manual refresh after an auth failure included)
         # means polling is scheduled again.
         self._auth_failed = False
@@ -1005,6 +1048,7 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
                 self._io_at = bluetooth.MONOTONIC_TIME()
         if not data.optimistic:
             self.last_connected = dt_util.utcnow()
+            self._connectable_heard_at = bluetooth.MONOTONIC_TIME()
         self.consecutive_failures = 0
         self._backoff_failures = 0
         self._skipped_absent = False
