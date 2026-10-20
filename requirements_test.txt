@@ -8,7 +8,7 @@ homeassistant==2026.10.0
 pytest-cov==7.1.0
 pytest-timeout==2.4.0
 mypy==2.4.0
-ruff==0.17.0
+ruff==0.17.1
 
 # Optional deps of the bluetooth/usb components this integration depends on.
 # Home Assistant installs these on demand at runtime, but the test harness has
