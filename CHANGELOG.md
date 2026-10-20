@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-10-20
+
+Requires `govee-ble-local` 1.5.0 or newer (any 1.x) **from PyPI** and Home Assistant 2026.10+.
+
 ### Added
 - **Opt-in setup for unverified models:** a model whose support the library infers from the Govee
   app, rather than checking it against the app's own controls, and that hasn't been tested on a
@@ -457,7 +461,8 @@ Migration to the `govee-ble-local` v3 library and a large feature expansion.
 - Fixed / added entity icons and names; on/off tracked passively from advertisements between
   polls.
 
-[Unreleased]: https://github.com/Brady-Woods/hass-govee-ble-local/compare/v1.4.1...HEAD
+[Unreleased]: https://github.com/Brady-Woods/hass-govee-ble-local/compare/v1.5.0...HEAD
+[1.5.0]: https://github.com/Brady-Woods/hass-govee-ble-local/compare/v1.4.1...v1.5.0
 [1.4.1]: https://github.com/Brady-Woods/hass-govee-ble-local/compare/v1.4.0...v1.4.1
 [1.4.0]: https://github.com/Brady-Woods/hass-govee-ble-local/compare/v1.2.1...v1.4.0
 [1.2.1]: https://github.com/Brady-Woods/hass-govee-ble-local/compare/v1.2.0...v1.2.1
