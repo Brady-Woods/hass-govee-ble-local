@@ -114,6 +114,9 @@ class FakeConnection:
             raise self.error
         return []
 
+    async def connect(self) -> None:
+        """Connect and set the session up (no link here: nothing to do)."""
+
     async def close(self) -> None:
         self.closed = True
 

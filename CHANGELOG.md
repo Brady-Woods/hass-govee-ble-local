@@ -8,23 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- **Opt-in setup for unverified models (needs the next `govee-ble-local` release):** a model whose
-  support the library infers from the Govee app, rather than checking it against the app's own
-  controls, and that hasn't been tested on a real device, is no longer simply refused. Discovery
-  and manual setup ask first, say plainly that its support is inferred and untested, and set it up
-  only if you accept. The choice is stored in the device's entry, and deleting the entry
-  withdraws it. Fully unsupported models are still not offered. Setup now
-  always passes the choice to the library, so every entry needs that release, not only new ones;
-  with it, existing entries set up as before.
-- **H61A8 colour temperature (with the next library release):** a `govee-ble-local` release after
-  1.3.0 gives the H61A8 colour temperature and per-segment brightness. The main and segment lights
-  then offer colour temperature over the range the library gives that unit (2700-6500 K, widening
-  to 2000-9000 K on hardware below 3.08.01 once its version is read; see Fixed), and the self-test
-  runs the colour-temperature steps. Nothing changes with 1.2.1 or 1.3.0.
-- **Wrong Govee password shown as such (needs a future library release):** once a
-  `govee-ble-local` release adds `GoveeCloudAuthError` (none has yet: 1.2.1 and 1.3.0 don't have
-  it), the cloud secret step says the account rejected the email or password (`invalid_auth`)
-  instead of the generic "could not log in or reach the Govee cloud". Until then nothing changes.
+- **Opt-in setup for unverified models:** a model whose support the library infers from the Govee
+  app, rather than checking it against the app's own controls, and that hasn't been tested on a
+  real device, is no longer simply refused. Discovery and manual setup ask first, say plainly that
+  its support is inferred and untested, and set it up only if you accept. The choice is stored in
+  the device's entry, and deleting the entry withdraws it. Fully unsupported models are still not
+  offered. Existing entries set up as before.
+- **H61A8 colour temperature:** the library gives the H61A8 colour temperature and per-segment
+  brightness (since `govee-ble-local` 1.4.0). The main and segment lights offer colour temperature
+  over the range the library gives that unit (2700-6500 K, widening to 2000-9000 K on hardware
+  below 3.08.01 once its version is read; see Fixed), and the self-test runs the
+  colour-temperature steps.
+- **Wrong Govee password shown as such:** when the library reports that the account rejected the
+  email or password (`GoveeCloudAuthError`, since `govee-ble-local` 1.4.0), the cloud secret step
+  says so (`invalid_auth`) instead of the generic "could not log in or reach the Govee cloud".
 - `capture_session`: every entry for a device that couldn't be tested now carries a stable
   `reason` code next to the `error` message (`not_loaded`, `self_test_device_not_found`,
   `self_test_busy`, `secret_rejected`, or `unknown`), so an automation can branch on it. The
@@ -38,14 +35,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on Home Assistant OS, in a container or in a Python virtual environment. The diagnostics show the
   error instead of a scene count, and the self-test skips its scene steps. Nothing reads the broken
   store again on Home Assistant's event loop.
-- **Discovery checks support at the device's advertised protocol (needs the next `govee-ble-local`
-  release):** the config flow now asks the library whether a model is supported at the protocol
-  version ("pact") its advertisement carries, the same way setup routes it. Some models are
-  served only at certain protocol versions; before, such a device could be offered and then fail
-  setup with "model not supported". Before the entry is created, the device is checked again at
-  the advertisement setup will use, in case that one carries another protocol version (or the first
-  had none). A model that is supported, but not at the protocol version its device advertises at
-  setup, now retries setup instead of failing for good.
+- **Discovery checks support at the device's advertised protocol:** the config flow now asks the
+  library whether a model is supported at the protocol version ("pact") its advertisement carries,
+  the same way setup routes it. Some models are served only at certain protocol versions; before,
+  such a device could be offered and then fail setup with "model not supported". Before the entry is
+  created, the device is checked again at the advertisement setup will use, in case that one carries
+  another protocol version (or the first had none). A model that is supported, but not at the
+  protocol version its device advertises at setup, now retries setup instead of failing for good.
 - **Colour-temperature range follows the device:** lights re-read the range from the library on
   every update instead of only at setup. With `govee-ble-local` 1.4.0 an H61A8's range depends on
   its hardware version, which the first poll reads after the lights are built. An older unit
@@ -55,10 +51,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   device. A range that depends on the protocol version a device advertises now shows as soon as an
   advertisement carries it, instead of at the next poll, which can be 15 minutes away.
 - **The effect list follows the device:** lights re-read the scenes the library offers on every
-  update, ready for `govee-ble-local` 1.5.0 (G1). From that release the scenes an RGBIC light (the
-  H61A8 and other dreamcolor models) offers depend on its firmware and protocol versions, which are
-  read after setup, so the list can get shorter after the first poll, or change with the protocol
-  version. With earlier libraries the list doesn't change.
+  update, and check a requested scene against them before sending anything. In `govee-ble-local`
+  1.5.0 no model's scene list depends on its firmware or protocol version (the H61A8 offers the
+  same scenes everywhere), so the list stays as it is; this is ready for later library releases
+  whose scene catalogs vary.
 - **Bluetooth discovery follows the library's own discovery lists** (`govee-ble-local` 1.4.0): it
   also matches Govee's encrypted broadcast headers (manufacturer IDs 0x8841 and 0x8842) and plain
   `GV` + digit names (`GV6047…` is an H6047; Home Assistant can't match the library's two-letter
@@ -66,9 +62,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Matching isn't support: a device the installed library doesn't support, such as a Govee sensor,
   is still not offered (its discovery aborts as "not supported"), and new models work only once a
   library release admits them.
-- Ready for the next `govee-ble-local` release: the config flow uses `profile_for()` (in the library
-  since 1.2.1) instead of `device_profile_for()`, which newer releases deprecate. The tests pass
-  against both the 1.2.1 floor and the refactored library.
+- The config flow uses `profile_for()` (in the library since 1.2.1) instead of
+  `device_profile_for()`, which `govee-ble-local` 1.5.0 deprecates.
 - Self-test reports for secret-gated devices drop every frame line without a plaintext view. Newer
   libraries label frames captured before the session is ready `withheld` instead of `cipher`, and
   those lines were passing through.
@@ -141,10 +136,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hasn't been for 3 minutes, or that no connectable Bluetooth adapter or proxy hears, is polled
   every 2 minutes as before, and so is every H60A6 and H60A1 (a Bluetooth disconnect may end a music
   or group mode started over Wi-Fi; not yet checked on hardware). Failed polls still back off to 30
-  minutes (a poll that timed out slowly, to 16; see below). It needs a `govee-ble-local` release
-  after 1.3.0 (the advertisement parser that matches the Govee app); with 1.2.1 or 1.3.0 installed
-  nothing changes. The poll interval sensor shows unknown while a device has no background polls,
-  and its diagnostics name the step (`poll_policy`).
+  minutes (a poll that timed out slowly, to 16; see below). It uses the library's advertisement
+  parser, which matches the Govee app's. The poll interval sensor shows unknown while a device has
+  no background polls, and its diagnostics name the step (`poll_policy`).
   A light or plug with no background polls goes unavailable as soon as no connectable Bluetooth
   adapter or proxy hears it, instead of after three missed polls.
 - **Zone lights (H60A6 main panel and ring, H6047 bars) respond sooner, in the Govee app's
@@ -191,11 +185,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   self-test report, its steps and the `capture_session` entries are typed (`TypedDict`), and the
   self-test read-back checks name the state fields directly instead of looking them up by string.
 - Segment lights and the self-test's segment check read the segment count through one helper: the
-  library's runtime `Device.segment_count` on `govee-ble-local` 1.3.0 and later, else (the 1.2.1
-  floor) the profile's. No entities change yet: segment lights are created at setup, before the
-  first poll has read a device's own count, so they still follow the profile. An H6062, the only
-  model that reports its own count (`aa 41` sectionNum), still gets its profile's 33 segment
-  lights, and the library rejects indices at or above the count it reports (open,
+  library's runtime `Device.segment_count`. No entities change yet: segment lights are created at
+  setup, before the first poll has read a device's own count, so they still follow the profile. An
+  H6062, the only model that reports its own count (`aa 41` sectionNum), still gets its profile's 33
+  segment lights, and the library rejects indices at or above the count it reports (open,
   `docs/library-review.md` 7.3).
 - The cloud secret step matches an account device only by the BLE MAC the library reports
   (`deviceSettings.address`, else the last 6 octets of the device id). It no longer falls back to
