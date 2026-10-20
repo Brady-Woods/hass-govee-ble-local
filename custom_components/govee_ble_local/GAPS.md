@@ -42,7 +42,8 @@ Treat their read-back values as provisional.
 - **`0xEE` notification pushes.** Parsed by the library but not consumed. Only pushed to a
   connected client, and connections are short-lived by design (connection slots are scarce), so
   they're rare: none in five days of captures; one `ee 30 01 01` (zone flags) seen during a probe.
-  External changes are picked up by the advertisement on/off byte and the 2-minute poll instead.
+  External changes are picked up by the advertisement on/off byte and the background polls
+  instead (see the README's Polling section).
 
 ## 3. Per-segment light entities — behavioural note
 

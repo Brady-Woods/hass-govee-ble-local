@@ -37,6 +37,11 @@ device-agnostic library (see **Architecture**), so adding a model is mostly a
 matter of describing its capabilities in a profile, not re-implementing the
 transport. The curated devices above double as the **real-hardware test set**.
 
+Some models are supported only by inference from the Govee app: their support isn't checked
+against the app's own controls, and they haven't been tested on a real device. Setting one of
+those up asks you first; if you accept, the choice is stored in that device's entry, and
+deleting the entry withdraws it.
+
 ## Features
 
 - Fully local control over BLE — works with airplane mode / no internet
@@ -44,7 +49,13 @@ transport. The curated devices above double as the **real-hardware test set**.
 - Built-in scene/effect library (with an "off" entry to clear an effect)
 - Independent per-**zone** control (RGB **and** kelvin) where the fixture has physical zones
 - Per-**segment** lights (RGB + kelvin), registered disabled-by-default (opt in per segment)
-- On/off tracked **passively from advertisements** between polls (no connection needed)
+- On/off tracked **passively from advertisements** (no connection needed), which also keeps
+  background polling (each poll holds a scarce Bluetooth connection slot) to what it's needed for:
+  none while a light is off or for a smart plug, one poll 5 s after a light is turned on outside
+  Home Assistant, and every 2 min backing off to 15 min while it stays on unchanged. H60A6 / H60A1
+  ceilings, and devices whose on/off broadcast Home Assistant doesn't hear, are polled every 2 min
+  (needs a `govee-ble-local` release after 1.3.0; on 1.2.1 and 1.3.0 every device is polled
+  every 2 min)
 - Diagnostics: signal strength, connectivity (advertisement presence), last-seen / last-connected
   timestamps, poll interval, connection-failure count — plus a **self-test** button and a
   `capture_session` service that exercises the device and returns a captured BLE session
@@ -68,10 +79,10 @@ of the light.
 ### The `govee-ble-local` library dependency
 The BLE protocol library is published to PyPI as `govee-ble-local`, and Home Assistant installs it
 automatically, so no manual `pip install` is needed. `manifest.json` (`requirements`) accepts any
-release in the current major series (e.g. `>=1.2.1,<2`): the library follows semantic versioning,
+release in the current major series (`>=1.5.0,<2`): the library follows semantic versioning,
 so only a new major version can break the integration, and library fixes don't need an
 integration release. The library's own dependencies (e.g. `cryptography`) carry no upper bounds,
-so they always follow Home Assistant's pinned versions and won't disturb your install. Requires Home Assistant 2025.10 or newer.
+so they always follow Home Assistant's pinned versions and won't disturb your install. Requires Home Assistant 2026.10 or newer.
 
 ### Upgrading
 - **HACS:** open the integration in HACS → **Update** → restart Home Assistant.
@@ -96,7 +107,7 @@ Per device (depending on its capabilities):
 | `light` | Zone light(s) | One per colour-controllable zone (RGB + kelvin); on/off-only zones become switches |
 | `light` | Segment light(s) | One per addressable segment (RGB + kelvin); **disabled by default** |
 | `switch` | Power / zone switch | Smart plugs, and on/off-only zones |
-| `sensor` | Signal strength, poll interval, connection failures, **last seen**, **last connected**, **connection source** | Diagnostic |
+| `sensor` | Signal strength, poll interval, connection failures, **last seen**, **last connected**, **connection source** | Diagnostic; signal strength, poll interval, last seen and last connected are **disabled by default** |
 | `binary_sensor` | Connectivity | Advertisement presence (reachable), not connect-poll success |
 | `button` | Run self-test | Runs the full-capability self-test and stores the capture |
 
@@ -108,9 +119,13 @@ device (each identifying its own address, so results from multiple devices are n
 state (power, brightness, colour, active scene, every zone's power/colour, segment colour, the
 gradual flag) and restores all of it when the test finishes — also when the test fails part-way;
 each report says whether the restore fully succeeded (`restored`, `restore_errors`). Only one
-self-test runs at a time. A device that can't be tested contributes an `{ok: false, error}`
-entry. For secret-gated plugs the raw `wire=` bytes are left out of the captured frames. The same
-capture is stored for the config-entry diagnostics download (with identifiers scrubbed).
+self-test runs at a time. A device that can't be tested contributes an
+`{ok: false, address, reason, error}` entry: `reason` is a stable code for automations to branch
+on (`not_loaded`, `self_test_device_not_found`, `self_test_busy`, `secret_rejected`, or `unknown`)
+and `error` the English message. For secret-gated plugs the raw `wire=` bytes are left out of the
+captured frames. The same capture is stored for the config-entry diagnostics download, with
+identifiers scrubbed and its hex payloads redacted (only the service response carries the raw
+frames).
 
 ## Architecture
 

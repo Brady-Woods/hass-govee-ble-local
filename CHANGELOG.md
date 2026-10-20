@@ -5,45 +5,236 @@ All notable changes to this integration are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.5.0] - 2026-10-16
+## [Unreleased]
 
-Requires `govee-ble-local` 1.2.1 or newer (any 1.x) **from PyPI** and Home Assistant 2025.10+.
-Ready for the next `govee-ble-local` release (after 1.3.0); the requirement stays
-`govee-ble-local>=1.2.1,<2`. What needs the new library is noted below.
+## [1.5.1] - 2026-10-20
 
-### Added
-- Bluetooth discovery also matches manufacturer IDs 0x8841 and 0x8842, the encrypted v1/v2
-  broadcast headers the Govee app accepts. The manifest now lists every ID in the library's
-  `MANUFACTURER_IDS`.
-- The Govee-account step of the plug secret flow shows "invalid authentication" when the account
-  rejects the email or password, instead of "cannot connect". Needs the library's
-  `GoveeCloudAuthError` (next release). Older libraries still report "cannot connect".
-- A command the device refuses (the library's `GoveeBleCommandRejected`, next release) and a
-  rejected secret key are logged at WARNING with the device address, from a service call or a
-  poll. The next library release logs a refused write only at DEBUG and raises the typed error
-  instead, so without this the refusals would be missing from the diagnostics.
-- The diagnostics' `recent_warnings` now also keep this integration's own WARNING+ lines for the
-  device (rejected commands and secrets, failed polls), as well as the library's.
+Requires `govee-ble-local` 1.5.0 or newer (any 1.x) **from PyPI** and Home Assistant 2026.10+.
+
+### Fixed
+- **Rejected commands and secret keys are back in the diagnostics.** `govee-ble-local` 1.5.0 logs
+  a refused write only at DEBUG and raises `GoveeBleCommandRejected` instead, so refusals had
+  dropped out of `recent_warnings`. The integration now logs a refused command and a rejected
+  secret key at WARNING with the device address, from a service call or a poll. The always-on
+  capture also keeps this integration's own WARNING+ lines for the device (rejections, failed
+  polls), as well as the library's.
 
 ### Changed
-- The config flow looks up device profiles with `profile_for`, which the 1.2.1 floor already
-  exports. The next library release deprecates `device_profile_for`, and the integration's tests
-  treat its warning as an error.
-- With the next library release, an H6052 lamp in colour-temperature mode reads back as an RGB
-  colour (the Kelvin's tint) with no colour temperature, which is how the Govee app reads it. Its
-  light switches from color_temp to rgb mode after the next poll. The light handles this: it keeps
-  the read-back colour on brightness changes, and leaving a scene restores that colour.
-- Tests and type checks run against Home Assistant 2026.10 (`homeassistant==2026.10.0`,
-  `pytest-homeassistant-custom-component==0.13.371`), and CI uses `actions/checkout` v7 and
-  `actions/setup-python` v7 (Node 24).
-- The config flow type-checks against probatio, which Home Assistant 2026.10 uses for flow schemas
-  (it aliases `voluptuous` to probatio at runtime). At runtime the flow still imports
-  `voluptuous`, so Home Assistant 2025.10+ is unaffected.
 - `scripts/check.sh` in a dev checkout: when `../govee-ble-local` no longer tracks its generated
   Kaitai classes (it then builds them from `spec/*.ksy` on install), the gate requires the JVM
   `kaitai-struct-compiler` 0.11 and stops with install instructions if it is missing, instead of
   failing inside a quiet `pip install`. CI and `FROM_MANIFEST=1` install released packages, which
   ship the classes, so they need no compiler.
+
+## [1.5.0] - 2026-10-20
+
+Requires `govee-ble-local` 1.5.0 or newer (any 1.x) **from PyPI** and Home Assistant 2026.10+.
+
+### Added
+- **Opt-in setup for unverified models:** a model whose support the library infers from the Govee
+  app, rather than checking it against the app's own controls, and that hasn't been tested on a
+  real device, is no longer simply refused. Discovery and manual setup ask first, say plainly that
+  its support is inferred and untested, and set it up only if you accept. The choice is stored in
+  the device's entry, and deleting the entry withdraws it. Fully unsupported models are still not
+  offered. Existing entries set up as before.
+- **H61A8 colour temperature:** the library gives the H61A8 colour temperature and per-segment
+  brightness (since `govee-ble-local` 1.4.0). The main and segment lights offer colour temperature
+  over the range the library gives that unit (2700-6500 K, widening to 2000-9000 K on hardware
+  below 3.08.01 once its version is read; see Fixed), and the self-test runs the
+  colour-temperature steps.
+- **Wrong Govee password shown as such:** when the library reports that the account rejected the
+  email or password (`GoveeCloudAuthError`, since `govee-ble-local` 1.4.0), the cloud secret step
+  says so (`invalid_auth`) instead of the generic "could not log in or reach the Govee cloud".
+- `capture_session`: every entry for a device that couldn't be tested now carries a stable
+  `reason` code next to the `error` message (`not_loaded`, `self_test_device_not_found`,
+  `self_test_busy`, `secret_rejected`, or `unknown`), so an automation can branch on it. The
+  `error` text is unchanged.
+
+### Fixed
+- **A broken `govee-ble-local` install no longer stops lights from setting up.** From 1.5.0 the
+  library raises for every model when its bundled scene store is missing or corrupt (1.4.x just
+  had no effects), which made every device with scenes fail setup. Lights now set up and work
+  without effects. Home Assistant logs one error naming the installed library and how to fix it
+  on Home Assistant OS, in a container or in a Python virtual environment. The diagnostics show the
+  error instead of a scene count, and the self-test skips its scene steps. Nothing reads the broken
+  store again on Home Assistant's event loop.
+- **Discovery checks support at the device's advertised protocol:** the config flow now asks the
+  library whether a model is supported at the protocol version ("pact") its advertisement carries,
+  the same way setup routes it. Some models are served only at certain protocol versions; before,
+  such a device could be offered and then fail setup with "model not supported". Before the entry is
+  created, the device is checked again at the advertisement setup will use, in case that one carries
+  another protocol version (or the first had none). A model that is supported, but not at the
+  protocol version its device advertises at setup, now retries setup instead of failing for good.
+- **Colour-temperature range follows the device:** lights re-read the range from the library on
+  every update instead of only at setup. With `govee-ble-local` 1.4.0 an H61A8's range depends on
+  its hardware version, which the first poll reads after the lights are built. An older unit
+  (hardware below 3.08.01) supports 2000-9000 K, but its lights reported 2700-6500 K on every
+  start, so their state, their entity registry entries and the colour-temperature slider stopped
+  there; a restart didn't help. Commands with a temperature outside that range already reached the
+  device. A range that depends on the protocol version a device advertises now shows as soon as an
+  advertisement carries it, instead of at the next poll, which can be 15 minutes away.
+- **The effect list follows the device:** lights re-read the scenes the library offers on every
+  update, and check a requested scene against them before sending anything. In `govee-ble-local`
+  1.5.0 no model's scene list depends on its firmware or protocol version (the H61A8 offers the
+  same scenes everywhere), so the list stays as it is; this is ready for later library releases
+  whose scene catalogs vary.
+- **Bluetooth discovery follows the library's own discovery lists** (`govee-ble-local` 1.4.0): it
+  also matches Govee's encrypted broadcast headers (manufacturer IDs 0x8841 and 0x8842) and plain
+  `GV` + digit names (`GV6047…` is an H6047; Home Assistant can't match the library's two-letter
+  `GV` prefix on its own, so it is matched as `GV0*` … `GV9*`).
+  Matching isn't support: a device the installed library doesn't support, such as a Govee sensor,
+  is still not offered (its discovery aborts as "not supported"), and new models work only once a
+  library release admits them.
+- The config flow uses `profile_for()` (in the library since 1.2.1) instead of
+  `device_profile_for()`, which `govee-ble-local` 1.5.0 deprecates.
+- Self-test reports for secret-gated devices drop every frame line without a plaintext view. Newer
+  libraries label frames captured before the session is ready `withheld` instead of `cipher`, and
+  those lines were passing through.
+- **Last seen and RSSI froze** for a device that keeps advertising the same thing (a light left in
+  one state): Home Assistant only calls the advertisement callback when an advertisement changes,
+  so these diagnostics now come from Home Assistant's advertisement history every minute. After a
+  restart, last seen reflects when the device was actually heard instead of the startup time.
+- **Entities stayed available forever** when polling had stopped (polling disabled in the entry's
+  system options, or halted by a rejected secret) and the device then left range. They now go
+  unavailable as soon as no connectable scanner sees the device.
+- Advertisements from passive (non-connectable) Bluetooth scanners now update on/off and presence
+  too; only connectable ones are used for connecting.
+- After a run of failed polls, a command that reaches the device brings polling back to the normal
+  cadence (once per failure streak; for a slow device, its own slower one) instead of waiting out a
+  backoff of up to 30 minutes.
+- **Self-test:** fails straight away with a clear error when no connectable scanner sees the device,
+  instead of timing out step by step while blocking every other device's self-test. Reloading or
+  unloading the entry while a self-test runs now waits (up to 60 s) for the test to restore the
+  device before the connection is closed.
+- **Self-test frame capture was silently empty** when `govee_ble_local` had a level set through
+  Home Assistant's logger (`logger:` in YAML, `logger.set_level`, or the "Enable debug logging"
+  toggle once used). A child logger you made chattier keeps its debug output during a capture,
+  and restore failures are now logged even when the test ends with an unexpected error.
+- **Diagnostics could expose the Wi-Fi MAC and serial number** through the self-test frame hex
+  (reversed byte order, or an identifier split across two frames). Hex runs in the stored self-test
+  report and recent warnings are now redacted, and so is the entry title (the advertised name ends
+  in MAC bytes). Raw frames stay available through the admin-only `capture_session` action.
+- A device that reports a brightness above 100 % no longer publishes a brightness outside 0-255.
+- A pasted secret with an embedded tab, newline or `-` separators is cleaned up instead of being
+  stored as typed.
+- Fewer needless state writes: the poll-interval sensor shows the nominal interval (it changed to a
+  new random value on every poll), and a device dropping out of the scanner history no longer
+  pushes to every entity twice.
+- With every entity of a device disabled, the device-registry sync no longer keeps the device
+  polled.
+- **The Bluetooth connection is now closed when Home Assistant stops or restarts.** Home Assistant
+  doesn't unload integrations at shutdown, so a connection still open (a command in the last 30 s,
+  or one still running) was left for the adapter or proxy to notice. A running self-test gets up
+  to 30 s to finish and restore the device first (an unload gives it 60 s); one that takes longer
+  is cut off and leaves the device in its test state, with the restore failure logged. Closing a
+  connection still in use doesn't hold up the shutdown for more than 5 s.
+- **A finished poll holds its Bluetooth connection slot for 1 s instead of 8 s.** The poll limit
+  counted running polls, not open connections, so during the startup stagger the idle connections
+  left behind could fill an ESPHome proxy's three slots and delay or fail other polls and commands.
+  After a command the connection still stays open for 30 s for quick follow-up changes; a command
+  sent 1-8 s after a poll now opens a new connection instead of reusing the poll's.
+
+### Changed
+- **Requires Home Assistant 2026.10.0 or newer** (`hacs.json`, was 2025.10.0), the version every
+  test and check runs on.
+- **Requires `govee-ble-local` 1.5.0 or newer** (`>=1.5.0,<2`, was `>=1.2.1,<2`): the
+  advertised-protocol support check and the opt-in for unverified models use what 1.5.0 adds. Home
+  Assistant installs the new library itself on the next restart.
+- **Far fewer background connections, driven by what the advertisements show.** A Govee light's
+  advertisement carries its on/off state (nothing else), so while Home Assistant has heard that
+  byte in the last 3 minutes it no longer polls every 2 minutes regardless:
+  - a light that is **off** isn't polled at all, and neither is a **smart plug** (H5083 family),
+    whose relay is its only state;
+  - a light turned **on outside Home Assistant** (Govee app or a remote) is polled once,
+    5 s later, to read the colour or scene it came on in;
+  - a light that is **on** is polled after 2 minutes, then backs off (4, 8, then every 15 minutes)
+    while nothing changes, and returns to 2 minutes when anything does: a poll that reads something
+    new, an advertised on/off change, or a command from Home Assistant. A colour, brightness or
+    scene changed in the Govee app or over Wi-Fi while the light stays on can take up to 15 minutes
+    to show (it was 2).
+
+  An on/off change made outside Home Assistant within seconds of a Home Assistant command or poll
+  (which the library ignores for 15 s) is taken from the repeated advertisement within about a
+  minute. A device whose on/off broadcast isn't heard (an H6006 seen only by a passive scanner), or
+  hasn't been for 3 minutes, or that no connectable Bluetooth adapter or proxy hears, is polled
+  every 2 minutes as before, and so is every H60A6 and H60A1 (a Bluetooth disconnect may end a music
+  or group mode started over Wi-Fi; not yet checked on hardware). Failed polls still back off to 30
+  minutes (a poll that timed out slowly, to 16; see below). It uses the library's advertisement
+  parser, which matches the Govee app's. The poll interval sensor shows unknown while a device has
+  no background polls, and its diagnostics name the step (`poll_policy`).
+  A light or plug with no background polls goes unavailable as soon as no connectable Bluetooth
+  adapter or proxy hears it, instead of after three missed polls.
+- **Zone lights (H60A6 main panel and ring, H6047 bars) respond sooner, in the Govee app's
+  order.** Changing the colour, colour temperature or brightness of a zone that is lit now sends
+  only that change, as the app does, instead of re-sending the zone's power after it; on an H6047
+  that also skips reading the other bar first. A zone that is off, or whose "on" the device hasn't
+  confirmed in the last 2 minutes (by reporting that zone's power, or acking Home Assistant
+  switching that zone; it may have been switched off in the Govee app since), is switched on first
+  and then changed, which is the order the app takes. The confirmation times are the ones
+  `govee-ble-local` 1.5.0 keeps per zone; diagnostics show how many seconds ago each zone was
+  confirmed. If switching the zone on fails, the change isn't sent. A plain turn on still always
+  sends the zone's power. The self-test puts a device back in the same order: on first, then its
+  colours, then off last.
+- **Background polls give way to commands.** A background poll that comes due while a command to
+  the same device is running, or within 25 s after one, now waits until then (while the command's
+  connection is still open, so the poll reuses it), and a second tap or a slider step doesn't queue
+  behind the poll's reads. A steady stream of commands holds a poll off for at most 2 minutes. A
+  device whose polls take 10 s or more, or that is heard at -90 dBm or weaker, is polled less often:
+  its interval doubles with each slow poll, up to 8 times and within the 30-minute cap, also after a
+  failed poll or a change, and a fast poll at a usable signal resets it. After a restart the first
+  polls spread over 5 s per active device (at least 30 s, at most 100 s) instead of always 30 s.
+  A background poll's connect also gives up after 15 s, so a device that doesn't answer no longer
+  holds up a command to it for up to 45 s; commands keep the library's full connect budget. A poll
+  that times out after 10 s or more, such as one whose connect ran out of those 15 s, backs off as
+  a slow poll (so at most every 16 minutes) rather than to the 30-minute cap, and still counts as a
+  failed poll. However far apart a device's polls are, it now goes unavailable once Home
+  Assistant's Bluetooth stops listing it and it has also gone 6 minutes without being heard or
+  reached by a command or poll (or has failed three polls). Through a Bluetooth proxy, Home
+  Assistant stops listing a device 3 to 9 minutes after its last advertisement, so it goes
+  unavailable within about 9 minutes; through a local adapter, at Home Assistant's next 5-minute
+  check after BlueZ drops it. A device commanded every few seconds, which doesn't advertise while
+  that keeps its link open, stays available: its polls use that link. A device heard less often
+  than about every 6 minutes can now show unavailable in the gaps between its advertisements
+  (through a proxy, always once its gaps are longer than about 9 minutes). The diagnostics show
+  the slow-poll steps and how long the last poll took.
+- The RSSI, last seen, last connected and poll interval diagnostic sensors are disabled by default
+  for newly added devices (existing ones keep their setting).
+- Poll errors and the rejected-secret error are translated.
+- Internal clean-up with no behaviour change: entity/platform ownership rules, the command
+  publish pattern, the secret-rejected handling and the colour-temperature range each live in one
+  place; config-entry setup closes the BLE link through an on-unload job; entities link to the
+  device record instead of re-declaring it; platforms use `AddConfigEntryEntitiesCallback`; the
+  config flow keeps the pending device in one shape; formatting follows `ruff format`; the
+  self-test report, its steps and the `capture_session` entries are typed (`TypedDict`), and the
+  self-test read-back checks name the state fields directly instead of looking them up by string.
+- Segment lights and the self-test's segment check read the segment count through one helper: the
+  library's runtime `Device.segment_count`. No entities change yet: segment lights are created at
+  setup, before the first poll has read a device's own count, so they still follow the profile. An
+  H6062, the only model that reports its own count (`aa 41` sectionNum), still gets its profile's 33
+  segment lights, and the library rejects indices at or above the count it reports (open,
+  `docs/library-review.md` 7.3).
+- The cloud secret step matches an account device only by the BLE MAC the library reports
+  (`deviceSettings.address`, else the last 6 octets of the device id). It no longer falls back to
+  the raw device id, so a device whose id has fewer than 6 colon-separated octets (the library
+  then reports no BLE MAC) now gets "secret not found". Govee's 8-octet ids are unaffected.
+- Tests: the Govee-cloud fixtures match what the library's account parser builds (a device id
+  ending in the Wi-Fi MAC, the BLE MAC from `deviceSettings.address`); a device listed without
+  that address is shown not to match its Wi-Fi MAC.
+- Tests: assertions that couldn't fail now discriminate, and new tests cover the presence timer,
+  availability without polling, diagnostics redaction, the logger integration, flow cancellation,
+  reauth/reconfigure reloads and the manifest requirement shape.
+- Tests: the every-profile entity-structure check also runs over each model the library offers only
+  as an opt-in (unverified) one, set up with the opt-in, taken from the library rather than a
+  fixed list.
+- `docs/library-review.md` lists the problems whose fix depends on the `govee-ble-local` library
+  (self-test restore and read-back, the segment/zone light state model, connection-slot use and
+  more), to be decided after the library refactor.
+- Tests and type checks run against Home Assistant 2026.10 (`homeassistant==2026.10.0`,
+  `pytest-homeassistant-custom-component==0.13.371`), and CI uses `actions/checkout` v7 and
+  `actions/setup-python` v7 (Node 24).
+- The config flow type-checks against probatio, which Home Assistant 2026.10 uses for flow schemas
+  (it aliases `voluptuous` to probatio at runtime). At runtime the flow imports `voluptuous`,
+  which Home Assistant aliases to probatio.
 
 ## [1.4.1] - 2026-10-13
 
@@ -289,7 +480,8 @@ Migration to the `govee-ble-local` v3 library and a large feature expansion.
 - Fixed / added entity icons and names; on/off tracked passively from advertisements between
   polls.
 
-[Unreleased]: https://github.com/Brady-Woods/hass-govee-ble-local/compare/v1.4.1...HEAD
+[Unreleased]: https://github.com/Brady-Woods/hass-govee-ble-local/compare/v1.5.0...HEAD
+[1.5.0]: https://github.com/Brady-Woods/hass-govee-ble-local/compare/v1.4.1...v1.5.0
 [1.4.1]: https://github.com/Brady-Woods/hass-govee-ble-local/compare/v1.4.0...v1.4.1
 [1.4.0]: https://github.com/Brady-Woods/hass-govee-ble-local/compare/v1.2.1...v1.4.0
 [1.2.1]: https://github.com/Brady-Woods/hass-govee-ble-local/compare/v1.2.0...v1.2.1

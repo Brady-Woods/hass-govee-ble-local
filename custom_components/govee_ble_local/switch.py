@@ -5,12 +5,12 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
-from govee_ble_local import Capability
 from homeassistant.components.switch import SwitchDeviceClass, SwitchEntity
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .entity import GoveeBleLocalEntity
+from .helpers import has_power_switch, is_colour_zone
 
 if TYPE_CHECKING:
     from . import GoveeBleLocalConfigEntry
@@ -25,7 +25,7 @@ PARALLEL_UPDATES = 1
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: GoveeBleLocalConfigEntry,
-    async_add_entities: AddEntitiesCallback,
+    async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
     """Set up switches.
 
@@ -35,13 +35,13 @@ async def async_setup_entry(
     whole-device power switch.
     """
     device = entry.runtime_data.device
-    caps = device.capabilities
 
     entities: list[SwitchEntity] = [
-        GoveeBleLocalZoneSwitch(entry, zone.name) for zone in device.zones if not zone.segments
+        GoveeBleLocalZoneSwitch(entry, zone.name)
+        for zone in device.zones
+        if not is_colour_zone(zone)
     ]
-    is_light = bool(caps & {Capability.BRIGHTNESS, Capability.RGB, Capability.COLOR_TEMP})
-    if not device.zones and not is_light and Capability.POWER in caps:
+    if has_power_switch(device):
         entities.append(GoveeBleLocalPowerSwitch(entry))
     async_add_entities(entities)
 
@@ -65,18 +65,14 @@ class GoveeBleLocalZoneSwitch(GoveeBleLocalEntity, SwitchEntity):
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Power the zone on."""
         _LOGGER.debug("Turning zone %s on for %s", self._zone_name, self._address)
-        try:
+        async with self._command():
             await self._run_client_command(self._device.set_zone_power(self._zone_name, True))
-        finally:
-            self._async_publish_command_state()
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Power the zone off."""
         _LOGGER.debug("Turning zone %s off for %s", self._zone_name, self._address)
-        try:
+        async with self._command():
             await self._run_client_command(self._device.set_zone_power(self._zone_name, False))
-        finally:
-            self._async_publish_command_state()
 
 
 class GoveeBleLocalPowerSwitch(GoveeBleLocalEntity, SwitchEntity):
@@ -101,15 +97,11 @@ class GoveeBleLocalPowerSwitch(GoveeBleLocalEntity, SwitchEntity):
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Switch the relay on."""
         _LOGGER.debug("Turning power on for %s", self._address)
-        try:
+        async with self._command():
             await self._run_client_command(self._device.set_power(True))
-        finally:
-            self._async_publish_command_state()
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Switch the relay off."""
         _LOGGER.debug("Turning power off for %s", self._address)
-        try:
+        async with self._command():
             await self._run_client_command(self._device.set_power(False))
-        finally:
-            self._async_publish_command_state()

@@ -9,9 +9,11 @@
 #
 # Every Bronze/Silver/Gold rule is done or legitimately exempt.
 # dependency-transparency depends on govee-ble-local being published to PyPI by
-# the library's trusted-publishing release workflow (.github/workflows/release.yml);
-# the manifest requires `govee-ble-local==1.1.0`, so the integration cannot even
-# install until that release exists - publish the library first.
+# the library's trusted-publishing release workflow (.github/workflows/release.yml).
+# The manifest requires a semver range `govee-ble-local>=<floor>,<<next major>`
+# (see manifest.json), never an exact pin (CLAUDE.md): the floor rises only when
+# the integration starts using newer library API, and the upper bound moves only
+# for a new library major.
 # Platinum's own three rules (async-dependency, inject-websession, strict-typing)
 # are also met.
 # Also outstanding for a core submission (not a rule failure): the bundled brand
@@ -24,22 +26,52 @@ rules:
     comment: >
       The capture_session service action is registered (admin-only) in
       async_setup, not async_setup_entry, so it exists integration-wide. A
-      targeted device whose entry isn't loaded gets an error entry in the
-      response; no matching device raises a translated ServiceValidationError.
-  appropriate-polling: done
+      targeted device whose entry isn't loaded, or that can't be tested, gets an
+      error entry (with a stable reason code) in the response; no matching
+      device raises a translated ServiceValidationError.
+  appropriate-polling:
+    status: done
+    comment: >
+      Each background poll holds one of the adapter's or proxy's few
+      connection slots, and the advertisement already carries on/off (and
+      nothing else), so one per-device policy keeps polls to what
+      advertisements can't show. While Home Assistant has heard the device's
+      on/off byte in the last 180 s: a light that is off and a relay plug get
+      no background polls; a light turned on outside Home Assistant is polled
+      once 5 s later; a light that is on is polled every 120 s, doubling
+      after each poll that read nothing new up to 15 min (a colour,
+      brightness or scene changed in the Govee app or over Wi-Fi while it
+      stays on reaches Home Assistant only by polling, so this bounds how
+      stale that gets) and back to 120 s on any change. HA calls back only
+      when an advertisement's content changes, so the minute presence tick
+      offers its newest one to the library again once it was received outside
+      the library's 15 s window after HA's own poll or command: an outside
+      on/off change made just after one isn't lost while polls are off.
+      Everything else is polled every 120 s plus jitter: a device whose byte
+      isn't heard or has gone stale (re-checked every minute), one no
+      connectable scanner sees, the H60A6 and H60A1 (a disconnect may end a
+      music or group mode started over Wi-Fi; static finding, not yet
+      bench-checked), and every device on a govee-ble-local without the
+      app-matching advertisement parser (the 1.2.1 floor and 1.3.0). Failed
+      polls back off exponentially to 30 min; no more than two background
+      polls run at once integration-wide; the first poll after a restart is
+      staggered per device.
   brands:
     status: done
     comment: >
-      Bundled under custom_components/govee_ble_local/brand/ (served by HA's
-      brands component for custom integrations). Generic placeholder artwork
-      with no Govee trademarks; replace with final art before any submission.
+      Bundled under custom_components/govee_ble_local/brand/, which HA's
+      brands component serves for custom integrations from HA 2026.3 on
+      (releases before that, no longer supported, only use the
+      home-assistant/brands CDN, which has no images for this integration). Generic placeholder artwork with no Govee
+      trademarks; replace with final art before any submission.
   common-modules: done
   config-flow: done
   config-flow-test-coverage:
     status: done
     comment: >
       Full config-flow coverage (bluetooth discovery, user, secret read/cloud/
-      manual, reauth and reconfigure steps plus the not_supported /
+      manual, reauth and reconfigure steps, the cloud step's invalid_auth /
+      cannot_connect / secret_not_found errors, plus the not_supported /
       already_configured / no_devices_found aborts) via
       pytest-homeassistant-custom-component; see tests/test_config_flow.py.
   dependency-transparency:
@@ -47,7 +79,9 @@ rules:
     comment: >
       The sole dependency (govee-ble-local) is MIT, source on GitHub, and
       released to PyPI with CI-built wheels by its trusted-publishing workflow;
-      the manifest pins `govee-ble-local==1.1.0`.
+      the manifest requires a semver range
+      `govee-ble-local>=<floor>,<<next major>` (see manifest.json), never an
+      exact pin.
   docs-actions:
     status: done
     comment: >
@@ -70,7 +104,8 @@ rules:
     status: done
     comment: >
       Setup raises ConfigEntryNotReady unless a connectable scanner currently
-      sees the device and its SKU is known/supported. A device that is
+      sees the device and its SKU is known (an unsupported model is a
+      permanent ConfigEntryError instead). A device that is
       advertising is accepted without a live connect+handshake (avoids a
       startup connect storm across many devices sharing scarce connection
       slots); the first poll runs in the background with backoff.
@@ -78,7 +113,18 @@ rules:
 
   # ------------------------------------------------------------------ Silver
   action-exceptions: done
-  config-entry-unloading: done
+  config-entry-unloading:
+    status: done
+    comment: >
+      Unload removes the platforms and gives a running self-test a bounded
+      wait to restore the device; the on-unload jobs then shut the coordinator
+      down and close the BLE link. HA cancels a background poll still in
+      flight, but not a command or manual refresh still using the link; it
+      waits up to 10 s for the close, which can then finish after the unload.
+      HA doesn't unload entries when it stops, so a stop-event listener
+      (removed on unload) closes the link at shutdown too, after a shorter
+      bounded wait for a running self-test's restore; its close is bounded
+      as well, so a busy link doesn't hold up the shutdown.
   docs-configuration-parameters:
     status: exempt
     comment: The integration has no configuration parameters.
@@ -88,7 +134,13 @@ rules:
       Availability follows reachability (a connectable scanner sees the
       device's advertisements), not last-poll success: an advertising device
       stays controllable through transient poll failures; a vanished one goes
-      unavailable after UNAVAILABLE_AFTER_FAILURES failed polls.
+      unavailable after UNAVAILABLE_AFTER_FAILURES failed polls or once it
+      hasn't been heard or reached for UNAVAILABLE_AFTER_UNHEARD_SECONDS,
+      whichever comes first, or as soon as it vanishes when no background
+      polls are scheduled to count them
+      (polling disabled in the entry's system options, halted by a rejected
+      secret, or off under the advertisement poll policy), and stays so if
+      polls resume before it is heard again.
   integration-owner: done
   log-when-unavailable: done
   parallel-updates: done
@@ -102,10 +154,11 @@ rules:
   test-coverage:
     status: done
     comment: >
-      >95% line coverage of the HA-facing layer, enforced by scripts/check.sh,
-      against the Home Assistant release pinned in requirements_test.txt. The
-      BLE transport/protocol layers are tested in the govee-ble-local library,
-      including a fake-peripheral harness reproducing live failure modes.
+      At least 95% statement+branch coverage of the HA-facing layer, enforced
+      by scripts/check.sh, against the Home Assistant release pinned in
+      requirements_test.txt. The BLE transport/protocol layers are tested in
+      the govee-ble-local library, including a fake-peripheral harness
+      reproducing live failure modes.
 
   # -------------------------------------------------------------------- Gold
   devices: done
@@ -125,16 +178,24 @@ rules:
   entity-category:
     status: done
     comment: >
-      RSSI, connection-failures, poll-interval, last-seen and last-connected
-      sensors, the connectivity binary_sensor, and the self-test button are all
-      EntityCategory.DIAGNOSTIC; the light/switch controls are primary.
+      RSSI, connection-failures, poll-interval, last-seen, last-connected and
+      connection-source sensors, the connectivity binary_sensor, and the
+      self-test button are all EntityCategory.DIAGNOSTIC; the light/switch
+      controls are primary.
   entity-device-class:
     status: done
     comment: >
       Diagnostic entities use signal_strength / duration / timestamp /
       connectivity device classes; the light and zone on/off switches have no
       applicable class.
-  entity-disabled-by-default: done
+  entity-disabled-by-default:
+    status: done
+    comment: >
+      The segment lights and the RSSI, poll-interval, last-seen and
+      last-connected diagnostic sensors are disabled by default (RSSI and last
+      seen refresh every minute, last connected every poll). The connectivity,
+      connection-failure and connection-source diagnostics, which change
+      rarely, stay enabled.
   entity-translations: done
   exception-translations: done
   icon-translations: done

@@ -16,11 +16,10 @@ from homeassistant.components.binary_sensor import (
     BinarySensorDeviceClass,
     BinarySensorEntity,
 )
-from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
-from .entity import GoveeBleLocalEntity
+from .entity import GoveeBleLocalDiagnosticEntity
 
 if TYPE_CHECKING:
     from . import GoveeBleLocalConfigEntry
@@ -32,35 +31,22 @@ PARALLEL_UPDATES = 0
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: GoveeBleLocalConfigEntry,
-    async_add_entities: AddEntitiesCallback,
+    async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
     """Set up the connectivity binary sensor."""
     async_add_entities([GoveeBleLocalConnectivityBinarySensor(entry)])
 
 
-class GoveeBleLocalConnectivityBinarySensor(GoveeBleLocalEntity, BinarySensorEntity):
+class GoveeBleLocalConnectivityBinarySensor(GoveeBleLocalDiagnosticEntity, BinarySensorEntity):
     """On when the device is currently advertising (reachable over BLE)."""
 
     _attr_device_class = BinarySensorDeviceClass.CONNECTIVITY
-    _attr_entity_category = EntityCategory.DIAGNOSTIC
 
     def __init__(self, entry: GoveeBleLocalConfigEntry) -> None:
         """Initialize the connectivity sensor."""
         super().__init__(entry, "connectivity")
 
-    async def async_added_to_hass(self) -> None:
-        """Also follow the coordinator's diagnostic-only updates."""
-        await super().async_added_to_hass()
-        self.async_on_remove(
-            self.coordinator.async_add_diagnostic_listener(self.async_write_ha_state)
-        )
-
-    @property
-    def available(self) -> bool:
-        """Stay available to report the down state."""
-        return True
-
     @property
     def is_on(self) -> bool:
         """Return presence from the Bluetooth stack, NOT the connect-poll."""
-        return self.coordinator.address_present(connectable=False)
+        return self.coordinator.async_address_present(connectable=False)

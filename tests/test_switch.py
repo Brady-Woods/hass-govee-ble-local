@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import inspect
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
@@ -16,6 +17,7 @@ from govee_ble_local import (
     GoveeBleNotSupported,
     GoveeBleTimeout,
     Zone,
+    supported_skus,
 )
 from govee_ble_local.wire import build
 from homeassistant.components.switch import SwitchDeviceClass
@@ -34,15 +36,25 @@ from .const import ADDRESS
 PLUG = "switch.test_ceiling"
 
 
+def _every_sku() -> list[Any]:
+    """(device_sku, allow_modelled) for every SKU the library supports, then the opt-in-only ones.
+
+    The opt-in list is the library's own (supported_skus with allow_modelled, minus without),
+    never a fixed one: an opted-in device is set up through the flow's confirmation, so it gets
+    the same entity checks. A library without the opt-in contributes none, rather than failing
+    the module's collection.
+    """
+    default = supported_skus()
+    opt_in: list[str] = []
+    if "allow_modelled" in inspect.signature(supported_skus).parameters:
+        opt_in = sorted(set(supported_skus(allow_modelled=True)) - set(default))
+    return [
+        *(pytest.param(sku, False, id=sku) for sku in default),
+        *(pytest.param(sku, True, id=f"{sku}-opted_in") for sku in opt_in),
+    ]
+
+
 # -- helpers --------------------------------------------------------------------------
-
-
-@pytest.fixture
-async def entry(setup_integration: MockConfigEntry) -> MockConfigEntry:
-    """The loaded entry, with the (background) first poll already finished."""
-    if (task := setup_integration.runtime_data.first_poll) is not None:
-        await task
-    return setup_integration
 
 
 def _eid(hass: HomeAssistant, domain: str, unique_id: str) -> str:
@@ -135,7 +147,10 @@ async def test_plug_turn_on_and_off(
     assert mock_device.state.is_on is True
     frames = connection(mock_device).sent
     assert frames[0] == build.switch(True, relay=True)
-    assert len(frames) == 2  # relay frame + the sync-time follow-up that actuates it
+    # The 33 b5 time sync is the library's business: 1.2.1 sends one after each
+    # relay write, later releases once per connection (as the app does).
+    assert all(frame[:2] == bytes([0x33, 0xB5]) for frame in frames[1:])
+    assert len(frames) <= 2
 
     connection(mock_device).sent.clear()
     mock_device.set_power.reset_mock()
@@ -167,7 +182,9 @@ async def test_plug_ble_errors_are_translated(
     error: BaseException,
 ) -> None:
     """Transport failures become a translated HomeAssistantError and leave the state alone."""
-    _seed(entry, is_on=True)
+    # Start from the opposite state, so a failed command flipping it is caught.
+    start_on = service == "turn_off"
+    _seed(entry, is_on=start_on)
     _fail(mock_device, error)
     with pytest.raises(HomeAssistantError) as exc:
         await _call(hass, service, PLUG)
@@ -176,7 +193,7 @@ async def test_plug_ble_errors_are_translated(
     assert exc.value.translation_key == "ble_command_failed"
     assert exc.value.translation_placeholders["device_name"] == "Test Ceiling"
     assert exc.value.translation_placeholders["error"]
-    assert hass.states.get(PLUG).state == STATE_ON
+    assert hass.states.get(PLUG).state == (STATE_ON if start_on else STATE_OFF)
     assert _govee_flows(hass) == []
 
 
@@ -241,6 +258,41 @@ async def test_light_fixtures_have_no_power_switch(
     assert hass.states.async_all("switch") == []
 
 
+@pytest.mark.parametrize(("device_sku", "allow_modelled"), _every_sku())
+async def test_every_profile_gets_one_entity_per_relay(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_device: Device,
+    mock_bluetooth: SimpleNamespace,
+) -> None:
+    """Across every library profile, opt-in ones too, light.py, switch.py and the cleanup agree.
+
+    Each zone is a light or a switch (never both or neither), the whole device
+    gets at most one control (a light or an outlet switch, one if it has no
+    zones), and the cleanup of pre-light zone switches only removes the ones a
+    zone light replaced.
+    """
+    registry = er.async_get(hass)
+    mock_config_entry.add_to_hass(hass)
+    for zone in mock_device.zones:  # the zone switches earlier versions registered
+        registry.async_get_or_create(
+            "switch", DOMAIN, f"{ADDRESS}_zone_{zone.name}", config_entry=mock_config_entry
+        )
+    assert await hass.config_entries.async_setup(mock_config_entry.entry_id)
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+    switches = set(_switches(hass, mock_config_entry))
+    lights = {e.unique_id for e in _lights(hass, mock_config_entry)}
+    for zone in mock_device.zones:
+        is_light = f"{ADDRESS}_zone_{zone.name}_light" in lights
+        is_switch = f"{ADDRESS}_zone_{zone.name}" in switches
+        assert is_light != is_switch, zone
+    whole = (lights | switches) & {f"{ADDRESS}_light", f"{ADDRESS}_power"}
+    assert len(whole) <= 1
+    if not mock_device.zones:
+        assert len(whole) == 1
+
+
 # -- 11. zone switches ----------------------------------------------------------------
 
 
@@ -257,9 +309,7 @@ async def zone_entry(
     mock_config_entry.add_to_hass(hass)
     with patch("custom_components.govee_ble_local.create_device", return_value=device):
         assert await hass.config_entries.async_setup(mock_config_entry.entry_id)
-        await hass.async_block_till_done()
-    if (task := mock_config_entry.runtime_data.first_poll) is not None:
-        await task
+        await hass.async_block_till_done(wait_background_tasks=True)
     return mock_config_entry
 
 
@@ -274,6 +324,26 @@ async def test_one_switch_per_on_off_zone(hass: HomeAssistant, zone_entry: MockC
     assert set(switches) == {f"{ADDRESS}_zone_main", f"{ADDRESS}_zone_mystery"}
     # Segment-less zones are not lights either.
     assert not any("_zone_" in e.unique_id for e in _lights(hass, zone_entry))
+
+
+async def test_zoned_power_only_device_has_no_whole_device_switch(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_bluetooth: SimpleNamespace
+) -> None:
+    """A power-only device with on/off zones (a multi-outlet plug) is switched per zone only.
+
+    Unlike ``zone_entry`` (a light fixture, which never gets a power switch),
+    this is the case the "no zones" condition of the power switch exists for.
+    """
+    device = make_device("H5083")
+    device.profile = dataclasses.replace(
+        device.profile, zones=(Zone("a", power_index=0), Zone("b", power_index=1))
+    )
+    mock_config_entry.add_to_hass(hass)
+    with patch("custom_components.govee_ble_local.create_device", return_value=device):
+        assert await hass.config_entries.async_setup(mock_config_entry.entry_id)
+        await hass.async_block_till_done(wait_background_tasks=True)
+    assert set(_switches(hass, mock_config_entry)) == {f"{ADDRESS}_zone_a", f"{ADDRESS}_zone_b"}
+    assert _lights(hass, mock_config_entry) == []
 
 
 async def test_zone_switch_names(hass: HomeAssistant, zone_entry: MockConfigEntry) -> None:
@@ -359,13 +429,15 @@ async def test_zone_switch_ble_errors_are_translated(
 ) -> None:
     """Transport failures on a zone switch become a translated error; state is unchanged."""
     entity_id = _eid(hass, "switch", f"{ADDRESS}_zone_mystery")
-    _seed(zone_entry, is_on=True, zone_power={0: True, 1: True})
+    # Start from the opposite state, so a failed command flipping it is caught.
+    start_on = service == "turn_off"
+    _seed(zone_entry, is_on=True, zone_power={0: start_on, 1: start_on})
     _fail(_device(zone_entry), error)
     with pytest.raises(HomeAssistantError) as exc:
         await _call(hass, service, entity_id)
     assert exc.value.translation_key == "ble_command_failed"
     assert exc.value.translation_placeholders["error"]
-    assert hass.states.get(entity_id).state == STATE_ON
+    assert hass.states.get(entity_id).state == (STATE_ON if start_on else STATE_OFF)
 
 
 async def test_zone_switch_auth_error_starts_reauth(

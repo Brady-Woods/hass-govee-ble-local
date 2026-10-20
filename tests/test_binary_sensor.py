@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
 from types import SimpleNamespace
-from typing import Any
 
 from govee_ble_local import Device
 from homeassistant.components.binary_sensor import BinarySensorDeviceClass
@@ -15,11 +13,7 @@ from homeassistant.helpers import entity_registry as er
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.govee_ble_local.const import (
-    DOMAIN,
-    LAST_SEEN_RESOLUTION_SECONDS,
-    UNAVAILABLE_AFTER_FAILURES,
-)
+from custom_components.govee_ble_local.const import DOMAIN, UNAVAILABLE_AFTER_FAILURES
 
 from .conftest import (
     advertisement_callback,
@@ -87,16 +81,14 @@ async def test_connectivity_stays_available_when_off(
     assert hass.states.get(connectivity_id).state == STATE_OFF
 
 
-async def test_connectivity_returns_on_with_the_next_diagnostic_publish(
+async def test_connectivity_returns_on_with_the_first_advertisement(
     hass: HomeAssistant,
     connectivity_id: str,
-    *,
     mock_device: Device,
     mock_bluetooth: SimpleNamespace,
     presence: SimpleNamespace,
-    freezer: Any,
 ) -> None:
-    """When the device is heard again the sensor flips back on from the advertisement tick."""
+    """When the device is heard again the sensor flips back on at once, not a minute later."""
     allow_adverts(mock_device)
     callback = advertisement_callback(mock_bluetooth)
     callback(make_service_info(), BluetoothChange.ADVERTISEMENT)
@@ -105,8 +97,8 @@ async def test_connectivity_returns_on_with_the_next_diagnostic_publish(
     unavailable_callback(mock_bluetooth, connectable=False)(make_service_info())
     assert hass.states.get(connectivity_id).state == STATE_OFF
 
+    # Same on/off, still available: only the diagnostic push can turn it on.
     presence.connectable = presence.any = True
-    freezer.tick(timedelta(seconds=LAST_SEEN_RESOLUTION_SECONDS + 1))
     callback(make_service_info(), BluetoothChange.ADVERTISEMENT)
     assert hass.states.get(connectivity_id).state == STATE_ON
 
@@ -120,7 +112,12 @@ async def test_connectivity_updates_on_skipped_poll(
     """A skipped poll's diagnostic push also refreshes the connectivity state."""
     coordinator = setup_integration.runtime_data.coordinator
     presence.connectable = presence.any = False
-    await coordinator.async_refresh()
-    await coordinator.async_refresh()  # an ongoing outage only pushes diagnostics
+    await coordinator.async_refresh()  # HA itself pushes the first failure to everyone
     assert hass.states.get(connectivity_id).state == STATE_OFF
+
+    # A passive scanner hears it again: the poll is still skipped, and HA pushes
+    # nothing for an ongoing outage, so only the diagnostic push can turn it on.
+    presence.any = True
+    await coordinator.async_refresh()
+    assert hass.states.get(connectivity_id).state == STATE_ON
     assert hass.states.get(MAIN_LIGHT).state != STATE_UNAVAILABLE  # not unavailable yet

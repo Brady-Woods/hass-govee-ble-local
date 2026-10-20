@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from types import SimpleNamespace
 
-from govee_ble_local import Device, GoveeBleError
+from govee_ble_local import Device
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 import pytest
@@ -24,6 +25,24 @@ from .const import ADDRESS, SECRET_HEX, TITLE
 REDACTED = "**REDACTED**"
 WIFI_MAC = "11:22:33:44:55:66"
 BLE_MAC = "77:88:99:AA:BB:CC"
+
+# The H60A6's Wi-Fi MAC is its BLE address minus one; its serial is the device
+# UID reversed.
+BURST_WIFI_MAC = "AA:BB:CC:DD:EE:04"
+BURST_SERIAL = "2D:DB:AA:BB:CC:DD:EE:04"
+# The start of an H60A6 status burst as the library logs it, one 20-byte chunk per
+# line, carrying the test device's identifiers. The device-info TLV holds the
+# reversed BLE address (chunk 01), the UID split across chunks 01/02 and the
+# Wi-Fi MAC split across chunks 02/03, so neither of those is whole in any line.
+BURST = [
+    "ac000a000c0300010100040164050415010a8c5b",
+    "ac0107070605eeddccbbaa07111004eeddccbb06",
+    "ac02aadb2d0100290104030000070d11aabbcc1a",
+    "ac03ddee040100290104031104001e0f0f1207a8",
+]
+# Every piece of an identifier in BURST: the reversed address, the two halves
+# of the UID and the two halves of the Wi-Fi MAC.
+BURST_FRAGMENTS = ["05eeddccbbaa", "04eeddccbb", "aadb2d", "aabbcc", "ddee04"]
 
 
 def _octets(mac: str) -> list[str]:
@@ -58,6 +77,20 @@ def mock_config_entry() -> MockConfigEntry:
     )
 
 
+async def test_diagnostics_with_an_unreadable_scene_store(
+    hass: HomeAssistant,
+    hass_client: ClientSessionGenerator,
+    broken_scene_store: SimpleNamespace,
+    setup_integration: MockConfigEntry,
+) -> None:
+    """A broken scene store shows as no scene count and its error, without reading it again."""
+    reads = len(broken_scene_store.on_loop)
+    diagnostics = await get_diagnostics_for_config_entry(hass, hass_client, setup_integration)
+    assert diagnostics["device"]["scene_count"] is None
+    assert diagnostics["device"]["scene_store_error"] == str(broken_scene_store.error)
+    assert len(broken_scene_store.on_loop) == reads
+
+
 async def test_diagnostics_structure(
     hass: HomeAssistant,
     hass_client: ClientSessionGenerator,
@@ -67,8 +100,9 @@ async def test_diagnostics_structure(
     """Diagnostics describe the device and coordinator, with identifying entry data redacted."""
     diagnostics = await get_diagnostics_for_config_entry(hass, hass_client, setup_integration)
 
+    # The title defaults to the advertised name, which ends in MAC bytes.
     assert diagnostics["entry"] == {
-        "title": TITLE,
+        "title": REDACTED,
         "data": {"address": REDACTED, "sku": "H60A6", "secret": REDACTED},
     }
     assert diagnostics["device"] == {
@@ -76,18 +110,40 @@ async def test_diagnostics_structure(
         "capabilities": ["brightness", "color_temp", "power", "rgb", "scenes", "segments"],
         "zones": ["main", "background"],
         "scene_count": len(mock_device.scene_names),
+        "scene_store_error": None,
     }
     assert diagnostics["device"]["scene_count"] > 3
     coordinator = diagnostics["coordinator"]
     assert coordinator["last_update_success"] is True
     assert coordinator["consecutive_failures"] == 0
+    assert coordinator["slow_poll_steps"] == 0
+    assert isinstance(coordinator["last_poll_seconds"], float)
     assert coordinator["total_failures"] == 0
     assert coordinator["device_available"] is True
+    assert coordinator["poll_policy"] == "fixed"  # H60A6 is excluded from the advert policy
     assert coordinator["update_interval"] == str(
         setup_integration.runtime_data.coordinator.update_interval
     )
     assert "is_on" in diagnostics["state"]
     assert diagnostics["recent_warnings"] == []
+
+
+async def test_diagnostics_show_zone_confirmations_as_ages(
+    hass: HomeAssistant,
+    hass_client: ClientSessionGenerator,
+    setup_integration: MockConfigEntry,
+    mock_device: Device,
+) -> None:
+    """Zone confirmations are monotonic times, meaningless in a shared dump: shown as ages."""
+    mock_device.state.zone_power = {0: True, 1: False}
+    mock_device.state.zone_power_confirmed = {0: time.monotonic() - 30.25}
+    diagnostics = await get_diagnostics_for_config_entry(hass, hass_client, setup_integration)
+    state = diagnostics["state"]
+    assert "zone_power_confirmed" not in state
+    [(index, age)] = state["zone_power_confirmed_seconds_ago"].items()
+    assert index == "0"  # JSON keys
+    assert 30.2 <= age <= 30.4
+    assert age == round(age, 1)
 
 
 async def test_diagnostics_without_self_test(
@@ -140,7 +196,7 @@ async def test_identifiers_are_redacted_by_key_and_by_value(
     address_reversed = "".join(reversed(_octets(ADDRESS))).lower()
     wifi_compact = WIFI_MAC.replace(":", "")
     wifi_reversed = "".join(reversed(_octets(WIFI_MAC)))
-    coordinator.last_self_test = {
+    setup_integration.runtime_data.last_self_test = {
         "ok": False,
         "restored": True,
         "restore_errors": [],
@@ -194,7 +250,7 @@ async def test_identifiers_are_redacted_by_key_and_by_value(
     report = diagnostics["last_self_test"]
     assert report["address"] == REDACTED
     assert report["steps"][0]["error"] == f"timeout talking to {REDACTED} after 7 tries"
-    assert report["frames"][0] == f"{REDACTED} tx info plain=3301 wire=3301{REDACTED} enc=none"
+    assert report["frames"][0] == f"{REDACTED} tx info plain=3301 wire={REDACTED} enc=none"
     assert report["log"][0] == f"INFO {REDACTED}: session ready"
     # The warning captured for this device is present, with identifiers scrubbed.
     assert diagnostics["recent_warnings"] == [
@@ -202,19 +258,98 @@ async def test_identifiers_are_redacted_by_key_and_by_value(
     ]
 
 
+async def test_identifiers_split_across_frame_lines_are_redacted(
+    hass: HomeAssistant,
+    hass_client: ClientSessionGenerator,
+    setup_integration: MockConfigEntry,
+) -> None:
+    """Hex payloads in captured text go, so no part of an identifier split across lines leaks."""
+    coordinator = setup_integration.runtime_data.coordinator
+    coordinator.data.wifi_mac = BURST_WIFI_MAC
+    coordinator.data.serial_number = BURST_SERIAL
+    setup_integration.runtime_data.last_self_test = {
+        "ok": True,
+        "address": ADDRESS,
+        "steps": [{"step": "power_on", "ok": True, "error": None}],
+        "frames": [f"{ADDRESS} rx status plain={chunk} wire={chunk} enc=none" for chunk in BURST],
+        "log": [f"DEBUG {ADDRESS}: dropped frame with bad checksum: {BURST[2]}"],
+    }
+    logging.getLogger("govee_ble_local").warning(
+        "%s: unrecognised frame wire=%s", ADDRESS, BURST[3]
+    )
+
+    diagnostics = await get_diagnostics_for_config_entry(hass, hass_client, setup_integration)
+    dump = json.dumps(diagnostics).lower()
+
+    assert not [fragment for fragment in BURST_FRAGMENTS if fragment in dump]
+    report = diagnostics["last_self_test"]
+    assert report["frames"] == [
+        f"{REDACTED} rx status plain={REDACTED} wire={REDACTED} enc=none"
+    ] * len(BURST)
+    assert report["log"] == [f"DEBUG {REDACTED}: dropped frame with bad checksum: {REDACTED}"]
+    assert diagnostics["recent_warnings"] == [
+        f"WARNING {REDACTED}: unrecognised frame wire={REDACTED}"
+    ]
+    # Only the hex goes: the rest of the report is still readable.
+    assert report["steps"] == [{"step": "power_on", "ok": True, "error": None}]
+
+
+async def test_hex_identifiers_are_redacted_in_either_byte_order(
+    hass: HomeAssistant,
+    hass_client: ClientSessionGenerator,
+    setup_integration: MockConfigEntry,
+) -> None:
+    """A serial matches reversed too, and a reversed MAC with separators, not only compact."""
+    coordinator = setup_integration.runtime_data.coordinator
+    coordinator.data.wifi_mac = BURST_WIFI_MAC
+    coordinator.data.serial_number = BURST_SERIAL
+    uid = list(reversed(BURST_SERIAL.split(":")))
+    wifi_reversed = list(reversed(BURST_WIFI_MAC.split(":")))
+    spellings = [
+        ":".join(uid),
+        "-".join(uid).lower(),
+        ":".join(wifi_reversed),
+        "-".join(wifi_reversed).lower(),
+    ]
+    setup_integration.runtime_data.last_self_test = {
+        "steps": [{"step": "info", "error": f"uid {spelling} rejected"} for spelling in spellings]
+    }
+
+    diagnostics = await get_diagnostics_for_config_entry(hass, hass_client, setup_integration)
+
+    assert [step["error"] for step in diagnostics["last_self_test"]["steps"]] == [
+        f"uid {REDACTED} rejected"
+    ] * len(spellings)
+
+
+async def test_non_hex_identifier_is_scrubbed_as_written(
+    hass: HomeAssistant,
+    hass_client: ClientSessionGenerator,
+    setup_integration: MockConfigEntry,
+) -> None:
+    """A serial that isn't hex has no byte order: it matches as written and without separators."""
+    setup_integration.runtime_data.coordinator.data.serial_number = "GX-0042-QZ"
+    setup_integration.runtime_data.last_self_test = {
+        "log": ["INFO serial GX-0042-QZ", "INFO serial gx0042qz"]
+    }
+
+    diagnostics = await get_diagnostics_for_config_entry(hass, hass_client, setup_integration)
+
+    assert diagnostics["last_self_test"]["log"] == [f"INFO serial {REDACTED}"] * 2
+
+
 async def test_rejected_command_reaches_the_diagnostics(
     hass: HomeAssistant,
     hass_client: ClientSessionGenerator,
     setup_integration: MockConfigEntry,
     mock_device: Device,
-    command_rejected: type[GoveeBleError],
 ) -> None:
     """A command the device refuses shows in recent_warnings, its address scrubbed.
 
     The library logs the rejection only at DEBUG; the line comes from the
     integration's own WARNING.
     """
-    connection(mock_device).error = rejected_write(command_rejected)
+    connection(mock_device).error = rejected_write()
     with pytest.raises(HomeAssistantError):
         await hass.services.async_call(
             "light", "turn_on", {"entity_id": "light.test_ceiling"}, blocking=True
@@ -236,7 +371,7 @@ async def test_short_identifiers_do_not_over_redact(
     coordinator = setup_integration.runtime_data.coordinator
     coordinator.data.serial_number = "7"
     coordinator.data.firmware_version = "1.07.1"
-    coordinator.last_self_test = {
+    setup_integration.runtime_data.last_self_test = {
         "ok": True,
         "address": ADDRESS,
         "steps": [{"step": "rgb", "ok": True, "error": "retry 7 of 17"}],
@@ -271,7 +406,7 @@ async def test_entry_with_only_short_identifiers_is_left_unscrubbed(
     entry.add_to_hass(hass)
     assert await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
-    entry.runtime_data.coordinator.last_self_test = {
+    entry.runtime_data.last_self_test = {
         "address": "A:1",
         "log": ["INFO A:1 and A1 stay readable"],
     }
