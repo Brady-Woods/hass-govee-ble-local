@@ -49,13 +49,11 @@ rules:
       on/off change made just after one isn't lost while polls are off.
       Everything else is polled every 120 s plus jitter: a device whose byte
       isn't heard or has gone stale (re-checked every minute), one no
-      connectable scanner sees, the H60A6 and H60A1 (a disconnect may end a
-      music or group mode started over Wi-Fi; static finding, not yet
-      bench-checked), and every device on a govee-ble-local without the
-      app-matching advertisement parser (the 1.2.1 floor and 1.3.0). Failed
-      polls back off exponentially to 30 min; no more than two background
-      polls run at once integration-wide; the first poll after a restart is
-      staggered per device.
+      connectable scanner sees, and the H60A6 and H60A1 (a disconnect may end
+      a music or group mode started over Wi-Fi; static finding, not yet
+      bench-checked). Failed polls back off exponentially to 30 min; no more
+      than two background polls run at once integration-wide; the first poll
+      after a restart is staggered per device.
   brands:
     status: done
     comment: >

@@ -62,9 +62,9 @@ ADVERT_FLIP_POLL_DELAY_SECONDS = 5
 # device with a fresh byte; without one it keeps the fixed cadence. Just under
 # the 195 s after which Home Assistant's Bluetooth stack treats a connectable
 # device's advertisements as stale (habluetooth's
-# CONNECTABLE_FALLBACK_MAXIMUM_STALE_ADVERTISEMENT_SECONDS, 195 in both 5.6.4
-# and 7.1.2, the versions Home Assistant 2025.10.0 and 2026.10.0 pin; re-exported
-# by homeassistant/components/bluetooth/const.py).
+# CONNECTABLE_FALLBACK_MAXIMUM_STALE_ADVERTISEMENT_SECONDS, 195 in 7.1.2, the
+# version Home Assistant 2026.10.0 pins; re-exported by
+# homeassistant/components/bluetooth/const.py).
 ADVERT_POWER_FRESH_SECONDS = 180
 
 # Models that keep the fixed POLL_INTERVAL_SECONDS cadence (with its jitter and

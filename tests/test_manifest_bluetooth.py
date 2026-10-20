@@ -9,7 +9,6 @@ test_config_flow).
 from __future__ import annotations
 
 from fnmatch import fnmatchcase
-import importlib.metadata
 import json
 from pathlib import Path
 
@@ -19,7 +18,6 @@ from govee_ble_local.identify import sku_from_local_name
 # Home Assistant's own check, run when it builds the matchers: no wildcard in the first
 # LOCAL_NAME_MIN_MATCH_LENGTH (3) characters of a local_name pattern.
 from homeassistant.components.bluetooth.match import _local_name_to_index_key
-from packaging.version import Version
 import pytest
 
 MANIFEST = (
@@ -32,9 +30,6 @@ MATCHERS: list[dict[str, object]] = json.loads(MANIFEST.read_text(encoding="utf-
 MANUFACTURER_IDS = {m["manufacturer_id"] for m in MATCHERS if "manufacturer_id" in m}
 LOCAL_NAMES = {str(m["local_name"]) for m in MATCHERS if "local_name" in m}
 LIBRARY_IDS = set(lib_const.MANUFACTURER_IDS)
-# The manifest follows the library's lists as of govee-ble-local 1.4.0; an older library (the
-# manifest floor) lists fewer IDs, every one of them still matched.
-LIBRARY_IS_CURRENT = Version(importlib.metadata.version("govee-ble-local")) >= Version("1.4.0")
 # HA can't match a prefix shorter than three characters, and the library has one: "GV". The
 # library reads a plain "GV" name the app's way, as "H" + its next four characters
 # (BaseBleProcessor.g), so only "GV" + a digit can name a model ("GV6047..." is an H6047); its own
@@ -70,10 +65,7 @@ def test_local_name_matchers_are_valid_for_home_assistant(pattern: str) -> None:
 
 
 def test_manufacturer_ids_follow_the_library() -> None:
-    if LIBRARY_IS_CURRENT:
-        assert MANUFACTURER_IDS == LIBRARY_IDS
-    else:
-        assert LIBRARY_IDS < MANUFACTURER_IDS
+    assert MANUFACTURER_IDS == LIBRARY_IDS
 
 
 def test_local_names_follow_the_library() -> None:

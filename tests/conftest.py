@@ -81,7 +81,7 @@ class FakeConnection:
         self.error: BaseException | None = None
         self.fail_after: int | None = None
         self.closed = False
-        # The default BLE write size (ATT MTU 23 - 3); newer libraries size
+        # The default BLE write size (ATT MTU 23 - 3); the library sizes
         # multi-packet uploads to it.
         self.write_payload_size = 20
 
@@ -105,7 +105,7 @@ class FakeConnection:
     async def send_unacked(
         self, frames: list[bytes] | Callable[[int], list[bytes]], *, gap: float = 0.03
     ) -> None:
-        # Newer libraries pass a function of the link's write size (MTU-sized uploads).
+        # The library may pass a function of the link's write size (MTU-sized uploads).
         self._write(list(frames(self.write_payload_size) if callable(frames) else frames))
 
     async def query(self, *args: Any, **_kwargs: Any) -> list[bytes]:
@@ -136,14 +136,14 @@ def make_device(
     """Build a real library Device for ``sku`` on a FakeConnection.
 
     ``allow_modelled`` builds an opt-in-only ("modelled") model, as setup does for an entry
-    that opted in; it is passed only when set, so the 1.2.1 floor still builds the rest.
+    that opted in.
     """
     device = create_device(
         BLEDevice(address=address, name=name, details={}),
         sku,
         None,
         secret=secret,
-        **({"allow_modelled": True} if allow_modelled else {}),
+        allow_modelled=allow_modelled,
     )
     device._conn = FakeConnection()  # type: ignore[assignment]
     for method in _WRAPPED_COMMANDS:
@@ -163,14 +163,10 @@ def make_device(
 def runtime_segment_count(count: int) -> Iterator[None]:
     """Give every Device a runtime segment count other than its profile's.
 
-    Newer libraries have ``Device.segment_count`` (set when a device reports its own
-    count); it is patched on the class, so this works on the 1.2.1 floor too, which has
-    no such attribute. Because ``create=True`` makes the attribute, this can't show the
-    library really has it: tests of the real API call ``Device.set_segment_count``.
+    Patches ``Device.segment_count`` (the count a device reports of its own, else the
+    profile's) on the class; tests of the real API call ``Device.set_segment_count``.
     """
-    with patch.object(
-        Device, "segment_count", new_callable=PropertyMock, return_value=count, create=True
-    ):
+    with patch.object(Device, "segment_count", new_callable=PropertyMock, return_value=count):
         yield
 
 
@@ -357,7 +353,7 @@ def modelled() -> ModelledCase:
 
     lib = govee_ble_local
     skus = sorted(set(lib.supported_skus(allow_modelled=True)) - set(lib.supported_skus()))
-    routes = getattr(library_profiles, "_MODELLED", (None, {}))[1]
+    routes = library_profiles._MODELLED[1]
     grid = [(t, c) for t in range(1, 16) for c in range(1, 16)]
     for sku in skus:
         rows = routes.get(sku, ())

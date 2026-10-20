@@ -72,14 +72,11 @@ profile's capabilities:
   byte isn't heard (an H6006 heard only by a passive scanner, which never gets
   its scan response) or has gone stale, one no connectable scanner sees (its
   polls are skipped and counted as before, except within the library's 30 s
-  warm window after a command landed, when they use the link it holds), a
-  model in
-  `EXCLUDED_FROM_ADVERT_POLICY` (H60A6 and H60A1: a disconnect may end a
-  music or group mode started over Wi-Fi; static finding, bench check
-  pending), and every device on a `govee-ble-local` without the
-  app-matching advertisement parser (`DeviceProfile.advert_on_mask`, added
-  after 1.3.0; neither the 1.2.1 floor nor 1.3.0 has it). The policy is
-  re-checked on every advertisement callback and presence tick (every 60 s).
+  warm window after a command landed, when they use the link it holds), and a
+  model in `EXCLUDED_FROM_ADVERT_POLICY` (H60A6 and H60A1: a disconnect may
+  end a music or group mode started over Wi-Fi; static finding, bench check
+  pending). The policy is re-checked on every advertisement callback and
+  presence tick (every 60 s).
   Within a minute of its byte going stale, a device is back on the fixed
   cadence; its first poll follows one base interval (120 s plus up to 30 s of
   jitter) after that.
@@ -144,12 +141,11 @@ On/off comes passively from advertisements. Background polls read the rest:
 none while a light is off or for a relay plug, once 5 s after a light is turned
 on outside Home Assistant, then every 2 min backing off to 15 min while it
 stays on and nothing changes (see Polling above). Devices the policy doesn't
-cover (H60A6, H60A1, a device whose on/off byte isn't heard, one no connectable
-scanner sees, or any device on `govee-ble-local` 1.2.1 or 1.3.0) are polled
-every 120 s. What is read back depends on the model's profile: power,
-brightness, zone power, active scene, colour temperature, per-segment colour
-(where supported) and device info (firmware/hardware version, serial, Wi-Fi
-MAC).
+cover (H60A6, H60A1, a device whose on/off byte isn't heard, or one no
+connectable scanner sees) are polled every 120 s. What is read back depends on
+the model's profile: power, brightness, zone power, active scene, colour
+temperature, per-segment colour (where supported) and device info
+(firmware/hardware version, serial, Wi-Fi MAC).
 
 ## Known limitations
 
