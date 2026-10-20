@@ -16,6 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The tests lose their library-version gates and skips, and a new one pins the window after a
   command or read in which a repeated advertisement isn't offered to the library again. Nothing
   changes on supported versions.
+- Tests and type checks run against Home Assistant 2026.10.2 (`homeassistant==2026.10.2`,
+  `pytest-homeassistant-custom-component==0.13.373`), which pins it exactly, so the two move
+  together. The minimum Home Assistant stays 2026.10.0.
 
 ## [1.5.0] - 2026-10-20
 
