@@ -15,6 +15,7 @@ from collections.abc import Callable, Generator, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import timedelta
+import math
 import time
 from types import SimpleNamespace
 from typing import Any
@@ -296,11 +297,17 @@ def presence() -> Generator[SimpleNamespace]:
 def monotonic(presence: SimpleNamespace, freezer: Any) -> Generator[SimpleNamespace]:
     """Control the Bluetooth stack's monotonic clock, which ages advertisements.
 
-    ``now`` starts at the default advertisement's receive time (just heard).
-    Freezes wall time too, and patches only once frozen: freezegun would
-    otherwise swap its own clock back in when it starts.
+    ``now`` starts at the default advertisement's receive time (just heard),
+    rounded up to a whole second, so the steps tests take (whole and half
+    seconds) add up exactly: from a fractional start, ``+= 30`` can land a
+    rounding error short of a 30 s threshold, which made the threshold tests
+    fail for some starting values. Freezes wall time too, and patches only
+    once frozen: freezegun would otherwise swap its own clock back in when it
+    starts.
     """
-    clock = SimpleNamespace(now=presence.service_info.time)
+    start = float(math.ceil(presence.service_info.time))
+    presence.service_info = make_service_info(seen_at=start)
+    clock = SimpleNamespace(now=start)
     with patch("homeassistant.components.bluetooth.MONOTONIC_TIME", lambda: clock.now):
         yield clock
 
