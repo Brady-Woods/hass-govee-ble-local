@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import dataclasses
-import inspect
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
@@ -41,13 +40,10 @@ def _every_sku() -> list[Any]:
 
     The opt-in list is the library's own (supported_skus with allow_modelled, minus without),
     never a fixed one: an opted-in device is set up through the flow's confirmation, so it gets
-    the same entity checks. A library without the opt-in contributes none, rather than failing
-    the module's collection.
+    the same entity checks.
     """
     default = supported_skus()
-    opt_in: list[str] = []
-    if "allow_modelled" in inspect.signature(supported_skus).parameters:
-        opt_in = sorted(set(supported_skus(allow_modelled=True)) - set(default))
+    opt_in = sorted(set(supported_skus(allow_modelled=True)) - set(default))
     return [
         *(pytest.param(sku, False, id=sku) for sku in default),
         *(pytest.param(sku, True, id=f"{sku}-opted_in") for sku in opt_in),
@@ -147,8 +143,8 @@ async def test_plug_turn_on_and_off(
     assert mock_device.state.is_on is True
     frames = connection(mock_device).sent
     assert frames[0] == build.switch(True, relay=True)
-    # The 33 b5 time sync is the library's business: 1.2.1 sends one after each
-    # relay write, later releases once per connection (as the app does).
+    # The 33 b5 time sync is the library's business: it sends one once per
+    # connection (as the app does).
     assert all(frame[:2] == bytes([0x33, 0xB5]) for frame in frames[1:])
     assert len(frames) <= 2
 

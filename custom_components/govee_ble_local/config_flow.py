@@ -16,16 +16,10 @@ import asyncio
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
-from govee_ble_local import (
-    GoveeBleError,
-    cloud as govee_cloud,
-    create_device,
-    is_supported_sku,
-    profile_for,
-)
-from govee_ble_local.cloud import GoveeCloudAccount, GoveeCloudError
+from govee_ble_local import GoveeBleError, create_device, is_supported_sku, profile_for
+from govee_ble_local.cloud import GoveeCloudAccount, GoveeCloudAuthError, GoveeCloudError
 from govee_ble_local.identify import identify
 from homeassistant.components.bluetooth import (
     BluetoothServiceInfoBleak,
@@ -42,15 +36,7 @@ from homeassistant.helpers.selector import (
     TextSelectorConfig,
     TextSelectorType,
 )
-
-if TYPE_CHECKING:
-    # Home Assistant 2026.10+ types flow schemas as probatio, and at runtime aliases
-    # `voluptuous` to probatio (homeassistant/__init__.py, install_as_voluptuous). The flow
-    # imports voluptuous at runtime, as it did for older Home Assistant (dropping that is a
-    # later cleanup), and type-checks against probatio.
-    import probatio as vol
-else:
-    import voluptuous as vol
+import probatio as vol
 
 from .const import CONF_ALLOW_MODELLED, CONF_CLEAR_SECRET, CONF_SECRET, CONF_SKU, DOMAIN
 from .helpers import BLE_ERRORS, parse_secret
@@ -84,18 +70,6 @@ class _PendingDevice:
     pact: tuple[int, int] | None = None
     # Supported only as "modelled" (allow_modelled): set up only after the user confirms.
     modelled: bool = False
-
-
-class _CloudAuthErrorUnavailable(GoveeCloudError):
-    """Stands in for GoveeCloudAuthError where the library has none; never raised."""
-
-
-# Newer libraries raise GoveeCloudAuthError (a GoveeCloudError) when the account rejects
-# the credentials (HTTP 401/403; any other login failure stays a plain GoveeCloudError);
-# the 1.2.1 floor raises a plain GoveeCloudError for every failure.
-_CLOUD_AUTH_ERROR: type[GoveeCloudError] = getattr(
-    govee_cloud, "GoveeCloudAuthError", _CloudAuthErrorUnavailable
-)
 
 
 class _CloudSecretError(Exception):
@@ -407,7 +381,7 @@ class GoveeBleLocalConfigFlow(ConfigFlow, domain=DOMAIN):
         """Return the secret (hex) of the account device matching ``address``.
 
         Raises _CloudSecretError("invalid_auth") when the account rejects the
-        credentials (only libraries that tell that apart; see _CLOUD_AUTH_ERROR),
+        credentials (the library's GoveeCloudAuthError, for HTTP 401/403),
         _CloudSecretError("cannot_connect") when login/listing otherwise fails and
         _CloudSecretError("secret_not_found") when no matching device has a key.
         """
@@ -415,7 +389,7 @@ class GoveeBleLocalConfigFlow(ConfigFlow, domain=DOMAIN):
         account = GoveeCloudAccount(email, password, session=async_get_clientsession(self.hass))
         try:
             devices = await account.get_devices()
-        except _CLOUD_AUTH_ERROR as err:
+        except GoveeCloudAuthError as err:
             _LOGGER.debug("Govee cloud rejected the credentials: %s", err)
             raise _CloudSecretError("invalid_auth") from err
         except GoveeCloudError as err:

@@ -1,10 +1,5 @@
 """Tests for the advertisement-driven background poll policy (coordinator._async_policy_step).
 
-The policy is on only with a library whose advertisement parser matches the
-Govee app's (``has_app_advert_parser``). These tests force that check either way
-so they run against both the 1.2.1 floor (which lacks it) and newer libraries;
-``test_policy_follows_the_installed_library`` leaves it as installed.
-
 Time moves through :class:`Air`, which ticks the wall, event-loop and Bluetooth
 clocks together and keeps HA's advertisement history as fresh as a device that
 keeps advertising. Like a real device, a test's device advertises its new on/off
@@ -17,13 +12,13 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Generator
 from datetime import timedelta
-import importlib.metadata
 import itertools
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
 from govee_ble_local import Device, GoveeBleAuthError, GoveeBleConnectionError, GoveeBleTimeout
+import govee_ble_local.const as lib_const
 from homeassistant.components.bluetooth import BluetoothChange, BluetoothServiceInfoBleak
 from homeassistant.components.bluetooth.const import (
     CONNECTABLE_FALLBACK_MAXIMUM_STALE_ADVERTISEMENT_SECONDS,
@@ -55,11 +50,7 @@ from custom_components.govee_ble_local.const import (
     UNAVAILABLE_AFTER_FAILURES,
     UNAVAILABLE_AFTER_UNHEARD_SECONDS,
 )
-from custom_components.govee_ble_local.coordinator import (
-    GoveeBleLocalCoordinator,
-    PollPolicy,
-    has_app_advert_parser,
-)
+from custom_components.govee_ble_local.coordinator import GoveeBleLocalCoordinator, PollPolicy
 from custom_components.govee_ble_local.diagnostics import async_get_config_entry_diagnostics
 
 from .conftest import (
@@ -90,22 +81,6 @@ FAILURE_BACKOFF = [BASE, BASE * 2, BASE * 4, BASE * 8, MAX_POLL_INTERVAL_SECONDS
 def device_sku() -> str:
     """A light the policy covers (it advertises its on/off byte in the advertisement)."""
     return "H6008"
-
-
-@pytest.fixture
-def app_parser() -> bool | None:
-    """Whether the library counts as having the app's advertisement parser; None = as installed."""
-    return True
-
-
-@pytest.fixture(autouse=True)
-def advert_parser(app_parser: bool | None) -> Generator[None]:
-    """Force the library feature check (see ``app_parser``)."""
-    if app_parser is None:
-        yield
-        return
-    with patch(f"{COORDINATOR}.has_app_advert_parser", return_value=app_parser):
-        yield
 
 
 @pytest.fixture(autouse=True)
@@ -278,24 +253,22 @@ def reads_power(device: Device) -> None:
 
 
 @pytest.mark.parametrize(
-    ("device_sku", "app_parser", "history", "age", "is_on", "expected"),
+    ("device_sku", "history", "age", "is_on", "expected"),
     [
-        pytest.param("H6008", True, "byte", 0, False, PollPolicy.OFF, id="light_off"),
-        pytest.param("H6008", True, "byte", 0, True, PollPolicy.ON, id="light_on"),
-        pytest.param("H6008", True, "byte", 0, None, PollPolicy.FIXED, id="light_unknown"),
-        pytest.param("H6008", True, "byte", FRESH - 1, False, PollPolicy.OFF, id="nearly_stale"),
-        pytest.param("H6008", True, "byte", FRESH, False, PollPolicy.FIXED, id="stale_off"),
-        pytest.param("H6008", True, "byte", FRESH, True, PollPolicy.FIXED, id="stale_on"),
-        pytest.param("H6008", True, "short", 0, False, PollPolicy.FIXED, id="no_byte"),
-        pytest.param("H6008", True, "no_mfg", 0, False, PollPolicy.FIXED, id="no_mfg"),
-        pytest.param("H6008", True, "none", 0, False, PollPolicy.FIXED, id="no_history"),
-        pytest.param("H5083", True, "byte", 0, False, PollPolicy.RELAY, id="relay_off"),
-        pytest.param("H5083", True, "byte", 0, True, PollPolicy.RELAY, id="relay_on"),
-        pytest.param("H5083", True, "byte", FRESH, True, PollPolicy.FIXED, id="relay_stale"),
-        pytest.param("H60A6", True, "byte", 0, False, PollPolicy.FIXED, id="excluded_off"),
-        pytest.param("H60A6", True, "byte", 0, True, PollPolicy.FIXED, id="excluded_on"),
-        pytest.param("H6008", False, "byte", 0, False, PollPolicy.FIXED, id="old_parser"),
-        pytest.param("H5083", False, "byte", 0, False, PollPolicy.FIXED, id="old_parser_relay"),
+        pytest.param("H6008", "byte", 0, False, PollPolicy.OFF, id="light_off"),
+        pytest.param("H6008", "byte", 0, True, PollPolicy.ON, id="light_on"),
+        pytest.param("H6008", "byte", 0, None, PollPolicy.FIXED, id="light_unknown"),
+        pytest.param("H6008", "byte", FRESH - 1, False, PollPolicy.OFF, id="nearly_stale"),
+        pytest.param("H6008", "byte", FRESH, False, PollPolicy.FIXED, id="stale_off"),
+        pytest.param("H6008", "byte", FRESH, True, PollPolicy.FIXED, id="stale_on"),
+        pytest.param("H6008", "short", 0, False, PollPolicy.FIXED, id="no_byte"),
+        pytest.param("H6008", "no_mfg", 0, False, PollPolicy.FIXED, id="no_mfg"),
+        pytest.param("H6008", "none", 0, False, PollPolicy.FIXED, id="no_history"),
+        pytest.param("H5083", "byte", 0, False, PollPolicy.RELAY, id="relay_off"),
+        pytest.param("H5083", "byte", 0, True, PollPolicy.RELAY, id="relay_on"),
+        pytest.param("H5083", "byte", FRESH, True, PollPolicy.FIXED, id="relay_stale"),
+        pytest.param("H60A6", "byte", 0, False, PollPolicy.FIXED, id="excluded_off"),
+        pytest.param("H60A6", "byte", 0, True, PollPolicy.FIXED, id="excluded_on"),
     ],
 )
 async def test_policy_matrix(
@@ -358,30 +331,6 @@ async def test_h60a1_is_excluded_by_its_sku(
     air.advertise(on=False)
     assert coordinator.poll_policy is PollPolicy.FIXED
     assert nominal(coordinator) == BASE
-
-
-@pytest.mark.parametrize(
-    ("profile", "expected"),
-    [(SimpleNamespace(advert_on_mask=None), True), (SimpleNamespace(relay=False), False)],
-    ids=["has_advert_on_mask", "floor_profile"],
-)
-def test_app_parser_is_detected_from_the_profile(profile: Any, expected: bool) -> None:
-    """The policy needs DeviceProfile.advert_on_mask: the release with the app's header check."""
-    assert has_app_advert_parser(SimpleNamespace(profile=profile)) is expected  # type: ignore[arg-type]
-
-
-@pytest.mark.parametrize("app_parser", [None])
-async def test_policy_follows_the_installed_library(
-    air: Air, coordinator: GoveeBleLocalCoordinator, mock_device: Device
-) -> None:
-    """Unforced: on the 1.2.1 floor every device keeps the fixed cadence; newer ones poll less."""
-    has_mask = hasattr(mock_device.profile, "advert_on_mask")
-    if importlib.metadata.version("govee-ble-local") == "1.2.1":
-        assert not has_mask
-    air.advertise(on=False)
-
-    assert coordinator.poll_policy is (PollPolicy.OFF if has_mask else PollPolicy.FIXED)
-    assert coordinator.polls_scheduled is not has_mask
 
 
 # -- off, and turned on outside HA ------------------------------------------------
@@ -505,6 +454,31 @@ async def test_history_from_before_a_command_is_not_offered_again(
     assert not turn_on_poll_pending(hass, coordinator)
 
 
+async def test_repeats_are_offered_again_only_after_the_librarys_window(
+    hass: HomeAssistant, air: Air, coordinator: GoveeBleLocalCoordinator, mock_device: Device
+) -> None:
+    """A repeat is offered again only once HA received it more than the library's own
+    ADVERT_SUPPRESS_SECONDS after it last talked to the device: one inside the window isn't."""
+    window = lib_const.ADVERT_SUPPRESS_SECONDS
+    assert window == int(window)  # whole-second steps land on either side of it
+    air.advertise(on=True)
+    await light_service(hass, "turn_off")
+    assert coordinator._io_at == air.clock.now
+    await air.wait(window - 1, heard=False)
+    air.advertise(on=True)  # turned back on outside HA, received just inside the window
+    assert mock_device.state.is_on is False  # the library ignored the callback's copy
+
+    with patch.object(
+        mock_device, "ingest_advertisement", wraps=mock_device.ingest_advertisement
+    ) as ingest:
+        coordinator.async_refresh_presence()
+        ingest.assert_not_called()  # received at io_at + window - 1
+        await air.wait(2)  # the device repeats it, received at io_at + window + 1
+        coordinator.async_refresh_presence()
+    ingest.assert_called_once()
+    assert mock_device.state.is_on is True
+
+
 @pytest.mark.parametrize(
     ("device_sku", "step"), [("H6008", PollPolicy.ON), ("H5083", PollPolicy.RELAY)]
 )
@@ -610,15 +584,11 @@ async def test_turned_off_right_after_a_backed_off_poll_is_taken_from_the_repeat
     assert coordinator.update_interval is None
 
 
-@pytest.mark.parametrize(
-    ("device_sku", "app_parser"),
-    [("H6008", False), ("H60A6", True)],
-    ids=["old_parser", "excluded"],
-)
+@pytest.mark.parametrize("device_sku", ["H60A6"])  # excluded: the fixed cadence
 async def test_repeats_are_not_offered_again_outside_the_policy(
     hass: HomeAssistant, air: Air, coordinator: GoveeBleLocalCoordinator, mock_device: Device
 ) -> None:
-    """On the 1.2.1 floor and for an excluded model, only the fixed cadence's polls correct it."""
+    """For an excluded model, only the fixed cadence's polls correct it."""
     air.advertise(on=True)
     await light_service(hass, "turn_off")
     air.advertise(on=False)
@@ -1314,7 +1284,7 @@ def _dropped(mock_bluetooth: SimpleNamespace, presence: SimpleNamespace, last_he
     unavailable_callback(mock_bluetooth, connectable=True)(make_service_info(seen_at=last_heard))
 
 
-@pytest.mark.parametrize("app_parser", [False])  # the fixed cadence
+@pytest.mark.parametrize("device_sku", ["H60A6"])  # excluded: the fixed cadence
 async def test_a_slow_device_gone_unheard_goes_unavailable_within_minutes(
     hass: HomeAssistant,
     air: Air,
@@ -1351,7 +1321,7 @@ async def test_a_slow_device_gone_unheard_goes_unavailable_within_minutes(
     assert air.clock.now - last_heard >= UNAVAILABLE_AFTER_UNHEARD_SECONDS
 
 
-@pytest.mark.parametrize("app_parser", [False])  # the fixed cadence
+@pytest.mark.parametrize("device_sku", ["H60A6"])  # excluded: the fixed cadence
 async def test_a_device_gone_while_its_connects_time_out_is_unavailable_once_ha_drops_it(
     hass: HomeAssistant,
     air: Air,
@@ -1381,7 +1351,7 @@ async def test_a_device_gone_while_its_connects_time_out_is_unavailable_once_ha_
     assert hass.states.get(MAIN_LIGHT).state == STATE_UNAVAILABLE
 
 
-@pytest.mark.parametrize("app_parser", [False])  # the fixed cadence
+@pytest.mark.parametrize("device_sku", ["H60A6"])  # excluded: the fixed cadence
 async def test_a_device_commanded_over_a_held_link_stays_available(
     hass: HomeAssistant,
     air: Air,

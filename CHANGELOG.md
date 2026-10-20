@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- Removed the code that only existed for `govee-ble-local` before 1.5.0 or Home Assistant before
+  2026.10, which 1.5.0 already requires. The config flow catches the library's
+  `GoveeCloudAuthError` directly and imports `probatio` instead of Home Assistant's `voluptuous`
+  alias; segment lights read the library's `Device.segment_count`; the advertisement policy no
+  longer checks for the app-matching advertisement parser, which every supported library has.
+  The tests lose their library-version gates and skips, and a new one pins the window after a
+  command or read in which a repeated advertisement isn't offered to the library again. Nothing
+  changes on supported versions.
 - Tests and type checks run against Home Assistant 2026.10.2 (`homeassistant==2026.10.2`,
   `pytest-homeassistant-custom-component==0.13.373`), which pins it exactly, so the two move
   together. The minimum Home Assistant stays 2026.10.0.
