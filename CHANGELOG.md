@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Tests and type checks run against Home Assistant 2026.10.2 (`homeassistant==2026.10.2`,
+  `pytest-homeassistant-custom-component==0.13.373`), which pins it exactly, so the two move
+  together. The minimum Home Assistant stays 2026.10.0.
+
 ## [1.5.0] - 2026-10-20
 
 Requires `govee-ble-local` 1.5.0 or newer (any 1.x) **from PyPI** and Home Assistant 2026.10+.
