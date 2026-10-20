@@ -16,7 +16,7 @@ ruff==0.17.1
 # (These are NOT runtime requirements of this integration.)
 aiousbwatcher==1.1.2
 pyserial==3.5
-serialx==1.11.0
+serialx==1.14.0
 aioesphomeapi==46.12.1
 dbus-fast==5.2.0
 
