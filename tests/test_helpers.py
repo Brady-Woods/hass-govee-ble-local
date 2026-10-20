@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from bleak.exc import BleakError
 from govee_ble_local import GoveeBleConnectionError, GoveeBleError
 import pytest
@@ -13,8 +15,10 @@ from custom_components.govee_ble_local.helpers import (
     clean_text,
     parse_secret,
     pct_to_brightness,
+    segment_count,
 )
 
+from .conftest import make_device, runtime_segment_count
 from .const import SECRET_HEX
 
 
@@ -51,6 +55,12 @@ def test_pct_to_brightness(pct: int, brightness: int) -> None:
     assert pct_to_brightness(pct) == brightness
 
 
+@pytest.mark.parametrize(("pct", "brightness"), [(101, 255), (150, 255), (255, 255), (-5, 0)])
+def test_pct_to_brightness_clamps_out_of_range_readback(pct: int, brightness: int) -> None:
+    """A read-back percent outside 0..100 can't become a brightness outside 0..255."""
+    assert pct_to_brightness(pct) == brightness
+
+
 @pytest.mark.parametrize(("brightness", "pct"), [(255, 100), (128, 50), (127, 50)])
 def test_brightness_to_pct(brightness: int, pct: int) -> None:
     """HA brightness maps onto a device percent."""
@@ -83,10 +93,14 @@ def test_parse_secret_blank(raw: str) -> None:
         "A1:B2:C3:D4:E5:F6:07:18",
         "a1 b2 c3 d4 e5 f6 07 18",
         f"  {SECRET_HEX.upper()}  ",
+        "A1-B2-C3-D4-E5-F6-07-18",
+        "a1b2c3d4\te5f60718",
+        "a1b2\nc3d4\r\ne5f6\x0b0718",
     ],
+    ids=["plain", "upper", "colons", "spaces", "padded", "dashes", "tab", "line_breaks"],
 )
 def test_parse_secret_normalizes(raw: str) -> None:
-    """Case, colons, spaces and surrounding whitespace are normalized away."""
+    """Case, separators and whitespace anywhere are normalized away (not stored)."""
     assert parse_secret(raw) == SECRET_HEX
 
 
@@ -114,3 +128,17 @@ def test_ble_errors_catches_subclasses() -> None:
     """A library subclass is caught by BLE_ERRORS in an except clause."""
     with pytest.raises(BLE_ERRORS):
         raise GoveeBleConnectionError("nope")
+
+
+def test_segment_count_prefers_the_devices_runtime_count() -> None:
+    """The library's runtime count wins over the profile's static one."""
+    device = make_device("H60A6")
+    assert segment_count(device) == device.profile.segments == 13
+    with runtime_segment_count(10):
+        assert segment_count(device) == 10
+
+
+def test_segment_count_falls_back_to_the_profile() -> None:
+    """A library without ``Device.segment_count`` (the 1.2.1 floor) uses the profile's."""
+    device = SimpleNamespace(profile=SimpleNamespace(segments=7))
+    assert segment_count(device) == 7  # type: ignore[arg-type]

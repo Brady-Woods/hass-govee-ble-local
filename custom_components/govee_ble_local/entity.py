@@ -3,20 +3,20 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Coroutine
+from collections.abc import AsyncIterator, Coroutine
+from contextlib import asynccontextmanager
 import logging
 from typing import TYPE_CHECKING, Any
 
 from govee_ble_local import GoveeBleAuthError, GoveeBleNotSupported
-from homeassistant.const import CONF_ADDRESS
-from homeassistant.core import callback
+from homeassistant.const import CONF_ADDRESS, EntityCategory
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
-from homeassistant.helpers.device_registry import CONNECTION_BLUETOOTH, DeviceInfo
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import COMMAND_TIMEOUT_SECONDS, DOMAIN, MANUFACTURER, ZONE_TRANSLATION_KEYS
+from .const import COMMAND_TIMEOUT_SECONDS, DOMAIN, ZONE_TRANSLATION_KEYS
 from .coordinator import GoveeBleLocalCoordinator
-from .helpers import BLE_ERRORS
+from .helpers import BLE_ERRORS, async_secret_rejected
 
 if TYPE_CHECKING:
     from . import GoveeBleLocalConfigEntry
@@ -36,16 +36,10 @@ class GoveeBleLocalEntity(CoordinatorEntity[GoveeBleLocalCoordinator]):
         self._address: str = entry.data[CONF_ADDRESS]
         self._device_name = entry.title
         self._attr_unique_id = f"{self._address}_{key}"
-        # Read-back device info (versions, serial, Wi-Fi MAC) is kept current
-        # by __init__._async_track_device_registry, not here: entity device info
-        # is only applied when the entity is added.
-        self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, self._address)},
-            connections={(CONNECTION_BLUETOOTH, self._address)},
-            name=entry.title,
-            manufacturer=MANUFACTURER,
-            model=self._device.sku,
-        )
+        # Only link to the device: __init__._async_track_device_registry creates
+        # its registry record before the platforms load and keeps it current (a
+        # second copy of the fields here would be re-applied on every entity add).
+        self._attr_device_info = DeviceInfo(identifiers={(DOMAIN, self._address)})
 
     @property
     def available(self) -> bool:
@@ -59,15 +53,25 @@ class GoveeBleLocalEntity(CoordinatorEntity[GoveeBleLocalCoordinator]):
         else:
             self._attr_name = zone_name
 
-    @callback
-    def _async_publish_command_state(self) -> None:
-        """Push optimistic state after a command to EVERY entity of this device.
+    @asynccontextmanager
+    async def _command(self) -> AsyncIterator[None]:
+        """Wrap a command's device calls; then push state to EVERY entity of this device.
 
         A command often changes state other entities show (whole-fixture off
         turns the zone lights/switches off too), so writing only this entity's
-        state would leave its siblings stale until the next poll.
+        state would leave its siblings stale until the next poll. It is pushed
+        after a failure part-way too: the library already applied what landed.
+        The coordinator also notes that HA talked to the device (see
+        ``async_note_device_io``), and holds background polls off while the
+        command runs and for a while after (``commands_holding_off``).
         """
-        self.coordinator.async_publish_device_state()
+        self.coordinator.async_note_command_started()
+        try:
+            yield
+        finally:
+            self.coordinator.async_note_command_finished()
+            self.coordinator.async_note_device_io()
+            self.coordinator.async_publish_device_state()
 
     async def _run_client_command[T](self, coro: Coroutine[Any, Any, T]) -> T:
         """Run a device BLE call with a deadline, translating its failures.
@@ -75,18 +79,14 @@ class GoveeBleLocalEntity(CoordinatorEntity[GoveeBleLocalCoordinator]):
         A rejected secret starts reauth; an unsupported request is the caller's
         mistake (ServiceValidationError); a BleakError, a library GoveeBleError
         or a timeout becomes a clean "could not communicate" error instead of a
-        raw traceback in the service-call toast.
+        raw traceback in the service-call toast. A command that lands tells the
+        coordinator the link works again (it drops any poll backoff).
         """
         try:
             async with asyncio.timeout(COMMAND_TIMEOUT_SECONDS):
-                return await coro
+                result = await coro
         except GoveeBleAuthError as err:
-            self.coordinator.config_entry.async_start_reauth(self.hass)
-            raise HomeAssistantError(
-                translation_domain=DOMAIN,
-                translation_key="secret_rejected",
-                translation_placeholders={"device_name": self._device_name},
-            ) from err
+            raise async_secret_rejected(self.hass, self.coordinator.config_entry) from err
         except GoveeBleNotSupported as err:
             raise ServiceValidationError(
                 translation_domain=DOMAIN,
@@ -104,3 +104,27 @@ class GoveeBleLocalEntity(CoordinatorEntity[GoveeBleLocalCoordinator]):
                     "error": str(err) or type(err).__name__,
                 },
             ) from err
+        self.coordinator.async_handle_command_success()
+        return result
+
+
+class GoveeBleLocalDiagnosticEntity(GoveeBleLocalEntity):
+    """Base for the read-only diagnostic entities (no BLE I/O of their own).
+
+    They also follow the coordinator's diagnostic-only channel, and stay
+    available while the device is unreachable: that's when they matter.
+    """
+
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    async def async_added_to_hass(self) -> None:
+        """Also follow the coordinator's diagnostic-only updates."""
+        await super().async_added_to_hass()
+        self.async_on_remove(
+            self.coordinator.async_add_diagnostic_listener(self.async_write_ha_state)
+        )
+
+    @property
+    def available(self) -> bool:
+        """Report even when the device is unreachable (that's the interesting case)."""
+        return True

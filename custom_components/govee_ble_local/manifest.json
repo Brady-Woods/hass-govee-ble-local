@@ -5,10 +5,22 @@
     { "manufacturer_id": 34817 },
     { "manufacturer_id": 34818 },
     { "manufacturer_id": 34819 },
+    { "manufacturer_id": 34881 },
+    { "manufacturer_id": 34882 },
     { "manufacturer_id": 34883 },
     { "local_name": "ihoment_*" },
     { "local_name": "Govee_*" },
     { "local_name": "Minger_*" },
+    { "local_name": "GV0*" },
+    { "local_name": "GV1*" },
+    { "local_name": "GV2*" },
+    { "local_name": "GV3*" },
+    { "local_name": "GV4*" },
+    { "local_name": "GV5*" },
+    { "local_name": "GV6*" },
+    { "local_name": "GV7*" },
+    { "local_name": "GV8*" },
+    { "local_name": "GV9*" },
     { "local_name": "GVH*" },
     { "local_name": "GVR*" },
     { "local_name": "GBK_*" }
@@ -22,6 +34,6 @@
   "issue_tracker": "https://github.com/Brady-Woods/hass-govee-ble-local/issues",
   "loggers": ["bleak", "bleak_retry_connector", "govee_ble_local"],
   "quality_scale": "gold",
-  "requirements": ["govee-ble-local>=1.2.1,<2"],
-  "version": "1.4.1"
+  "requirements": ["govee-ble-local>=1.5.0,<2"],
+  "version": "1.5.0"
 }

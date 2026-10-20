@@ -5,27 +5,35 @@ Pure standard library (zlib) — no Pillow. Produces transparent-cornered RGBA P
   icon.png       256x256   icon@2x.png   512x512   (square)
   logo.png       256x128   logo@2x.png   512x256   (rectangular)
 
-These are intentionally generic placeholders — replace them with real artwork before
-submitting to https://github.com/home-assistant/brands (see README.md in this folder).
+These are intentionally generic placeholders — replace them with real artwork (see
+README.md in this folder). Every asset is written to both copies the repo tracks: the one
+that ships, custom_components/govee_ble_local/brand/ (Home Assistant 2026.3+ serves it), and
+the staging copy in this folder. Keep the two identical; tests/test_brand_assets.py checks.
 
     python3 brands/make_placeholders.py
 """
+
 from __future__ import annotations
 
+import math
 import pathlib
 import struct
 import zlib
 
 # Govee-ish blue tile + soft white mark. Tweak freely.
-TILE = (37, 99, 235, 255)      # #2563EB
+TILE = (37, 99, 235, 255)  # #2563EB
 MARK = (255, 255, 255, 235)
 
 # Geometry, as fractions of the shorter side.
-MARGIN = 0.06          # tile inset from the canvas edge
-CORNER_RADIUS = 0.22   # tile corner radius
-RING_RADIUS = 0.26     # outer radius of the hollow ring mark
+MARGIN = 0.06  # tile inset from the canvas edge
+CORNER_RADIUS = 0.22  # tile corner radius
+RING_RADIUS = 0.26  # outer radius of the hollow ring mark
 RING_THICKNESS = 0.045
-DOT_RADIUS = 0.06      # solid centre dot
+DOT_RADIUS = 0.06  # solid centre dot
+
+HERE = pathlib.Path(__file__).resolve().parent
+# The shipped copy first, then the staging copy next to this script.
+OUT_DIRS = (HERE.parent / "custom_components" / "govee_ble_local" / "brand", HERE)
 
 SIZES = {
     "icon.png": (256, 256),
@@ -39,14 +47,15 @@ def _png(width: int, height: int, pixels: bytes) -> bytes:
     """Encode raw filtered RGBA scanlines as a PNG file."""
 
     def chunk(tag: bytes, data: bytes) -> bytes:
-        return (struct.pack(">I", len(data)) + tag + data
-                + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF))
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data))
 
     ihdr = struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0)  # 8-bit RGBA
-    return (b"\x89PNG\r\n\x1a\n"
-            + chunk(b"IHDR", ihdr)
-            + chunk(b"IDAT", zlib.compress(pixels, 9))
-            + chunk(b"IEND", b""))
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", ihdr)
+        + chunk(b"IDAT", zlib.compress(pixels, 9))
+        + chunk(b"IEND", b"")
+    )
 
 
 def _in_rounded_rect(
@@ -72,23 +81,24 @@ def render(width: int, height: int) -> bytes:
     dot = s * DOT_RADIUS
     rows = bytearray()
     for py in range(height):
-        rows.append(0)                # PNG filter: none
+        rows.append(0)  # PNG filter: none
         for px in range(width):
             x, y = px + 0.5, py + 0.5
             pixel: tuple[int, int, int, int] = (0, 0, 0, 0)
             if _in_rounded_rect(x, y, tile, s * CORNER_RADIUS):
-                d = ((x - ccx) ** 2 + (y - ccy) ** 2) ** 0.5
+                d = math.hypot(x - ccx, y - ccy)
                 pixel = MARK if ring_inner <= d <= ring_outer or d <= dot else TILE
             rows.extend(pixel)
     return _png(width, height, bytes(rows))
 
 
 def main() -> None:
-    """Write every placeholder asset next to this script."""
-    here = pathlib.Path(__file__).parent
+    """Write every placeholder asset into each folder in ``OUT_DIRS``."""
     for name, (w, h) in SIZES.items():
-        (here / name).write_bytes(render(w, h))
-        print("wrote", name, f"{w}x{h}")
+        png = render(w, h)
+        for out_dir in OUT_DIRS:
+            (out_dir / name).write_bytes(png)
+            print("wrote", out_dir / name, f"{w}x{h}")
 
 
 if __name__ == "__main__":

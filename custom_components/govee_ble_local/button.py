@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 from homeassistant.components.button import ButtonEntity
 from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .entity import GoveeBleLocalEntity
 from .services import async_self_test_entry
@@ -25,7 +25,7 @@ PARALLEL_UPDATES = 1
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: GoveeBleLocalConfigEntry,
-    async_add_entities: AddEntitiesCallback,
+    async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
     """Set up the per-device self-test button."""
     async_add_entities([GoveeBleLocalSelfTestButton(entry)])
@@ -44,11 +44,10 @@ class GoveeBleLocalSelfTestButton(GoveeBleLocalEntity, ButtonEntity):
     def __init__(self, entry: GoveeBleLocalConfigEntry) -> None:
         """Initialize the self-test button."""
         super().__init__(entry, "self_test")
-        self._entry = entry
 
     async def async_press(self) -> None:
         """Run the self-test and log a one-line summary."""
-        report = await async_self_test_entry(self.hass, self._entry)
+        report = await async_self_test_entry(self.hass, self.coordinator.config_entry)
         passed = sum(1 for s in report["steps"] if s["ok"])
         _LOGGER.info(
             "%s self-test: %s (%d/%d steps ok, %d frames captured%s)",

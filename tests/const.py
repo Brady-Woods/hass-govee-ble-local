@@ -22,4 +22,11 @@ def govee_mfg(*, on: bool | None = True) -> dict[int, bytes]:
     return {GOVEE_COMPANY_ID: payload}
 
 
+def pact_mfg(pact_type: int, pact_code: int) -> dict[int, bytes]:
+    """Govee manufacturer data advertising ``(pact_type, pact_code)``, switched on."""
+    return {
+        GOVEE_COMPANY_ID: bytes([0xEC, pact_type >> 8, pact_type & 0xFF, pact_code, 0x01, 0x00])
+    }
+
+
 SECRET_HEX = "a1b2c3d4e5f60718"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import DEFAULT
 
@@ -73,7 +74,7 @@ async def test_press_runs_self_test_stores_report_and_logs_summary(
     with caplog.at_level(logging.INFO, logger=BUTTON_LOGGER):
         await _press(hass)
 
-    report = setup_integration.runtime_data.coordinator.last_self_test
+    report = setup_integration.runtime_data.last_self_test
     assert report is not None
     assert report["sku"] == "H60A6"
     assert report["address"] == ADDRESS
@@ -100,7 +101,7 @@ async def test_press_logs_fail_when_a_step_fails(
     with caplog.at_level(logging.INFO, logger=BUTTON_LOGGER):
         await _press(hass)
 
-    report = setup_integration.runtime_data.coordinator.last_self_test
+    report = setup_integration.runtime_data.last_self_test
     assert report is not None
     total = len(report["steps"])
     assert _summaries(caplog) == [
@@ -130,7 +131,7 @@ async def test_press_warns_when_state_was_not_fully_restored(
     with caplog.at_level(logging.INFO, logger=BUTTON_LOGGER):
         await _press(hass)
 
-    report = setup_integration.runtime_data.coordinator.last_self_test
+    report = setup_integration.runtime_data.last_self_test
     assert report is not None
     assert report["restored"] is False
     [summary] = _summaries(caplog)
@@ -149,7 +150,29 @@ async def test_press_while_another_self_test_runs_is_a_busy_error(
     assert exc_info.value.translation_domain == DOMAIN
     assert exc_info.value.translation_key == "self_test_busy"
     mock_device.set_power.assert_not_awaited()
-    assert setup_integration.runtime_data.coordinator.last_self_test is None
+    assert setup_integration.runtime_data.last_self_test is None
+
+
+async def test_press_fails_fast_when_no_scanner_sees_the_device(
+    hass: HomeAssistant,
+    setup_integration: MockConfigEntry,
+    mock_device: Device,
+    presence: SimpleNamespace,
+) -> None:
+    """A device no connectable scanner hears is refused up front: nothing is sent or read."""
+    presence.connectable = False
+    mock_device.update.reset_mock()  # type: ignore[attr-defined]
+
+    with pytest.raises(HomeAssistantError) as exc_info:
+        await _press(hass)
+
+    assert exc_info.value.translation_domain == DOMAIN
+    assert exc_info.value.translation_key == "self_test_device_not_found"
+    assert exc_info.value.translation_placeholders == {"device_name": "Test Ceiling"}
+    mock_device.update.assert_not_awaited()  # type: ignore[attr-defined]
+    mock_device.set_power.assert_not_awaited()
+    assert setup_integration.runtime_data.last_self_test is None
+    assert setup_integration.runtime_data.self_test is None
 
 
 async def test_press_with_rejected_secret_starts_reauth(
@@ -164,7 +187,7 @@ async def test_press_with_rejected_secret_starts_reauth(
 
     assert exc_info.value.translation_key == "secret_rejected"
     assert exc_info.value.translation_placeholders == {"device_name": "Test Ceiling"}
-    assert setup_integration.runtime_data.coordinator.last_self_test is None
+    assert setup_integration.runtime_data.last_self_test is None
     flows = hass.config_entries.flow.async_progress_by_handler(DOMAIN)
     assert [(f["context"]["source"], f["context"]["entry_id"]) for f in flows] == [
         (SOURCE_REAUTH, setup_integration.entry_id)

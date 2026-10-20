@@ -1,12 +1,16 @@
 # Brand assets (PLACEHOLDERS — replace before publishing)
 
 These are **generic placeholder** images so the layout/sizing is correct. Replace them with real
-Govee-BLE-Local artwork before submitting to Home Assistant. They were produced by
+Govee-BLE-Local artwork before any submission to Home Assistant. They were produced by
 `make_placeholders.py` (pure stdlib, no Pillow); regenerate with:
 
 ```sh
 python3 brands/make_placeholders.py
 ```
+
+The script writes every image twice: into `custom_components/govee_ble_local/brand/` (the copy
+that ships) and into this folder. Real artwork must go into both as well;
+`tests/test_brand_assets.py` fails when the two copies differ.
 
 ## Files & sizes (match the home-assistant/brands spec)
 
@@ -21,8 +25,12 @@ Requirements when you replace them: PNG with transparency, trimmed (minimal padd
 optimized (e.g. `pngquant`/`optipng`). Icons must be square.
 
 ## Where they go
-Home Assistant loads brand images from the **[home-assistant/brands](https://github.com/home-assistant/brands)**
-repo, not from here. For a custom integration, submit them under:
+Home Assistant 2026.3 and later serves the images bundled with the integration, from
+`custom_components/govee_ble_local/brand/`, so they arrive with every install (HACS included).
+Releases before 2026.3 (which this integration no longer supports) only look them up on the
+**[home-assistant/brands](https://github.com/home-assistant/brands)** CDN, which has none for this
+integration, so they show Home Assistant's generic placeholder. That repo now treats its
+`custom_integrations` folder as legacy; a PR there would add the files from `brand/` as:
 
 ```
 custom_integrations/govee_ble_local/icon.png
@@ -31,5 +39,6 @@ custom_integrations/govee_ble_local/logo.png
 custom_integrations/govee_ble_local/logo@2x.png
 ```
 
-This folder is a staging area so the assets live with the repo and can be dropped into a
-brands PR. The `brands` quality-scale rule stays **todo** until real assets are accepted upstream.
+This folder is a staging copy that lives next to the generator. `quality_scale.yaml` marks the
+`brands` rule done for the bundled `brand/` folder; the artwork is still a placeholder (no Govee
+trademarks) and has to be replaced before any core submission.

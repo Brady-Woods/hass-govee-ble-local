@@ -3,40 +3,62 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Generator
 import dataclasses
+import importlib.metadata
+import logging
+import time
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import PropertyMock, patch
 
+from bleak.backends.device import BLEDevice
 from bleak.exc import BleakError
 from govee_ble_local import (
     Capability,
     Device,
     GoveeBleAuthError,
     GoveeBleConnectionError,
+    GoveeBleError,
     GoveeBleHandshakeError,
     GoveeBleNotSupported,
     GoveeBleTimeout,
     Segment,
+    create_device,
+    profile_for,
+    supported_skus,
 )
 from govee_ble_local.wire import build
+from homeassistant.components.bluetooth import BluetoothChange
 from homeassistant.components.light import DATA_COMPONENT
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.const import STATE_OFF, STATE_ON, STATE_UNAVAILABLE, STATE_UNKNOWN
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import entity_registry as er
+from packaging.version import Version
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.govee_ble_local.const import (
+    CONF_ALLOW_MODELLED,
+    CONF_SKU,
+    DEFAULT_MAX_KELVIN,
+    DEFAULT_MIN_KELVIN,
     DOMAIN,
     UNAVAILABLE_AFTER_FAILURES,
+    ZONE_STATE_FRESH_SECONDS,
 )
+from custom_components.govee_ble_local.helpers import segment_count
 
-from .conftest import connection, make_device
-from .const import ADDRESS
+from .conftest import (
+    FakeConnection,
+    advertisement_callback,
+    connection,
+    make_device,
+    make_service_info,
+    runtime_segment_count,
+)
+from .const import ADDRESS, TITLE, pact_mfg
 
 MAIN = "light.test_ceiling"
 AURORA = 19074  # H60A6 scene code of "Aurora"
@@ -44,27 +66,55 @@ BLACK = (0, 0, 0)
 RED = (255, 0, 0)
 GREEN = (0, 255, 0)
 WHITE = (255, 255, 255)
+# Device.segment_count / set_segment_count arrived in govee-ble-local 1.3.0.
+HAS_RUNTIME_SEGMENT_COUNT = Version(importlib.metadata.version("govee-ble-local")) >= Version(
+    "1.3.0"
+)
+# Library releases after 1.3.0 give the H61A8 colour temperature and per-segment brightness.
+H61A8_HAS_CCT = Capability.COLOR_TEMP in make_device("H61A8").capabilities
+# ...and a range that depends on its hardware version (kelvin_by_hardware), known only once read.
+H61A8_RANGE_BY_HARDWARE = bool(getattr(make_device("H61A8").profile, "kelvin_by_hardware", ()))
+
+# Colour-temperature ranges to run the range-dependent tests over: one unlike
+# DEFAULT_MIN/MAX_KELVIN (so the device's own range is told apart from the
+# fallback), and a profile that gives none (so the fallback is what applies).
+KELVIN_RANGES = pytest.mark.parametrize(
+    ("kelvin_range", "lo", "hi"),
+    [((2200, 7000), 2200, 7000), ((None, None), DEFAULT_MIN_KELVIN, DEFAULT_MAX_KELVIN)],
+    ids=["device_range", "fallback_range"],
+)
 
 
 # -- helpers --------------------------------------------------------------------------
 
 
 @pytest.fixture
-async def entry(setup_integration: MockConfigEntry) -> MockConfigEntry:
-    """The loaded entry, with the (background) first poll already finished."""
-    if (task := setup_integration.runtime_data.first_poll) is not None:
-        await task
-    return setup_integration
+def kelvin_range() -> tuple[int | None, int | None] | None:
+    """The (min, max) kelvin to give the device's profile; None keeps the library's."""
+    return None
 
 
 @pytest.fixture
-def entity_registry_enabled_by_default() -> Generator[None]:
-    """Register entities that default to disabled (segment lights) as enabled."""
-    with patch(
-        "homeassistant.helpers.entity.Entity.entity_registry_enabled_default",
-        return_value=True,
-    ):
-        yield
+def drop_capabilities() -> frozenset[Capability]:
+    """Capabilities to remove from the device's profile (e.g. to model an RGB-only fixture)."""
+    return frozenset()
+
+
+@pytest.fixture
+def mock_device(
+    mock_device: Device,
+    kelvin_range: tuple[int | None, int | None] | None,
+    drop_capabilities: frozenset[Capability],
+) -> Device:
+    """The shared test device, its profile's kelvin range or capabilities replaced on request."""
+    if kelvin_range is not None:
+        lo, hi = kelvin_range
+        mock_device.profile = dataclasses.replace(mock_device.profile, min_kelvin=lo, max_kelvin=hi)
+    if drop_capabilities:
+        mock_device.profile = dataclasses.replace(
+            mock_device.profile, capabilities=mock_device.profile.capabilities - drop_capabilities
+        )
+    return mock_device
 
 
 @pytest.fixture
@@ -125,6 +175,28 @@ def _lights(hass: HomeAssistant, entry: MockConfigEntry) -> dict[str, er.Registr
     }
 
 
+def _kelvin_ranges(hass: HomeAssistant, *entity_ids: str) -> dict[str, tuple[int, int]]:
+    """The (min, max) kelvin each light publishes, in its state and in the entity registry.
+
+    Keyed "<entity id> state" / "<entity id> registry", so a failed comparison names the
+    light, and the place, still showing a stale range.
+    """
+    registry = er.async_get(hass)
+    ranges: dict[str, tuple[int, int]] = {}
+    for entity_id in entity_ids:
+        attrs = hass.states.get(entity_id).attributes
+        caps = registry.async_get(entity_id).capabilities or {}
+        ranges[f"{entity_id} state"] = (
+            attrs["min_color_temp_kelvin"],
+            attrs["max_color_temp_kelvin"],
+        )
+        ranges[f"{entity_id} registry"] = (
+            caps["min_color_temp_kelvin"],
+            caps["max_color_temp_kelvin"],
+        )
+    return ranges
+
+
 async def _setup_custom(
     hass: HomeAssistant,
     entry: MockConfigEntry,
@@ -135,9 +207,7 @@ async def _setup_custom(
     entry.add_to_hass(hass)
     with patch("custom_components.govee_ble_local.create_device", return_value=device):
         assert await hass.config_entries.async_setup(entry.entry_id)
-        await hass.async_block_till_done()
-    if (task := entry.runtime_data.first_poll) is not None:
-        await task
+        await hass.async_block_till_done(wait_background_tasks=True)
     return entry
 
 
@@ -216,14 +286,60 @@ async def test_h6047_has_ten_segment_lights(hass: HomeAssistant, entry: MockConf
     assert len(lights) == 13
 
 
-async def test_main_light_supported_features(hass: HomeAssistant, entry: MockConfigEntry) -> None:
+async def test_segment_lights_follow_a_count_known_at_setup(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_bluetooth: SimpleNamespace
+) -> None:
+    """A runtime segment count already known at platform setup sets the segment lights.
+
+    Today the library only learns a device's own count on a poll, and the first poll
+    runs after platform setup, so this covers only a count given before setup.
+    """
+    device = make_device("H60A6")
+    assert device.profile.segments == 13
+    with runtime_segment_count(10):
+        await _setup_custom(hass, mock_config_entry, device, mock_bluetooth)
+
+    lights = _lights(hass, mock_config_entry)
+    assert {u for u in lights if "_segment_" in u} == {f"{ADDRESS}_segment_{i}" for i in range(10)}
+
+
+@pytest.mark.skipif(
+    not HAS_RUNTIME_SEGMENT_COUNT, reason="Device.segment_count arrived in govee-ble-local 1.3.0"
+)
+async def test_segment_lights_use_the_librarys_set_segment_count(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_bluetooth: SimpleNamespace
+) -> None:
+    """On a library with a runtime count, the real API (not a patch) sets the lights.
+
+    Gated on the installed version rather than ``hasattr``, so a library that renamed or
+    dropped ``Device.segment_count`` fails here instead of the getattr in
+    ``helpers.segment_count`` quietly falling back to the profile count.
+    """
+    assert isinstance(getattr(Device, "segment_count", None), property)
+    device = make_device("H60A6")
+    device.set_segment_count(10)
+    assert segment_count(device) == 10
+
+    await _setup_custom(hass, mock_config_entry, device, mock_bluetooth)
+
+    lights = _lights(hass, mock_config_entry)
+    assert {u for u in lights if "_segment_" in u} == {f"{ADDRESS}_segment_{i}" for i in range(10)}
+
+
+@KELVIN_RANGES
+async def test_main_light_supported_features(
+    hass: HomeAssistant, entry: MockConfigEntry, lo: int, hi: int
+) -> None:
     """The main light advertises RGB + colour temp, the device's kelvin range and effects."""
     _seed(entry, is_on=True)
     attrs = hass.states.get(MAIN).attributes
     assert set(attrs["supported_color_modes"]) == {"rgb", "color_temp"}
-    assert (attrs["min_color_temp_kelvin"], attrs["max_color_temp_kelvin"]) == (2700, 6500)
+    assert (attrs["min_color_temp_kelvin"], attrs["max_color_temp_kelvin"]) == (lo, hi)
     assert attrs["effect_list"][0] == "off"
     assert "Aurora" in attrs["effect_list"]
+    # The zone lights advertise the same range.
+    zone = hass.states.get(_zone(hass, "main")).attributes
+    assert (zone["min_color_temp_kelvin"], zone["max_color_temp_kelvin"]) == (lo, hi)
 
 
 # -- 2. main light power logic --------------------------------------------------------
@@ -348,15 +464,19 @@ async def test_colour_temp_state(hass: HomeAssistant, entry: MockConfigEntry) ->
     assert entry.runtime_data.device.state.rgb_color is None
 
 
-@pytest.mark.parametrize(("requested", "expected"), [(9000, 6500), (1000, 2700), (3500, 3500)])
+@KELVIN_RANGES
+@pytest.mark.parametrize("requested", [9000, 1000, 3500])
 async def test_kelvin_is_clamped_to_device_range(
     hass: HomeAssistant,
     entry: MockConfigEntry,
     mock_device: Device,
+    *,
+    lo: int,
+    hi: int,
     requested: int,
-    expected: int,
 ) -> None:
     """Out-of-range kelvin is clamped to the device's range before it is sent."""
+    expected = {9000: hi, 1000: lo, 3500: 3500}[requested]
     _seed(entry, is_on=True)
     await _call(hass, "turn_on", MAIN, color_temp_kelvin=requested)
     assert mock_device.turn_on.await_args.kwargs["kelvin"] == expected
@@ -422,6 +542,54 @@ async def test_unknown_effect_is_rejected(
     mock_device.turn_on.assert_not_awaited()
     mock_device.set_scene_by_name.assert_not_awaited()
     assert hass.states.get(MAIN).state == STATE_OFF
+
+
+async def test_effect_list_follows_the_device_on_each_update(
+    hass: HomeAssistant, entry: MockConfigEntry, mock_device: Device
+) -> None:
+    """Scenes the device stops offering (its scene set, read after setup) leave the effect list."""
+    full = list(mock_device.scene_names)
+    assert hass.states.get(MAIN).attributes["effect_list"] == ["off", *full]
+    dropped = full[-1]
+    light = hass.data[DATA_COMPONENT].get_entity(MAIN)
+    light._optimistic_effect = dropped  # as if it had just been activated
+
+    offered = full[: len(full) // 2]
+    with patch.object(Device, "scene_names", new_callable=PropertyMock, return_value=offered):
+        entry.runtime_data.coordinator.async_publish_device_state()
+        await hass.async_block_till_done()
+
+        assert hass.states.get(MAIN).attributes["effect_list"] == ["off", *offered]
+        capabilities = er.async_get(hass).async_get(MAIN).capabilities
+        assert capabilities["effect_list"] == ["off", *offered]
+        assert light._optimistic_effect is None  # no longer one the device offers
+        with pytest.raises(ServiceValidationError):
+            await _call(hass, "turn_on", MAIN, effect=dropped)
+    mock_device.set_scene_by_name.assert_not_awaited()
+
+
+async def test_a_scene_dropped_since_the_last_update_is_refused_before_any_write(
+    hass: HomeAssistant, entry: MockConfigEntry, mock_device: Device
+) -> None:
+    """The library stops offering a scene before the light has heard (a poll read the
+    device's versions, its update not yet published): turning the light on with it is
+    refused with nothing sent, not after the power-on went out."""
+    _seed(entry, is_on=False)
+    full = list(mock_device.scene_names)
+    dropped = full[-1]
+    assert dropped in hass.states.get(MAIN).attributes["effect_list"]
+    with (
+        patch.object(Device, "scene_names", new_callable=PropertyMock, return_value=full[:-1]),
+        pytest.raises(ServiceValidationError) as exc,
+    ):
+        await _call(hass, "turn_on", MAIN, effect=dropped)
+    assert exc.value.translation_key == "unknown_effect"
+    assert connection(mock_device).sent == []
+    mock_device.turn_on.assert_not_awaited()
+    assert hass.states.get(MAIN).state == STATE_OFF
+    # ...and the picker no longer offers it.
+    assert dropped not in hass.states.get(MAIN).attributes["effect_list"]
+    assert dropped not in er.async_get(hass).async_get(MAIN).capabilities["effect_list"]
 
 
 async def test_effect_off_in_rgb_mode_restores_the_colour(
@@ -685,15 +853,182 @@ async def test_unavailable_when_device_vanishes(
 
 
 @pytest.mark.parametrize("device_sku", ["H61A8"])
+@pytest.mark.parametrize("drop_capabilities", [frozenset({Capability.COLOR_TEMP})])
 async def test_color_mode_never_reports_unsupported_color_temp(
     hass: HomeAssistant, entry: MockConfigEntry
 ) -> None:
-    """An RGB-only fixture never reports color_temp, even if a kelvin is in its state."""
+    """An RGB-only fixture never reports color_temp, even if a kelvin is in its state.
+
+    No shipped profile is RGB-only any more (newer libraries give the H61A8 colour
+    temperature), so the H61A8 profile is modelled without it.
+    """
     _seed(entry, is_on=True, color_temp_kelvin=4000, rgb_color=None)
     attrs = hass.states.get(MAIN).attributes
     assert attrs["color_mode"] == "rgb"
     assert attrs["supported_color_modes"] == ["rgb"]
     assert "min_color_temp_kelvin" not in attrs or attrs["min_color_temp_kelvin"] is None
+
+
+async def test_kelvin_range_follows_the_device_on_each_update(
+    hass: HomeAssistant, enabled_entry: MockConfigEntry, mock_device: Device
+) -> None:
+    """A range the library changes after setup reaches every light's state and registry entry."""
+    zone = next(z.name for z in mock_device.zones if z.segments)
+    ranges = _kelvin_ranges(hass, MAIN, _zone(hass, zone), _segment(hass, 0))
+    assert ranges == dict.fromkeys(ranges, (mock_device.min_kelvin, mock_device.max_kelvin))
+
+    # As if the library had just read a hardware version that widens the range.
+    mock_device.profile = dataclasses.replace(mock_device.profile, min_kelvin=2000, max_kelvin=9000)
+    enabled_entry.runtime_data.coordinator.async_publish_device_state()
+    await hass.async_block_till_done()
+    assert _kelvin_ranges(hass, MAIN, _zone(hass, zone), _segment(hass, 0)) == dict.fromkeys(
+        ranges, (2000, 9000)
+    )
+
+    # A request in the widened range reaches the device unclamped (_clamp_kelvin reads it live).
+    await _call(hass, "turn_on", MAIN, color_temp_kelvin=8500)
+    assert mock_device.turn_on.await_args.kwargs["kelvin"] == 8500
+
+
+@pytest.mark.skipif(
+    not H61A8_RANGE_BY_HARDWARE, reason="the installed library has no hardware-dependent range"
+)
+@pytest.mark.parametrize("device_sku", ["H61A8"])
+async def test_h61a8_range_is_refreshed_after_the_hardware_read(
+    hass: HomeAssistant, enabled_entry: MockConfigEntry, mock_device: Device
+) -> None:
+    """An older H61A8 (hardware below 3.08.01) offers its wider range once that is read."""
+    ranges = _kelvin_ranges(hass, MAIN, _segment(hass, 0))
+    assert ranges == dict.fromkeys(ranges, (2700, 6500))  # valid on every revision until read
+    _seed(enabled_entry, hardware_version="3.00.00")
+    await hass.async_block_till_done()
+    widened = (mock_device.min_kelvin, mock_device.max_kelvin)
+    assert widened == (2000, 9000)
+    assert _kelvin_ranges(hass, MAIN, _segment(hass, 0)) == dict.fromkeys(ranges, widened)
+
+    # A request in the widened range reaches the device unclamped.
+    await _call(hass, "turn_on", MAIN, color_temp_kelvin=2200)
+    assert mock_device.turn_on.await_args.kwargs["kelvin"] == 2200
+
+
+@pytest.fixture
+def kelvin_by_pact_case() -> tuple[str, bool, tuple[int, int], tuple[int, int]]:
+    """A model whose Kelvin range the advertised pact picks: (sku, opt-in, pact, its range).
+
+    Taken from the library (default models first, then the opt-in ones), never a fixed SKU:
+    one whose range at that pact differs from the range it has before any pact is known.
+    """
+    for allow in (False, True):
+        for sku in supported_skus(allow_modelled=allow):
+            profile = profile_for(sku, allow_modelled=allow)
+            if profile is None or Capability.COLOR_TEMP not in profile.capabilities:
+                continue
+            for pact, lo, hi in profile.kelvin_by_pact:
+                if (lo, hi) != (profile.min_kelvin, profile.max_kelvin):
+                    return sku, allow, pact, (lo, hi)
+    pytest.fail("the installed library has no model whose Kelvin range depends on the pact")
+
+
+async def test_kelvin_range_follows_a_pact_learned_from_an_advert(
+    hass: HomeAssistant,
+    mock_bluetooth: SimpleNamespace,
+    kelvin_by_pact_case: tuple[str, bool, tuple[int, int], tuple[int, int]],
+) -> None:
+    """An advert that first carries the device's pact shows the range it picks, without a poll."""
+    sku, allow, pact, picked = kelvin_by_pact_case
+    device = make_device(sku, name=f"GV{sku}ABCD", allow_modelled=allow)
+    data: dict[str, Any] = {"address": ADDRESS, CONF_SKU: sku}
+    if allow:
+        data[CONF_ALLOW_MODELLED] = True
+    entry = await _setup_custom(
+        hass,
+        MockConfigEntry(domain=DOMAIN, title=TITLE, unique_id=ADDRESS, data=data),
+        device,
+        mock_bluetooth,
+    )
+    assert device.pact is None
+    ranges = _kelvin_ranges(hass, MAIN)
+    assert ranges == dict.fromkeys(ranges, (device.profile.min_kelvin, device.profile.max_kelvin))
+    _seed(entry, is_on=True)  # the advert repeats the on/off already known: only its pact is new
+    await hass.async_block_till_done()
+    device.update.reset_mock()
+
+    info = make_service_info(
+        name=f"GV{sku}ABCD", manufacturer_data=pact_mfg(*pact), advertisement=True
+    )
+    advertisement_callback(mock_bluetooth)(info, BluetoothChange.ADVERTISEMENT)
+    await hass.async_block_till_done()
+    assert device.pact == pact
+    assert _kelvin_ranges(hass, MAIN) == dict.fromkeys(ranges, picked)
+    device.update.assert_not_awaited()  # published from the advert, not by a poll
+
+
+@pytest.mark.parametrize("reported", [False, True], ids=["unreported", "reported"])
+async def test_a_learned_pact_is_not_an_on_off_flip(
+    hass: HomeAssistant,
+    mock_bluetooth: SimpleNamespace,
+    kelvin_by_pact_case: tuple[str, bool, tuple[int, int], tuple[int, int]],
+    reported: bool,
+) -> None:
+    """A pact-only advert publishes the new range but never takes the on/off-flip path.
+
+    ``reported`` is whether the library returns True for it: govee-ble-local may signal a
+    learned pact as a change, and the flip path would restart a lit light's poll backoff.
+    """
+    sku, allow, pact, picked = kelvin_by_pact_case
+    device = make_device(sku, name=f"GV{sku}ABCD", allow_modelled=allow)
+    data: dict[str, Any] = {"address": ADDRESS, CONF_SKU: sku}
+    if allow:
+        data[CONF_ALLOW_MODELLED] = True
+    entry = await _setup_custom(
+        hass,
+        MockConfigEntry(domain=DOMAIN, title=TITLE, unique_id=ADDRESS, data=data),
+        device,
+        mock_bluetooth,
+    )
+    _seed(entry, is_on=True)
+    await hass.async_block_till_done()
+    ingest = device.ingest_advertisement
+
+    def _ingest(advertisement: Any) -> bool:
+        learned = device.pact
+        took = ingest(advertisement)
+        return took or (reported and device.pact != learned)
+
+    coordinator = entry.runtime_data.coordinator
+    info = make_service_info(
+        name=f"GV{sku}ABCD", manufacturer_data=pact_mfg(*pact), advertisement=True
+    )
+    with (
+        patch.object(device, "ingest_advertisement", side_effect=_ingest),
+        patch.object(coordinator, "_async_handle_power_flip") as flip,
+    ):
+        advertisement_callback(mock_bluetooth)(info, BluetoothChange.ADVERTISEMENT)
+        await hass.async_block_till_done()
+    flip.assert_not_called()
+    ranges = _kelvin_ranges(hass, MAIN)
+    assert ranges == dict.fromkeys(ranges, picked)
+
+
+@pytest.mark.skipif(not H61A8_HAS_CCT, reason="the installed library has no H61A8 colour temp")
+@pytest.mark.parametrize("device_sku", ["H61A8"])
+async def test_h61a8_offers_color_temp_when_the_library_supports_it(
+    hass: HomeAssistant, enabled_entry: MockConfigEntry, mock_device: Device
+) -> None:
+    """The H61A8's main and segment lights gain colour temp with the library's range."""
+    lo, hi = mock_device.min_kelvin, mock_device.max_kelvin
+    assert (lo, hi) == (2700, 6500)
+    for entity_id in (MAIN, _segment(hass, 0)):
+        attrs = hass.states.get(entity_id).attributes
+        assert set(attrs["supported_color_modes"]) == {"rgb", "color_temp"}
+        assert (attrs["min_color_temp_kelvin"], attrs["max_color_temp_kelvin"]) == (lo, hi)
+
+    await _call(hass, "turn_on", MAIN, color_temp_kelvin=3000)
+    assert mock_device.turn_on.await_args.kwargs["kelvin"] == 3000
+    await _call(hass, "turn_on", _segment(hass, 0), color_temp_kelvin=4000, brightness=128)
+    mock_device.set_segment_color_temp.assert_awaited_once_with([0], 4000)
+    mock_device.set_segment_brightness.assert_awaited_once()
+    assert hass.states.get(_segment(hass, 0)).attributes["color_mode"] == "color_temp"
 
 
 @pytest.mark.parametrize("device_sku", ["H6006"])
@@ -747,13 +1082,15 @@ async def test_effect_off_on_colour_temp_only_fixture(
         capabilities=frozenset(
             {Capability.POWER, Capability.BRIGHTNESS, Capability.COLOR_TEMP, Capability.SCENES}
         ),
+        min_kelvin=2200,
+        max_kelvin=7000,
     )
     entry = await _setup_custom(hass, mock_config_entry, device, mock_bluetooth)
     _seed(entry, is_on=True, optimistic=False)
     assert hass.states.get(MAIN).attributes["supported_color_modes"] == ["color_temp"]
     await _call(hass, "turn_on", MAIN, effect="off")
-    assert device.turn_on.await_args.kwargs["kelvin"] == (2000 + 9000) // 2
-    assert hass.states.get(MAIN).attributes["color_temp_kelvin"] == 5500
+    assert device.turn_on.await_args.kwargs["kelvin"] == (2200 + 7000) // 2
+    assert hass.states.get(MAIN).attributes["color_temp_kelvin"] == 4600
 
 
 @pytest.mark.parametrize("device_sku", ["H6006"])
@@ -918,14 +1255,17 @@ async def test_segment_colour_temp_stays_on_after_poll(
     assert state.attributes["brightness"] == 204  # brightness is still adopted
 
 
+@KELVIN_RANGES
 async def test_segment_colour_temp_is_clamped(
-    hass: HomeAssistant, enabled_entry: MockConfigEntry, mock_device: Device
+    hass: HomeAssistant, enabled_entry: MockConfigEntry, mock_device: Device, lo: int, hi: int
 ) -> None:
     """Segment colour temperature is clamped into the device range."""
     seg = _segment(hass, SEG)
+    attrs = hass.states.get(seg).attributes
+    assert (attrs["min_color_temp_kelvin"], attrs["max_color_temp_kelvin"]) == (lo, hi)
     await _call(hass, "turn_on", seg, color_temp_kelvin=9000)
-    mock_device.set_segment_color_temp.assert_awaited_once_with([SEG], 6500)
-    assert hass.states.get(seg).attributes["color_temp_kelvin"] == 6500
+    mock_device.set_segment_color_temp.assert_awaited_once_with([SEG], hi)
+    assert hass.states.get(seg).attributes["color_temp_kelvin"] == hi
 
 
 async def test_segment_colour_after_colour_temp_returns_to_rgb(
@@ -1081,7 +1421,7 @@ async def test_zone_light_state(
 async def test_zone_turn_on_with_rgb_and_brightness(
     hass: HomeAssistant, enabled_entry: MockConfigEntry, mock_device: Device
 ) -> None:
-    """Zone colour goes to the zone's segment mask, brightness to its segments, then power."""
+    """An off zone is switched on first, then its colour and brightness go to its segments."""
     zone = _zone(hass, "main")
     _seed(enabled_entry, is_on=True, zone_power={0: False, 1: True})
     await _call(hass, "turn_on", zone, rgb_color=(5, 6, 7), brightness=200)
@@ -1091,9 +1431,9 @@ async def test_zone_turn_on_with_rgb_and_brightness(
     mock_device.set_zone_power.assert_awaited_once_with("main", True)
     mock_device.set_zone_color_temp.assert_not_awaited()
     assert connection(mock_device).sent == [
+        build.zone_power(0, True),
         _seg_rgb_frame((5, 6, 7), 12),
         _seg_bri_frame(78, 12),
-        build.zone_power(0, True),
     ]
     state = hass.states.get(zone)
     assert state.state == STATE_ON
@@ -1102,21 +1442,22 @@ async def test_zone_turn_on_with_rgb_and_brightness(
     assert state.attributes["color_mode"] == "rgb"
 
 
+@KELVIN_RANGES
 async def test_zone_turn_on_with_colour_temp(
-    hass: HomeAssistant, enabled_entry: MockConfigEntry, mock_device: Device
+    hass: HomeAssistant, enabled_entry: MockConfigEntry, mock_device: Device, lo: int, hi: int
 ) -> None:
     """Zone colour temperature is clamped, sent for the zone, and reported as color_temp."""
     zone = _zone(hass, "background")
     _seed(enabled_entry, is_on=True, zone_power={0: True, 1: False})
     await _call(hass, "turn_on", zone, color_temp_kelvin=9000)
 
-    mock_device.set_zone_color_temp.assert_awaited_once_with("background", 6500)
+    mock_device.set_zone_color_temp.assert_awaited_once_with("background", hi)
     mock_device.set_zone_power.assert_awaited_once_with("background", True)
     mock_device.set_zone_rgb.assert_not_awaited()
     state = hass.states.get(zone)
     assert state.state == STATE_ON
     assert state.attributes["color_mode"] == "color_temp"
-    assert state.attributes["color_temp_kelvin"] == 6500
+    assert state.attributes["color_temp_kelvin"] == hi
 
 
 async def test_zone_brightness_targets_all_zone_segments(
@@ -1136,6 +1477,308 @@ async def test_zone_plain_turn_on_only_powers_the_zone(
     await _call(hass, "turn_on", zone)
     assert connection(mock_device).sent == [build.zone_power(0, True)]
     assert hass.states.get(zone).state == STATE_ON
+
+
+async def _poll_back(entry: MockConfigEntry, zone_power: dict[int, bool]) -> None:
+    """Run a poll that read the fixture on and the zones' power back, as the library applies it.
+
+    A read that carries a zone's power stamps it confirmed (``zone_power_confirmed``, on
+    ``time.monotonic()``); one whose reads go unanswered stamps nothing.
+    """
+    device = entry.runtime_data.device
+
+    async def _update(**_kwargs: Any) -> Any:
+        device.state.is_on = True
+        device.state.zone_power = dict(zone_power)
+        device.state.zone_power_confirmed = dict.fromkeys(zone_power, time.monotonic())
+        device.state.optimistic = False
+        return device.state
+
+    device.update.side_effect = _update  # type: ignore[attr-defined]
+    await entry.runtime_data.coordinator.async_refresh()
+
+
+def _age_confirmations(entry: MockConfigEntry, seconds: float) -> None:
+    """Move every zone's confirmation ``seconds`` into the past."""
+    state = entry.runtime_data.device.state
+    state.zone_power_confirmed = {i: at - seconds for i, at in state.zone_power_confirmed.items()}
+
+
+LIT_CHANGES = pytest.mark.parametrize(
+    "change",
+    [
+        {"rgb_color": (5, 6, 7), "brightness": 200},
+        {"color_temp_kelvin": 4000},
+        {"brightness": 200},
+        {"color_temp_kelvin": 4000, "brightness": 200},
+    ],
+    ids=["rgb_brightness", "color_temp", "brightness", "color_temp_brightness"],
+)
+
+
+@LIT_CHANGES
+async def test_lit_zone_change_sends_no_zone_power(
+    hass: HomeAssistant,
+    enabled_entry: MockConfigEntry,
+    mock_device: Device,
+    change: dict[str, Any],
+) -> None:
+    """A change to a zone a poll just read on sends only that change, whatever its shape."""
+    await _poll_back(enabled_entry, {0: True, 1: True})
+    connection(mock_device).sent.clear()
+    await _call(hass, "turn_on", _zone(hass, "main"), **change)
+    mock_device.set_zone_power.assert_not_awaited()
+    assert build.zone_power(0, True) not in connection(mock_device).sent
+    assert connection(mock_device).sent  # the change itself went out
+
+
+@pytest.mark.parametrize(
+    "zone_power", [{0: False, 1: True}, {1: True}], ids=["zone_off", "zone_unknown"]
+)
+@pytest.mark.parametrize(
+    "change",
+    [{"color_temp_kelvin": 4000}, {"brightness": 128}, {"rgb_color": RED}],
+    ids=["color_temp", "brightness", "rgb"],
+)
+async def test_off_or_unknown_zone_is_powered_first(
+    hass: HomeAssistant,
+    enabled_entry: MockConfigEntry,
+    mock_device: Device,
+    zone_power: dict[int, bool],
+    change: dict[str, Any],
+) -> None:
+    """A zone not known to be on is switched on before the change, whatever its shape."""
+    await _poll_back(enabled_entry, zone_power)
+    connection(mock_device).sent.clear()
+    await _call(hass, "turn_on", _zone(hass, "main"), **change)
+    sent = connection(mock_device).sent
+    assert sent[0] == build.zone_power(0, True)
+    assert len(sent) == 2  # then the change's frame
+
+
+async def test_plain_turn_on_powers_even_a_lit_zone(
+    hass: HomeAssistant, enabled_entry: MockConfigEntry, mock_device: Device
+) -> None:
+    """A plain turn_on is the zone's on switch: it is sent whatever HA thinks the zone is."""
+    await _poll_back(enabled_entry, {0: True, 1: True})
+    connection(mock_device).sent.clear()
+    await _call(hass, "turn_on", _zone(hass, "main"))
+    assert connection(mock_device).sent == [build.zone_power(0, True)]
+
+
+async def test_the_library_confirms_an_acked_zone_write_and_only_that_zone() -> None:
+    """The contract the zone light rests on: an acked zone write stamps that zone alone."""
+    device = make_device("H60A6")
+    device.state.zone_power = {0: False, 1: True}
+    device.state.zone_power_confirmed = {}
+    before = time.monotonic()
+    await device.set_zone_power("main", True)  # acked on the fake link
+    assert device.state.zone_power_confirmed.get(0, before - 1) >= before
+    assert 1 not in device.state.zone_power_confirmed
+
+
+@pytest.mark.parametrize("sku", ["H60A6", "H6047"])
+async def test_an_unanswered_poll_confirms_nothing(sku: str) -> None:
+    """A real update() whose reads all go unanswered leaves zone power and its confirmations
+    exactly as they were."""
+    device = create_device(BLEDevice(address=ADDRESS, name=f"GV{sku}ABCD", details={}), sku, None)
+    device._conn = FakeConnection()  # type: ignore[assignment]
+    device.state.zone_power = {0: True, 1: False}
+    device.state.zone_power_confirmed = {0: time.monotonic() - 200}
+    confirmed = dict(device.state.zone_power_confirmed)
+    await device.update()
+    assert device.state.zone_power == {0: True, 1: False}
+    assert device.state.zone_power_confirmed == confirmed
+
+
+def _zone_ops(device: Device) -> list[tuple[str, Any]]:
+    """Every library call HA makes that can change a zone's power, by name."""
+    ops: list[tuple[str, Any]] = [
+        ("fixture_on", lambda: device.set_power(True)),
+        ("fixture_off", lambda: device.set_power(False)),
+    ]
+    ops += [
+        (f"{z.name}_{on}", lambda n=z.name, o=on: device.set_zone_power(n, o))
+        for z in device.zones
+        for on in (True, False)
+    ]
+    if Capability.SCENES in device.capabilities:
+        ops.append(("scene", lambda: device.set_scene(1)))
+    return ops
+
+
+@pytest.mark.parametrize("sku", ["H60A6", "H6047"])
+@pytest.mark.parametrize(
+    "zone_power",
+    [{0: True, 1: True}, {0: False, 1: True}, {0: False, 1: False}],
+    ids=["both_on", "one_on", "both_off"],
+)
+async def test_a_confirmation_never_vouches_for_a_change_it_didnt_see(
+    sku: str, zone_power: dict[int, bool]
+) -> None:
+    """Whatever HA sends, a zone whose power it changed keeps no confirmation from before:
+    the device confirmed the new value during the call, or the zone has none."""
+    device = make_device(sku)
+    for name, op in _zone_ops(device):
+        device.state.is_on = True
+        device.state.zone_power = dict(zone_power)
+        device.state.zone_power_confirmed = dict.fromkeys(zone_power, time.monotonic() - 60)
+        started = time.monotonic()
+        await op()
+        after = device.state.zone_power
+        for index in zone_power.keys() | after.keys():
+            if after.get(index) == zone_power.get(index):
+                continue
+            confirmed = device.state.zone_power_confirmed.get(index)
+            assert confirmed is None or confirmed >= started, (name, index)
+
+
+async def test_zone_of_unknown_state_isnt_lit_by_a_fresh_stamp(
+    hass: HomeAssistant, enabled_entry: MockConfigEntry, mock_device: Device
+) -> None:
+    """A zone whose state is unknown is powered first, even with a fresh confirmation."""
+    await _poll_back(enabled_entry, {0: True, 1: True})
+    _seed(enabled_entry, zone_power={1: True})  # the main panel's state forgotten
+    connection(mock_device).sent.clear()
+    await _call(hass, "turn_on", _zone(hass, "main"), rgb_color=RED)
+    assert connection(mock_device).sent[0] == build.zone_power(0, True)
+
+
+@pytest.mark.parametrize(
+    ("zone_power", "age"),
+    [({0: True, 1: True}, ZONE_STATE_FRESH_SECONDS + 1), ({0: False, 1: True}, 0)],
+    ids=["read_long_ago", "read_off_just_now"],
+)
+async def test_a_scene_confirms_no_zone(
+    hass: HomeAssistant,
+    enabled_entry: MockConfigEntry,
+    mock_device: Device,
+    *,
+    zone_power: dict[int, bool],
+    age: float,
+) -> None:
+    """Activating a scene can set zone power, but never confirms a zone: one last read long
+    ago, or read off just before the scene switched it on, still gets its power first."""
+    await _poll_back(enabled_entry, zone_power)
+    _age_confirmations(enabled_entry, age)
+    await _call(hass, "turn_on", MAIN, effect="Aurora")
+    connection(mock_device).sent.clear()
+    await _call(hass, "turn_on", _zone(hass, "main"), rgb_color=RED)
+    assert connection(mock_device).sent[0] == build.zone_power(0, True)
+
+
+async def test_zone_lit_by_a_seed_alone_is_not_confirmed(
+    hass: HomeAssistant, enabled_entry: MockConfigEntry, mock_device: Device
+) -> None:
+    """State nothing read back or acked (here, seeded) doesn't count: power goes first."""
+    _seed(enabled_entry, is_on=True, zone_power={0: True, 1: True})
+    await _call(hass, "turn_on", _zone(hass, "main"), rgb_color=RED)
+    assert connection(mock_device).sent[0] == build.zone_power(0, True)
+
+
+async def test_a_poll_whose_reads_go_unanswered_confirms_nothing(
+    hass: HomeAssistant, enabled_entry: MockConfigEntry, mock_device: Device
+) -> None:
+    """A poll that "succeeds" without reading the zones back leaves them unconfirmed."""
+    _seed(enabled_entry, is_on=True, zone_power={0: True, 1: True})
+    await enabled_entry.runtime_data.coordinator.async_refresh()  # reads nothing back
+    assert enabled_entry.runtime_data.coordinator.last_update_success
+    connection(mock_device).sent.clear()
+    await _call(hass, "turn_on", _zone(hass, "main"), rgb_color=RED)
+    assert connection(mock_device).sent[0] == build.zone_power(0, True)
+
+
+async def test_ha_switching_a_zone_on_confirms_it(
+    hass: HomeAssistant, enabled_entry: MockConfigEntry, mock_device: Device
+) -> None:
+    """A zone HA just switched on (the device acked it) takes the next change without power."""
+    zone = _zone(hass, "main")
+    _seed(enabled_entry, is_on=True, zone_power={0: False, 1: True})
+    await _call(hass, "turn_on", zone)
+    connection(mock_device).sent.clear()
+    await _call(hass, "turn_on", zone, rgb_color=RED)
+    assert connection(mock_device).sent == [_seg_rgb_frame(RED, 12)]
+
+
+@pytest.mark.parametrize(
+    ("age", "powered"),
+    [(ZONE_STATE_FRESH_SECONDS - 1, False), (ZONE_STATE_FRESH_SECONDS, True)],
+    ids=["fresh", "stale"],
+)
+async def test_lit_zone_confirmed_too_long_ago_is_powered_first(
+    hass: HomeAssistant,
+    enabled_entry: MockConfigEntry,
+    mock_device: Device,
+    *,
+    age: int,
+    powered: bool,
+) -> None:
+    """A zone read on ZONE_STATE_FRESH_SECONDS ago or more may be off by now: power first."""
+    await _poll_back(enabled_entry, {0: True, 1: True})
+    _age_confirmations(enabled_entry, age)
+    connection(mock_device).sent.clear()
+    await _call(hass, "turn_on", _zone(hass, "main"), rgb_color=RED)
+    sent = connection(mock_device).sent
+    assert (sent[0] == build.zone_power(0, True)) is powered
+    assert sent[-1] == _seg_rgb_frame(RED, 12)
+
+
+async def test_failed_power_on_an_off_zone_stops_the_change(
+    hass: HomeAssistant, enabled_entry: MockConfigEntry, mock_device: Device
+) -> None:
+    """Switching an off zone on fails: the colour isn't sent to a zone that stays dark."""
+    await _poll_back(enabled_entry, {0: False, 1: True})
+    connection(mock_device).sent.clear()
+    _fail(mock_device, GoveeBleTimeout("no ack"))
+    with pytest.raises(HomeAssistantError) as exc:
+        await _call(hass, "turn_on", _zone(hass, "main"), rgb_color=RED)
+    assert exc.value.translation_key == "ble_command_failed"
+    mock_device.set_zone_rgb.assert_not_awaited()
+
+
+async def test_a_write_to_one_zone_doesnt_confirm_the_other(
+    hass: HomeAssistant, enabled_entry: MockConfigEntry, mock_device: Device
+) -> None:
+    """Switching the main panel on carries the ring's cached state along, but confirms only
+    the main panel: a ring read long ago (it may be off now) still gets its power first."""
+    await _poll_back(enabled_entry, {0: True, 1: True})
+    _age_confirmations(enabled_entry, ZONE_STATE_FRESH_SECONDS - 20)
+    await _call(hass, "turn_on", _zone(hass, "main"))  # writes {main: on, ring: cached}
+    _age_confirmations(enabled_entry, 30)  # the ring's read is now stale; main's write 30 s
+    connection(mock_device).sent.clear()
+    await _call(hass, "turn_on", _zone(hass, "background"), rgb_color=RED)
+    assert connection(mock_device).sent[0] == build.zone_power(1, True)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [GoveeBleError("refused"), GoveeBleConnectionError("link lost"), GoveeBleTimeout("no ack")],
+    ids=["refused", "link_lost", "no_ack"],
+)
+async def test_failed_power_on_a_stale_lit_zone_stops_the_change(
+    hass: HomeAssistant, enabled_entry: MockConfigEntry, mock_device: Device, error: Exception
+) -> None:
+    """A zone shown on but not confirmed lately is switched on first; if that fails, for any
+    reason, the change isn't sent: the zone may be dark (and on a dead link, a second long
+    operation would fail too)."""
+    await _poll_back(enabled_entry, {0: True, 1: True})
+    _age_confirmations(enabled_entry, ZONE_STATE_FRESH_SECONDS + 1)
+    _fail(mock_device, error)
+    with pytest.raises(HomeAssistantError):
+        await _call(hass, "turn_on", _zone(hass, "main"), rgb_color=RED)
+    mock_device.set_zone_power.assert_awaited_once_with("main", True)
+    mock_device.set_zone_rgb.assert_not_awaited()
+
+
+async def test_zone_of_a_fixture_known_off_is_powered_first(
+    hass: HomeAssistant, enabled_entry: MockConfigEntry, mock_device: Device
+) -> None:
+    """A zone read on, in a fixture since reported off (an advert), is switched on first."""
+    await _poll_back(enabled_entry, {0: True, 1: True})
+    _seed(enabled_entry, is_on=False)  # zone power stays cached on
+    connection(mock_device).sent.clear()
+    await _call(hass, "turn_on", _zone(hass, "main"), rgb_color=RED)
+    assert connection(mock_device).sent[0] == build.zone_power(0, True)
 
 
 async def test_zone_turn_off(
@@ -1181,6 +1824,36 @@ async def test_zone_readback_adopts_colour_and_brightness(
     assert hass.states.get(background).attributes["brightness"] == 102
 
 
+async def test_out_of_range_readback_brightness_is_clamped(
+    hass: HomeAssistant, enabled_entry: MockConfigEntry
+) -> None:
+    """A read-back brightness above 100 % shows as full brightness, never above 255."""
+    _seed(
+        enabled_entry,
+        is_on=True,
+        brightness=150,
+        zone_power={0: True, 1: True},
+        segments=[
+            Segment(index=SEG, rgb=RED, brightness=200),
+            Segment(index=12, rgb=RED, brightness=200),
+        ],
+    )
+    assert hass.states.get(MAIN).attributes["brightness"] == 255
+    assert hass.states.get(_segment(hass, SEG)).attributes["brightness"] == 255
+    assert hass.states.get(_zone(hass, "main")).attributes["brightness"] == 255
+
+
+async def test_sub_light_debug_logs_name_the_device(
+    hass: HomeAssistant, enabled_entry: MockConfigEntry, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Segment/zone command logs carry the device address and the segment's shown number."""
+    caplog.set_level(logging.DEBUG, logger="custom_components.govee_ble_local.light")
+    await _call(hass, "turn_on", _segment(hass, SEG), rgb_color=RED)
+    await _call(hass, "turn_on", _zone(hass, "main"), rgb_color=RED)
+    assert f"Setting segment {SEG + 1} of {ADDRESS} RGB to (255, 0, 0)" in caplog.text
+    assert f"Setting zone main of {ADDRESS} RGB to (255, 0, 0)" in caplog.text
+
+
 async def test_zone_readback_without_matching_segments_or_values(
     hass: HomeAssistant, enabled_entry: MockConfigEntry
 ) -> None:
@@ -1216,9 +1889,9 @@ async def test_zone_readback_does_not_override_colour_temp_mode(
 async def test_zone_partial_failure_still_publishes(
     hass: HomeAssistant, enabled_entry: MockConfigEntry, mock_device: Device
 ) -> None:
-    """Colour and brightness land but the zone power frame fails: landed state is published."""
+    """Power and colour land but the brightness frame fails: what landed is published."""
     zone = _zone(hass, "main")
-    _seed(enabled_entry, is_on=True, zone_power={0: True, 1: True})
+    _seed(enabled_entry, is_on=True, zone_power={0: False, 1: True}, segments=[])
     _fail(mock_device, GoveeBleTimeout("no ack"), after=2)
 
     with pytest.raises(HomeAssistantError) as exc:
@@ -1228,7 +1901,7 @@ async def test_zone_partial_failure_still_publishes(
     state = hass.states.get(zone)
     assert state.state == STATE_ON
     assert state.attributes["rgb_color"] == RED
-    assert state.attributes["brightness"] == 128
+    assert state.attributes["brightness"] is None  # the frame that failed
 
 
 async def test_zone_turn_off_failure(
@@ -1254,6 +1927,46 @@ async def test_h6047_zone_turn_on_keeps_other_bar(
     await _call(hass, "turn_on", left, rgb_color=RED)
     mock_device.set_zone_rgb.assert_awaited_once_with("left", RED)
     mock_device.set_zone_power.assert_awaited_once_with("left", True)
-    assert connection(mock_device).sent[-1] == build.bar_switch(True, False)
+    assert connection(mock_device).sent[0] == build.bar_switch(True, False)  # power first
     assert hass.states.get(left).state == STATE_ON
     assert hass.states.get(right).state == STATE_OFF
+
+
+@pytest.mark.parametrize("device_sku", ["H6047"])
+async def test_h6047_lit_bar_change_reads_and_switches_nothing(
+    hass: HomeAssistant, entry: MockConfigEntry, mock_device: Device
+) -> None:
+    """A lit bar's colour change is one frame: no bar switch, so no aa 36 read before it."""
+    await _poll_back(entry, {0: True})  # the other bar's state unknown
+    connection(mock_device).sent.clear()
+    connection(mock_device).queries.clear()
+    await _call(hass, "turn_on", _zone(hass, "left"), rgb_color=RED)
+    mock_device.set_zone_power.assert_not_awaited()
+    assert len(connection(mock_device).sent) == 1
+    assert build.bar_switch_query() not in connection(mock_device).queries
+
+
+@pytest.mark.parametrize("device_sku", ["H6047"])
+async def test_h6047_whole_fixture_on_unconfirms_the_bars(
+    hass: HomeAssistant, entry: MockConfigEntry, mock_device: Device
+) -> None:
+    """A whole-fixture turn-on leaves which bars lit unknown: a bar confirmed just before
+    gets its bar switch first again (here its aa 36 read goes unanswered, so it fails)."""
+    await _poll_back(entry, {0: True, 1: False})
+    await _call(hass, "turn_on", MAIN)
+    with pytest.raises(HomeAssistantError):
+        await _call(hass, "turn_on", _zone(hass, "left"), rgb_color=RED)
+    mock_device.set_zone_power.assert_awaited_once_with("left", True)
+
+
+@pytest.mark.parametrize("device_sku", ["H6047"])
+async def test_h6047_bar_of_unknown_state_gets_no_colour_when_its_switch_is_refused(
+    hass: HomeAssistant, entry: MockConfigEntry, mock_device: Device
+) -> None:
+    """Both bars unknown (after a whole-fixture on), the library refuses the bar switch (its
+    aa 36 read goes unanswered): the bar may be dark, so its colour isn't sent."""
+    _seed(entry, is_on=True, zone_power={})
+    with pytest.raises(HomeAssistantError):
+        await _call(hass, "turn_on", _zone(hass, "left"), rgb_color=RED)
+    assert build.bar_switch_query() in connection(mock_device).queries
+    mock_device.set_zone_rgb.assert_not_awaited()

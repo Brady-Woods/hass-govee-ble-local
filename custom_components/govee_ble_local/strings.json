@@ -5,6 +5,14 @@
       "bluetooth_confirm": {
         "description": "Do you want to set up {name}?"
       },
+      "modelled_confirm": {
+        "title": "Set up an unverified model?",
+        "description": "{name} is a Govee {model}. This integration's support for that model is inferred from the Govee app rather than checked against the app's own controls, and it hasn't been tested on a real device, so some or all of its controls may not work.",
+        "menu_options": {
+          "modelled_accept": "Set it up anyway",
+          "modelled_decline": "Don't set it up"
+        }
+      },
       "user": {
         "data": {
           "address": "Device"
@@ -49,15 +57,18 @@
     "error": {
       "invalid_secret": "The secret key must be 16 hex characters (8 bytes), e.g. a1b2c3d4e5f60718.",
       "cannot_connect": "Could not log in to the Govee account or reach the Govee cloud. Check your email, password and internet connection, then try again.",
+      "invalid_auth": "The Govee account rejected the email or password. Check them and try again.",
       "secret_not_found": "Logged in, but no secret key was found for this device on the account. Make sure the device is added to this Govee account."
     },
     "abort": {
       "no_devices_found": "No unconfigured supported Govee devices found.",
       "already_configured": "Device is already configured.",
       "not_supported": "This Govee model isn't supported by this integration yet.",
+      "protocol_not_supported": "This Govee model is supported, but not at the protocol version the device is advertising now, so it can't be set up.",
       "reconfigure_successful": "Device reloaded successfully.",
       "reauth_successful": "Secret key updated.",
-      "unknown": "Unexpected error: the setup flow lost track of the device. Please start again."
+      "unknown": "Unexpected error: the setup flow lost track of the device. Please start again.",
+      "modelled_declined": "Setup cancelled: support for this model is inferred, not checked against the Govee app's own controls or tested on a real device. If it's offered again, choose Ignore to stop seeing it."
     },
     "progress": {
       "read_secret": "Trying to read {name}'s secret key directly from the device. This only works while it is unbound (factory-reset) and can take up to a minute."
@@ -140,6 +151,9 @@
     "self_test_busy": {
       "message": "A self-test is already running; try again when it has finished."
     },
+    "self_test_device_not_found": {
+      "message": "Cannot run the self-test: no Bluetooth scanner that can connect to {device_name} currently sees it. Make sure it is powered on and in range."
+    },
     "no_matching_device": {
       "message": "No Govee BLE Local device matched the service target."
     },
@@ -150,10 +164,19 @@
       "message": "Could not find the Govee device {address} over Bluetooth; make sure it is powered on and in range."
     },
     "model_not_supported": {
-      "message": "The Govee model {sku} is not supported by this version of the integration."
+      "message": "The Govee model {sku} is not supported by this version of the integration. If this version offers it as an unverified model, delete this entry and add the device again to opt in."
+    },
+    "protocol_not_supported": {
+      "message": "The Govee {sku} advertises protocol version {protocol}, which this version of the integration doesn't support for that model. Setup will be retried in case the device advertises another."
     },
     "secret_malformed": {
       "message": "The stored secret key for {device_name} is malformed; enter it again via the re-authentication prompt."
+    },
+    "poll_skipped_absent": {
+      "message": "{address} is not advertising; poll skipped."
+    },
+    "poll_failed": {
+      "message": "Could not poll {address}: {error}"
     }
   }
 }

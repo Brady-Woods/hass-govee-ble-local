@@ -26,7 +26,7 @@ from contextlib import contextmanager
 from functools import partial
 import logging
 import re
-from typing import Any, TypedDict
+from typing import NotRequired, TypedDict
 
 from govee_ble_local import (
     Capability,
@@ -38,8 +38,7 @@ from govee_ble_local import (
     Zone,
 )
 
-from .const import DEFAULT_MAX_KELVIN, DEFAULT_MIN_KELVIN
-from .helpers import BLE_ERRORS
+from .helpers import BLE_ERRORS, mid_kelvin, segment_count
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -62,6 +61,10 @@ _TEST_ZONE_RGB = (0, 255, 0)
 _SELF_TEST_LOCK = asyncio.Lock()
 
 _WIRE_FIELD = re.compile(r" wire=[0-9a-f]*", re.IGNORECASE)
+# A frame line with an empty plaintext view: a handshake frame, or one that
+# arrived before the session was ready (labelled "cipher", or "withheld" by
+# newer libraries).
+_NO_PLAINTEXT = re.compile(r" plain=(?: |$)")
 
 
 class SelfTestBusyError(Exception):
@@ -145,49 +148,121 @@ class _RingHandler(logging.Handler):
 
 
 class _PassThroughHandler(logging.Handler):
-    """Forward records at or above ``threshold`` to the root handlers.
+    """Forward to the root handlers the records Home Assistant's log would get anyway.
 
-    While capturing, the library logger runs at DEBUG with propagation off; this
-    keeps everything the user would normally see flowing to Home Assistant's log
-    without flooding it with the debug stream of every device.
+    While capturing, the library logger runs at DEBUG with propagation off. A
+    record goes on only if it would have without the capture: at or above the
+    level of its own logger or, if that sets none, of the nearest ancestor below
+    ``govee_ble_local`` that does (so a child the user made chattier keeps its
+    lines in the log); otherwise at or above ``threshold``, the library logger's
+    pre-capture effective level. The debug stream of every device stays out of
+    the log.
     """
 
+    def __init__(self, threshold: int) -> None:
+        super().__init__(logging.NOTSET)
+        self.threshold = threshold
+
+    def _threshold_for(self, name: str) -> int:
+        logger: logging.Logger | None = logging.getLogger(name)
+        while logger is not None and logger.name != _ROOT_LOGGER:
+            if logger.level != logging.NOTSET:
+                return logger.level
+            logger = logger.parent
+        return self.threshold
+
     def emit(self, record: logging.LogRecord) -> None:
-        logging.getLogger().handle(record)
+        if record.levelno >= self._threshold_for(record.name):
+            logging.getLogger().handle(record)
+
+
+def _set_level(logger: logging.Logger, level: int) -> None:
+    """Set ``logger``'s level, also when Home Assistant's logger integration pins it.
+
+    ``HassLogger.setLevel`` ignores any logger the user configured (in YAML, with
+    ``logger.set_level`` or the debug-logging toggle); Home Assistant's own logger
+    helper goes through ``orig_setLevel`` the same way. Used only for a logger
+    already pinned when the capture started: restoring any other this way would
+    undo a pin the user made during the capture.
+    """
+    getattr(logger, "orig_setLevel", logger.setLevel)(level)
 
 
 @contextmanager
-def session_capture(
-    *, maxlen: int = 4000, address: str | None = None
-) -> Iterator[_RingHandler]:
+def session_capture(*, maxlen: int = 4000, address: str | None = None) -> Iterator[_RingHandler]:
     """Temporarily capture the full ``govee_ble_local`` flow + frame stream.
 
     Raises the ``govee_ble_local`` logger to DEBUG (the child ``.frames`` logger
     inherits it, so its ``isEnabledFor`` guard opens and frames propagate up) and
-    attaches a fresh ring buffer. Records the user wouldn't normally see stay out
-    of Home Assistant's log. Level, propagation and handlers are restored on exit
-    - the level only if nobody changed it meanwhile.
+    attaches a fresh ring buffer. A child logger with a level of its own keeps it,
+    so one set above DEBUG is captured only from that level up. Records the user
+    wouldn't normally see stay out of Home Assistant's log. Level, propagation
+    and handlers are restored on exit - the level only if nobody changed it
+    meanwhile, and past Home Assistant's pin only if the logger was pinned
+    before the capture: one the user pins during the capture (say with the
+    debug-logging toggle) keeps that level. A logger already pinned that is
+    re-pinned to DEBUG during the capture still gets its old pin back (telling
+    the two apart would take the logger integration's internal override map).
     """
     logger = logging.getLogger(_ROOT_LOGGER)
     handler = _RingHandler(maxlen, address)
-    passthrough = _PassThroughHandler(logger.getEffectiveLevel())
     previous_level = logger.level
     previous_propagate = logger.propagate
+    # Without propagation beforehand, nothing reached the root handlers to keep.
+    passthrough = _PassThroughHandler(logger.getEffectiveLevel()) if previous_propagate else None
     logger.setLevel(logging.DEBUG)
+    # HassLogger ignored the plain setter: Home Assistant pins this logger.
+    pinned = logger.level != logging.DEBUG
+    if pinned:
+        _set_level(logger, logging.DEBUG)
     logger.propagate = False
     logger.addHandler(handler)
-    logger.addHandler(passthrough)
+    if passthrough is not None:
+        logger.addHandler(passthrough)
     try:
         yield handler
     finally:
         logger.removeHandler(handler)
-        logger.removeHandler(passthrough)
+        if passthrough is not None:
+            logger.removeHandler(passthrough)
         logger.propagate = previous_propagate
         if logger.level == logging.DEBUG:
-            logger.setLevel(previous_level)
+            if pinned:
+                _set_level(logger, previous_level)
+            else:
+                # HassLogger ignores this for a logger pinned during the capture.
+                logger.setLevel(previous_level)
 
 
-def _match(actual: Any, expected: Any) -> bool | None:
+class StepResult(TypedDict):
+    """One self-test step, as it appears in the report (plain JSON data)."""
+
+    step: str
+    acked: bool  # the command returned without a BLE error
+    # None: not checked (the device reports nothing to compare, or the command failed or
+    # was skipped)
+    readback_ok: bool | None
+    error: str | None
+    skipped: NotRequired[str]  # why the step was deliberately not run (skipped steps only)
+    ok: bool
+
+
+class SelfTestReport(TypedDict):
+    """The self-test report (plain JSON data: the service returns it as-is)."""
+
+    ok: bool
+    restored: bool
+    restore_errors: list[str]
+    address: str
+    sku: str
+    encryption: str
+    capabilities: list[str]
+    steps: list[StepResult]
+    frames: list[str]
+    log: list[str]
+
+
+def _match(actual: object, expected: object) -> bool | None:
     """Compare a read-back value with what was commanded (tri-state).
 
     None when the device reports nothing (unknown), else whether they match.
@@ -201,20 +276,24 @@ def _segment_at(state: DeviceState, index: int) -> Segment | None:
     return next((s for s in state.segments if s.index == index), None)
 
 
+def _segment_rgb(state: DeviceState, index: int) -> tuple[int, int, int] | None:
+    seg = _segment_at(state, index)
+    return seg.rgb if seg else None
+
+
+def _segment_brightness(state: DeviceState, index: int) -> int | None:
+    seg = _segment_at(state, index)
+    return seg.brightness if seg else None
+
+
 def _zone_colour(state: DeviceState, zone: Zone) -> tuple[int, int, int] | None:
     """Return a representative colour for a zone.
 
     Read from whichever of its segments the device reported (the same lookup
-    `light.py`'s zone light uses).
+    ``light.py``'s zone light uses).
     """
     seg = next((s for s in state.segments if s.index in zone.segments), None)
     return seg.rgb if seg else None
-
-
-def _mid_kelvin(device: Device) -> int:
-    lo = device.min_kelvin or DEFAULT_MIN_KELVIN
-    hi = device.max_kelvin or DEFAULT_MAX_KELVIN
-    return (lo + hi) // 2
 
 
 class _Snapshot(TypedDict):
@@ -233,11 +312,10 @@ class _Snapshot(TypedDict):
 def _snapshot(device: Device) -> _Snapshot:
     """Capture everything the self-test might change, so it can be restored.
 
-    Fields are None where the device has no read-back for them - `_restore`
+    Fields are None where the device has no read-back for them - ``_restore``
     simply skips those (nothing to put back).
     """
     state = device.state
-    segment0 = _segment_at(state, 0)
     zones: tuple[Zone, ...] = device.zones
     return {
         "is_on": state.is_on,
@@ -248,8 +326,8 @@ def _snapshot(device: Device) -> _Snapshot:
         "gradual": state.gradual,
         "zone_power": {zone.name: device.zone_is_on(zone.name) for zone in zones},
         "zone_colour": {zone.name: _zone_colour(state, zone) for zone in zones if zone.segments},
-        "segment0_rgb": segment0.rgb if segment0 else None,
-        "segment0_brightness": segment0.brightness if segment0 else None,
+        "segment0_rgb": _segment_rgb(state, 0),
+        "segment0_brightness": _segment_brightness(state, 0),
     }
 
 
@@ -295,39 +373,56 @@ async def _restore_colour(device: Device, snap: _Snapshot, restorer: _Restorer) 
             await attempt(f"zone_rgb:{zone.name}", partial(device.set_zone_rgb, zone.name, colour))
 
 
-async def _restore_power(device: Device, snap: _Snapshot, restorer: _Restorer) -> None:
-    """Restore whole-device power (which switches every zone), then differing zones."""
+async def _restore_power_on(device: Device, snap: _Snapshot, restorer: _Restorer) -> None:
+    """Switch back on, first, what was on: the whole device, or the zones that were.
+
+    The Govee app only lets a lit zone be coloured, so the colours go to lit zones.
+    """
     has_power = Capability.POWER in device.capabilities
     if snap["is_on"] is False and has_power:
-        await restorer.attempt("power", partial(device.set_power, False))
-        return
-    whole_on = snap["is_on"] is True and has_power
-    if whole_on:
+        return  # it ends off: _restore_power_off switches it off
+    if snap["is_on"] is True and has_power:
+        # Switches every zone on; those that were off go off last.
         await restorer.attempt("power", partial(device.set_power, True))
+        return
     zones: tuple[Zone, ...] = device.zones
     for zone in zones:
-        was_on = snap["zone_power"].get(zone.name)
-        if was_on is None or (whole_on and was_on):
-            continue
-        await restorer.attempt(
-            f"zone_power:{zone.name}", partial(device.set_zone_power, zone.name, was_on)
-        )
+        if snap["zone_power"].get(zone.name) is True:
+            await restorer.attempt(
+                f"zone_power:{zone.name}", partial(device.set_zone_power, zone.name, True)
+            )
+
+
+async def _restore_power_off(device: Device, snap: _Snapshot, restorer: _Restorer) -> None:
+    """Switch off, last, what was off: the whole device, or the zones that were."""
+    if snap["is_on"] is False and Capability.POWER in device.capabilities:
+        await restorer.attempt("power", partial(device.set_power, False))
+        return
+    zones: tuple[Zone, ...] = device.zones
+    for zone in zones:
+        if snap["zone_power"].get(zone.name) is False:
+            await restorer.attempt(
+                f"zone_power:{zone.name}", partial(device.set_zone_power, zone.name, False)
+            )
 
 
 async def _restore(device: Device, snap: _Snapshot) -> list[str]:
     """Best-effort return to the pre-test state; returns the failed actions.
 
     Every action is attempted on its own - one failure never abandons the rest.
-    Order matters: colour first, then brightness and the gradual flag, then
-    power LAST so its final word is the original on/off state.
+    Order matters, as in the Govee app: what was on is switched on first (the app
+    colours only lit zones), then colour, brightness and the gradual flag, then
+    what was off is switched off LAST, so the final word is the original on/off
+    state.
     """
     restorer = _Restorer()
+    await _restore_power_on(device, snap, restorer)
     await _restore_colour(device, snap, restorer)
     if snap["brightness"] is not None and Capability.BRIGHTNESS in device.capabilities:
         await restorer.attempt("brightness", partial(device.set_brightness, snap["brightness"]))
     if snap["gradual"] is not None and device.profile.gradual:
         await restorer.attempt("gradual", partial(device.set_gradual, snap["gradual"]))
-    await _restore_power(device, snap, restorer)
+    await _restore_power_off(device, snap, restorer)
     return restorer.errors
 
 
@@ -336,7 +431,7 @@ class _Steps:
 
     def __init__(self, device: Device) -> None:
         self._device = device
-        self.results: list[dict[str, Any]] = []
+        self.results: list[StepResult] = []
 
     async def run(
         self,
@@ -350,10 +445,12 @@ class _Steps:
         device's colour scheme doesn't support is recorded as skipped; any
         other BLE failure is recorded on the step.
         """
-        entry: dict[str, Any] = {"step": name, "acked": False, "readback_ok": None, "error": None}
+        acked = False
+        readback_ok: bool | None = None
+        error: str | None = None
         try:
             await action()
-            entry["acked"] = True
+            acked = True
             try:
                 await self._device.update()
             except GoveeBleAuthError:
@@ -361,16 +458,23 @@ class _Steps:
             except BLE_ERRORS as err:
                 _LOGGER.debug("%s: read-back after %s failed: %s", self._device.address, name, err)
             if verify is not None:
-                entry["readback_ok"] = verify()
+                readback_ok = verify()
         except GoveeBleAuthError:
             raise
         except GoveeBleNotSupported as err:
             self.skip(name, f"not supported: {err}")
             return
         except BLE_ERRORS as err:
-            entry["error"] = str(err)
-        entry["ok"] = entry["acked"] and entry["readback_ok"] is not False
-        self.results.append(entry)
+            error = str(err)
+        self.results.append(
+            {
+                "step": name,
+                "acked": acked,
+                "readback_ok": readback_ok,
+                "error": error,
+                "ok": acked and readback_ok is not False,
+            }
+        )
 
     def skip(self, name: str, reason: str) -> None:
         """Record a step that was deliberately not run."""
@@ -386,15 +490,6 @@ class _Steps:
         )
 
 
-def _state_is(device: Device, attr: str, expected: Any) -> bool | None:
-    return _match(getattr(device.state, attr), expected)
-
-
-def _segment0_is(device: Device, attr: str, expected: Any) -> bool | None:
-    seg = _segment_at(device.state, 0)
-    return _match(getattr(seg, attr) if seg else None, expected)
-
-
 def _scene_is(device: Device, name: str) -> bool | None:
     return _match(device.active_scene, name)
 
@@ -407,34 +502,42 @@ def _zone_colour_is(device: Device, zone: Zone, expected: tuple[int, int, int]) 
     return _match(_zone_colour(device.state, zone), expected)
 
 
-async def _exercise_fixture(device: Device, steps: _Steps) -> None:
+async def _exercise_fixture(
+    device: Device, steps: _Steps, *, scene_store_error: str | None = None
+) -> None:
     """Whole-fixture power-on, brightness, colour, colour temperature and scenes."""
     caps = device.capabilities
     if Capability.POWER in caps:
         await steps.run(
-            "power_on", partial(device.set_power, True), partial(_state_is, device, "is_on", True)
+            "power_on",
+            partial(device.set_power, True),
+            lambda: _match(device.state.is_on, True),
         )
     if Capability.BRIGHTNESS in caps:
         await steps.run(
             "brightness",
             partial(device.set_brightness, _TEST_BRIGHTNESS),
-            partial(_state_is, device, "brightness", _TEST_BRIGHTNESS),
+            lambda: _match(device.state.brightness, _TEST_BRIGHTNESS),
         )
     if Capability.RGB in caps:
         await steps.run(
             "rgb",
             partial(device.set_rgb, _TEST_RGB),
-            partial(_state_is, device, "rgb_color", _TEST_RGB),
+            lambda: _match(device.state.rgb_color, _TEST_RGB),
         )
     if Capability.COLOR_TEMP in caps:
-        kelvin = _mid_kelvin(device)
+        kelvin = mid_kelvin(device)
         await steps.run(
             "color_temp",
             partial(device.set_color_temp, kelvin),
-            partial(_state_is, device, "color_temp_kelvin", kelvin),
+            lambda: _match(device.state.color_temp_kelvin, kelvin),
         )
     if Capability.SCENES in caps:
-        for name in device.scene_names[:_MAX_SCENES]:
+        if scene_store_error is not None:
+            # Setup couldn't read the library's scene store (a broken install): a read
+            # here would hit the file again on the event loop, and fail again.
+            steps.skip("scenes", f"scene store unreadable: {scene_store_error}")
+        for name in [] if scene_store_error is not None else device.scene_names[:_MAX_SCENES]:
             await steps.run(
                 f"scene:{name}",
                 partial(device.set_scene_by_name, name),
@@ -444,22 +547,22 @@ async def _exercise_fixture(device: Device, steps: _Steps) -> None:
 
 async def _exercise_segments(device: Device, steps: _Steps) -> None:
     """Segment 0 colour, brightness and (where supported) colour temperature."""
-    if Capability.SEGMENTS not in device.capabilities or not device.profile.segments:
+    if Capability.SEGMENTS not in device.capabilities or not segment_count(device):
         return
     await steps.run(
         "segment_0_rgb",
         partial(device.set_segment_rgb, [0], _TEST_SEGMENT_RGB),
-        partial(_segment0_is, device, "rgb", _TEST_SEGMENT_RGB),
+        lambda: _match(_segment_rgb(device.state, 0), _TEST_SEGMENT_RGB),
     )
     await steps.run(
         "segment_0_brightness",
         partial(device.set_segment_brightness, [0], _TEST_SEGMENT_BRIGHTNESS),
-        partial(_segment0_is, device, "brightness", _TEST_SEGMENT_BRIGHTNESS),
+        lambda: _match(_segment_brightness(device.state, 0), _TEST_SEGMENT_BRIGHTNESS),
     )
     if Capability.COLOR_TEMP in device.capabilities:
         await steps.run(
             "segment_0_color_temp",
-            partial(device.set_segment_color_temp, [0], _mid_kelvin(device)),
+            partial(device.set_segment_color_temp, [0], mid_kelvin(device)),
         )
 
 
@@ -483,7 +586,7 @@ async def _exercise_zones(device: Device, steps: _Steps) -> None:
             if Capability.COLOR_TEMP in device.capabilities:
                 await steps.run(
                     f"zone_color_temp:{zone.name}",
-                    partial(device.set_zone_color_temp, zone.name, _mid_kelvin(device)),
+                    partial(device.set_zone_color_temp, zone.name, mid_kelvin(device)),
                 )
         await steps.run(
             f"zone_power_off:{zone.name}",
@@ -492,9 +595,15 @@ async def _exercise_zones(device: Device, steps: _Steps) -> None:
         )
 
 
-async def _exercise(device: Device, steps: _Steps, *, power_known: bool) -> None:
+async def _exercise(
+    device: Device,
+    steps: _Steps,
+    *,
+    power_known: bool,
+    scene_store_error: str | None = None,
+) -> None:
     """Drive every capability the device declares, recording each step."""
-    await _exercise_fixture(device, steps)
+    await _exercise_fixture(device, steps, scene_store_error=scene_store_error)
     await _exercise_segments(device, steps)
     await _exercise_zones(device, steps)
     if device.profile.gradual:
@@ -502,7 +611,7 @@ async def _exercise(device: Device, steps: _Steps, *, power_known: bool) -> None
         await steps.run(
             "gradual",
             partial(device.set_gradual, toggled),
-            partial(_state_is, device, "gradual", toggled),
+            lambda: _match(device.state.gradual, toggled),
         )
     if Capability.POWER in device.capabilities:
         if power_known:
@@ -510,7 +619,7 @@ async def _exercise(device: Device, steps: _Steps, *, power_known: bool) -> None
             await steps.run(
                 "power_off",
                 partial(device.set_power, False),
-                partial(_state_is, device, "is_on", False),
+                lambda: _match(device.state.is_on, False),
             )
         else:
             # The original power state is unknown, so it couldn't be restored:
@@ -523,23 +632,30 @@ def _sanitize_frames(lines: list[str], *, requires_secret: bool) -> list[str]:
 
     Defence in depth on top of the library's own masking: for secret-gated
     devices, keep only the decrypted (masked) ``plain=`` view - no ``wire=``
-    ciphertext and no raw handshake lines.
+    ciphertext and no line without a plaintext view (handshake frames and any
+    frame captured before the session was ready).
     """
     if not requires_secret:
         return lines
-    return [_WIRE_FIELD.sub("", line) for line in lines if " cipher plain=" not in line]
+    return [_WIRE_FIELD.sub("", line) for line in lines if not _NO_PLAINTEXT.search(line)]
 
 
-async def async_run_self_test(device: Device) -> dict[str, Any]:
+async def async_run_self_test(
+    device: Device, *, scene_store_error: str | None = None
+) -> SelfTestReport:
     """Exercise the device's full capability surface and capture the BLE session.
 
     Returns a report ``{ok, restored, restore_errors, address, sku, encryption,
     capabilities, steps, frames, log}`` - ``address`` identifies which physical
     device this ran against (the ``capture_session`` service can target several
     devices of the same SKU in one call). Each step records ``acked`` (command
-    returned without a BLE error) and ``readback_ok`` (tri-state: None when the
-    device has no read-back). The device's full pre-test state is captured up
-    front and restored at the end, also when a step raises.
+    returned without a BLE error) and ``readback_ok`` (tri-state: None when not
+    checked: no read-back, or the command failed or was skipped). The device's
+    full pre-test state is captured up front and restored at the end, also when
+    a step raises.
+
+    ``scene_store_error``: why setup couldn't read the library's scene store;
+    the scene steps are then skipped, without reading it.
 
     Raises SelfTestBusyError if another self-test is running, and
     GoveeBleAuthError if the device rejects its secret key.
@@ -547,10 +663,10 @@ async def async_run_self_test(device: Device) -> dict[str, Any]:
     if _SELF_TEST_LOCK.locked():
         raise SelfTestBusyError
     async with _SELF_TEST_LOCK:
-        return await _run_self_test(device)
+        return await _run_self_test(device, scene_store_error)
 
 
-async def _run_self_test(device: Device) -> dict[str, Any]:
+async def _run_self_test(device: Device, scene_store_error: str | None) -> SelfTestReport:
     caps = device.capabilities
     steps = _Steps(device)
     restore_errors: list[str] = []
@@ -565,7 +681,12 @@ async def _run_self_test(device: Device) -> dict[str, Any]:
         snap = _snapshot(device)
         auth_failed = False
         try:
-            await _exercise(device, steps, power_known=snap["is_on"] is not None)
+            await _exercise(
+                device,
+                steps,
+                power_known=snap["is_on"] is not None,
+                scene_store_error=scene_store_error,
+            )
         except GoveeBleAuthError:
             # Nothing lands without the secret; restoring would only retry the rejected key.
             auth_failed = True
@@ -573,20 +694,19 @@ async def _run_self_test(device: Device) -> dict[str, Any]:
         finally:
             if not auth_failed:
                 restore_errors = await _restore(device, snap)
-        if restore_errors:
-            _LOGGER.warning(
-                "%s: self-test could not fully restore the device state: %s",
-                device.address,
-                "; ".join(restore_errors),
-            )
+                # Logged here, as an exception escaping the exercise skips the report.
+                if restore_errors:
+                    _LOGGER.warning(
+                        "%s: self-test could not fully restore the device state: %s",
+                        device.address,
+                        "; ".join(restore_errors),
+                    )
 
     frames = _sanitize_frames(
         [r["message"] for r in capture.buffer if r["logger"] == _FRAMES_LOGGER],
         requires_secret=device.profile.requires_secret,
     )
-    log = [
-        f"{r['level']} {r['message']}" for r in capture.buffer if r["logger"] != _FRAMES_LOGGER
-    ]
+    log = [f"{r['level']} {r['message']}" for r in capture.buffer if r["logger"] != _FRAMES_LOGGER]
     return {
         "ok": all(s["ok"] for s in steps.results),
         "restored": not restore_errors,

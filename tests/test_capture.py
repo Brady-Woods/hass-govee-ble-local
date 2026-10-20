@@ -7,6 +7,7 @@ from collections.abc import Callable, Generator
 from dataclasses import replace
 import json
 import logging
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import DEFAULT, AsyncMock, Mock, call
 
@@ -30,13 +31,16 @@ from custom_components.govee_ble_local.capture import (
     session_capture,
 )
 
-from .conftest import make_device
+from .conftest import make_device, runtime_segment_count
 from .const import ADDRESS, PLUG_ADDRESS, PLUG_NAME
 
 OTHER_ADDRESS = "11:22:33:44:55:66"
 ROOT_LOGGER = "govee_ble_local"
 FRAMES_LOGGER = "govee_ble_local.frames"
 AFTERNOON_CODE = load_scenes("H60A6")["Afternoon"].code
+# Library releases after 1.3.0 give the H61A8 colour temperature and per-segment brightness
+# (the app's 15 01 / 15 02 colour frames); earlier ones have neither.
+H61A8_HAS_CCT = Capability.COLOR_TEMP in make_device("H61A8").capabilities
 
 H60A6_STEPS = [
     "power_on",
@@ -154,7 +158,85 @@ def root_log(lib_logger: logging.Logger) -> Generator[_Collector]:
     root.removeHandler(collector)
 
 
+class _PinnedLogger(logging.Logger):
+    """Home Assistant's ``HassLogger``, for a logger the user configured."""
+
+    def setLevel(self, level: int | str) -> None:
+        """Ignore the change, as ``HassLogger`` does for an overridden logger."""
+
+    def orig_setLevel(self, level: int | str) -> None:
+        super().setLevel(level)
+
+
+@pytest.fixture
+def pinned_lib_logger(lib_logger: logging.Logger) -> Generator[logging.Logger]:
+    """The library logger with its level pinned by Home Assistant's logger integration."""
+    original = type(lib_logger)
+    lib_logger.__class__ = _PinnedLogger
+    yield lib_logger
+    lib_logger.__class__ = original
+
+
+@pytest.fixture
+def pin_lib_logger(lib_logger: logging.Logger) -> Generator[Callable[[int], None]]:
+    """Pin the library logger's level later on, as Home Assistant's logger integration does."""
+    original = type(lib_logger)
+
+    def _pin(level: int) -> None:
+        lib_logger.__class__ = _PinnedLogger
+        assert isinstance(lib_logger, _PinnedLogger)
+        lib_logger.orig_setLevel(level)
+
+    yield _pin
+    lib_logger.__class__ = original
+
+
+@pytest.fixture
+def child_levels() -> Generator[Callable[[str, int], None]]:
+    """Set library child logger levels for one test; the old levels come back afterwards."""
+    saved: dict[str, int] = {}
+
+    def _set(name: str, level: int) -> None:
+        logger = logging.getLogger(name)
+        saved.setdefault(name, logger.level)
+        logger.setLevel(level)
+
+    yield _set
+    for name, level in saved.items():
+        logging.getLogger(name).setLevel(level)
+
+
 # -- full-surface runs ------------------------------------------------------
+
+
+async def test_self_test_skips_scenes_when_the_scene_store_is_unreadable(
+    broken_scene_store: SimpleNamespace,
+) -> None:
+    """With setup's store error, the scene steps are skipped without reading the store."""
+    device = make_device("H60A6")
+    _prime(device)
+    error = str(broken_scene_store.error)
+
+    report = await async_run_self_test(device, scene_store_error=error)
+
+    assert broken_scene_store.on_loop == []  # never read, on the loop or off it
+    steps = {s["step"]: s for s in report["steps"]}
+    assert steps["scenes"]["skipped"] == f"scene store unreadable: {error}"
+    assert not [name for name in steps if name.startswith("scene:")]
+    assert report["ok"] is True
+    assert report["restored"] is True
+
+
+async def test_self_test_reads_with_the_library_default_connect_budget() -> None:
+    """Only background polls tighten the connect: the user-run self-test keeps the defaults."""
+    device = make_device("H60A6")
+    _prime(device)
+
+    await async_run_self_test(device)
+
+    assert device.update.await_count > 1  # type: ignore[attr-defined]
+    for awaited in device.update.await_args_list:  # type: ignore[attr-defined]
+        assert awaited.kwargs == {}
 
 
 async def test_full_surface_run_on_h60a6() -> None:
@@ -201,9 +283,11 @@ async def test_run_covers_scenes_capped_to_first_three() -> None:
 async def test_h61a8_exercises_gradual_without_color_temp() -> None:
     """A gradual-capable strip toggles the flag and restores it; no colour-temp steps."""
     device = make_device("H61A8")
+    # RGB-only on every library: newer releases give the H61A8 colour temperature.
+    device.profile = replace(
+        device.profile, capabilities=device.profile.capabilities - {Capability.COLOR_TEMP}
+    )
     _prime(device, gradual=False)
-    # The real H61A8 profile has no per-segment brightness: the library raises
-    # GoveeBleNotSupported, which the self-test records as a skipped step.
     report = await async_run_self_test(device)
 
     names = [s["step"] for s in report["steps"]]
@@ -218,15 +302,38 @@ async def test_h61a8_exercises_gradual_without_color_temp() -> None:
         "power_off",
     ]
     assert report["capabilities"] == ["brightness", "power", "rgb", "scenes", "segments"]
-    unsupported = _step(report, "segment_0_brightness")
-    assert unsupported["acked"] is False
-    assert unsupported["skipped"].startswith("not supported:")
-    assert unsupported["ok"] is True
+    segment_brightness = _step(report, "segment_0_brightness")
+    if H61A8_HAS_CCT:
+        # Newer libraries send the app's 15 02 per-segment brightness.
+        assert segment_brightness["acked"] is True
+        assert "skipped" not in segment_brightness
+    else:
+        # 1.2.1 has none: GoveeBleNotSupported, recorded as a skipped step.
+        assert segment_brightness["acked"] is False
+        assert segment_brightness["skipped"].startswith("not supported:")
+    assert segment_brightness["ok"] is True
     assert report["ok"] is True
     assert report["restored"] is True
     # Toggled on for the test, put back to its original value afterwards.
     assert device.set_gradual.await_args_list == [call(True), call(False)]
     assert device.state.gradual is False
+
+
+@pytest.mark.skipif(not H61A8_HAS_CCT, reason="the installed library has no H61A8 colour temp")
+async def test_h61a8_exercises_color_temp_when_the_library_supports_it() -> None:
+    """With the app's 15 01 / 15 02 frames the H61A8 self-test also runs the CCT steps."""
+    device = make_device("H61A8")
+    _prime(device, gradual=False)
+
+    report = await async_run_self_test(device)
+
+    names = [s["step"] for s in report["steps"]]
+    assert {"color_temp", "segment_0_color_temp", "segment_0_brightness"} <= set(names)
+    assert "color_temp" in report["capabilities"]
+    for name in ("color_temp", "segment_0_color_temp", "segment_0_brightness"):
+        assert _step(report, name)["acked"] is True
+    assert report["ok"] is True
+    assert report["restored"] is True
 
 
 async def test_h61a8_self_test_completes_against_real_library() -> None:
@@ -263,7 +370,7 @@ async def test_readback_mismatch_fails_the_step_and_run() -> None:
     _prime(device)
     real_update = device.update.side_effect
 
-    async def _reverting_update() -> Any:
+    async def _reverting_update(**_kwargs: Any) -> Any:
         state = await real_update()
         if state.brightness == capture._TEST_BRIGHTNESS:
             state.brightness = 7  # the device reports something else
@@ -338,7 +445,7 @@ async def test_unreported_value_leaves_readback_unknown() -> None:
     _prime(device)
     real_update = device.update.side_effect
 
-    async def _silent_update() -> Any:
+    async def _silent_update(**_kwargs: Any) -> Any:
         state = await real_update()
         state.brightness = None  # the device reports no brightness
         return state
@@ -404,11 +511,39 @@ async def test_zone_without_segments_is_only_power_cycled() -> None:
     assert report["ok"] is True
 
 
+@pytest.mark.parametrize(
+    ("profile_segments", "runtime_count", "expected"),
+    [
+        (13, 0, []),
+        (0, 13, ["segment_0_rgb", "segment_0_brightness", "segment_0_color_temp"]),
+    ],
+    ids=["runtime_zero_synthetic", "profile_zero_synthetic"],
+)
+async def test_segment_step_gate_reads_the_runtime_segment_count(
+    profile_segments: int, runtime_count: int, expected: list[str]
+) -> None:
+    """The segment-step gate reads ``helpers.segment_count(device)``, not the profile.
+
+    Synthetic: the library never produces either state (a runtime count is 1..56 and
+    every SEGMENTS profile has segments), so for a real device both sources agree. The
+    cases only make the two sources disagree, to pin which one the gate reads.
+    """
+    device = make_device("H60A6")
+    _prime(device)
+    device.profile = replace(device.profile, segments=profile_segments)
+
+    with runtime_segment_count(runtime_count):
+        report = await async_run_self_test(device)
+
+    assert [s["step"] for s in report["steps"] if s["step"].startswith("segment_")] == expected
+    assert report["ok"] is True
+
+
 # -- restore ----------------------------------------------------------------
 
 
-async def test_restore_order_colour_then_brightness_then_power() -> None:
-    """Colour is put back first, brightness next, power last (with only the differing zone)."""
+async def test_restore_order_power_on_then_colour_then_power_off() -> None:
+    """What was on goes on first, then colour and brightness, then the off zone goes off last."""
     device = make_device("H60A6")
     _prime(
         device,
@@ -422,9 +557,9 @@ async def test_restore_order_colour_then_brightness_then_power() -> None:
 
     assert report["restored"] is True
     assert _restore_calls(manager) == [
+        ("set_power", (True,)),
         ("set_rgb", ((1, 2, 3),)),
         ("set_brightness", (40,)),
-        ("set_power", (True,)),
         ("set_zone_power", ("background", False)),
     ]
     assert device.state.brightness == 40
@@ -452,13 +587,13 @@ async def test_restore_static_colours_segments_and_zones() -> None:
 
     assert report["restored"] is True
     assert _restore_calls(manager) == [
+        ("set_power", (True,)),  # the zones are lit before they're coloured
         ("set_color_temp", (3000,)),
         ("set_segment_rgb", ([0], (9, 9, 9))),
         ("set_segment_brightness", ([0], 33)),
         ("set_zone_rgb", ("main", (8, 8, 8))),
         ("set_zone_rgb", ("background", (9, 9, 9))),
         ("set_brightness", (70,)),
-        ("set_power", (True,)),
     ]
 
 
@@ -492,8 +627,8 @@ async def test_restore_active_scene_skips_zone_and_segment_colours() -> None:
 
     assert report["restored"] is True
     assert _restore_calls(manager) == [
-        ("set_scene", (AFTERNOON_CODE,)),
         ("set_power", (True,)),
+        ("set_scene", (AFTERNOON_CODE,)),
     ]
     assert device.active_scene == "Afternoon"
 
@@ -519,10 +654,9 @@ async def test_restore_failure_does_not_abandon_later_actions() -> None:
     assert report["ok"] is True  # the steps themselves all passed
     assert report["restored"] is False
     assert report["restore_errors"] == ["zone_rgb:background: boom"]
-    assert _restore_calls(manager)[-2:] == [
-        ("set_brightness", (40,)),
-        ("set_power", (True,)),
-    ]
+    restore = _restore_calls(manager)
+    assert restore[0] == ("set_power", (True,))
+    assert restore[-1] == ("set_brightness", (40,))  # still attempted after the failure
 
 
 async def test_restore_failure_logs_a_warning(caplog: pytest.LogCaptureFixture) -> None:
@@ -563,6 +697,31 @@ async def test_unexpected_error_propagates_after_restore() -> None:
     assert not capture._SELF_TEST_LOCK.locked()
 
 
+async def test_restore_failure_is_logged_when_an_unexpected_error_propagates(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """With no report to carry them, failed restore actions are still logged at WARNING."""
+    device = make_device("H60A6")
+    _prime(device)
+    device.set_brightness.side_effect = RuntimeError("bug")
+    # power_on (exercise), then the restore's set_power(True) is the second call.
+    _fail_on_call(device.set_power, 2, GoveeBleConnectionError("link lost"))
+
+    with (
+        caplog.at_level(logging.WARNING, logger=capture.__name__),
+        pytest.raises(RuntimeError, match="bug"),
+    ):
+        await async_run_self_test(device)
+
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    message = warnings[0].getMessage()
+    assert ADDRESS in message
+    assert "could not fully restore" in message
+    assert "power: link lost" in message
+    assert not capture._SELF_TEST_LOCK.locked()
+
+
 async def test_auth_error_aborts_without_restore() -> None:
     """A rejected secret is re-raised and nothing more is sent (restore would be futile)."""
     device = make_device("H60A6")
@@ -595,7 +754,7 @@ async def test_auth_error_on_step_readback_is_raised() -> None:
     real_update = device.update.side_effect
     calls = 0
 
-    async def _update() -> Any:
+    async def _update(**_kwargs: Any) -> Any:
         nonlocal calls
         calls += 1
         if calls == 2:  # initial read passes; the first step's read-back fails
@@ -649,6 +808,7 @@ def _frame_lines(address: str) -> Callable[..., Any]:
         frames = logging.getLogger(FRAMES_LOGGER)
         frames.debug("%s tx power plain=3301 wire=deadbeef enc=none", address)
         frames.debug("%s tx cipher plain= wire=abcd enc=e7", address)
+        frames.debug("%s rx withheld plain= wire=ffff enc=rc4", address)
         frames.debug("%s rx status plain=aa wire=0f0f enc=none", OTHER_ADDRESS)
         return DEFAULT
 
@@ -664,7 +824,7 @@ async def test_secret_device_frames_drop_wire_and_handshake_lines() -> None:
     report = await async_run_self_test(device)
 
     assert report["frames"]
-    assert not [f for f in report["frames"] if " wire=" in f or "cipher plain=" in f]
+    assert not [f for f in report["frames"] if " wire=" in f or " plain= " in f]
     assert set(report["frames"]) == {f"{PLUG_ADDRESS} tx power plain=3301 enc=none"}
 
 
@@ -678,6 +838,7 @@ async def test_plain_device_frames_keep_wire_field() -> None:
 
     assert f"{ADDRESS} tx power plain=3301 wire=deadbeef enc=none" in report["frames"]
     assert f"{ADDRESS} tx cipher plain= wire=abcd enc=e7" in report["frames"]
+    assert f"{ADDRESS} rx withheld plain= wire=ffff enc=rc4" in report["frames"]
     assert not [f for f in report["frames"] if OTHER_ADDRESS in f]
 
 
@@ -704,11 +865,13 @@ async def test_log_lines_are_separate_from_frames_and_address_scoped() -> None:
 
 
 def test_sanitize_frames_unit() -> None:
-    """Secret-gated lines lose wire= and handshake lines; others pass through untouched."""
+    """Secret-gated lines lose wire= and every line without plaintext; others pass untouched."""
     lines = [
         "A tx power plain=3301 wire=deadbeef enc=none",
         "A tx cipher plain= wire=abcd enc=e7",
+        "A rx withheld plain= wire=ffff enc=rc4",
         "A rx status plain=aa wire= enc=none",
+        "A rx withheld plain=",
     ]
     assert _sanitize_frames(lines, requires_secret=False) == lines
     assert _sanitize_frames(lines, requires_secret=True) == [
@@ -782,6 +945,77 @@ async def test_session_capture_filters_by_address_and_bounds_buffer(
         child.debug("%s three", ADDRESS)
 
     assert [r["message"] for r in ring.buffer] == [f"{ADDRESS} two", f"{ADDRESS} three"]
+
+
+async def test_session_capture_raises_a_level_pinned_by_ha_logger(
+    pinned_lib_logger: logging.Logger,
+) -> None:
+    """The level gets past ``HassLogger``'s override guard and is put back the same way."""
+    frames = logging.getLogger(FRAMES_LOGGER)
+    pinned_lib_logger.setLevel(logging.DEBUG)  # a plain setLevel does nothing here
+    assert pinned_lib_logger.level == logging.WARNING
+
+    with session_capture() as ring:
+        assert pinned_lib_logger.level == logging.DEBUG
+        frames.debug("A tx power plain=3301 enc=none")
+
+    assert [r["message"] for r in ring.buffer] == ["A tx power plain=3301 enc=none"]
+    assert pinned_lib_logger.level == logging.WARNING
+
+
+async def test_session_capture_keeps_a_pin_made_during_the_capture(
+    lib_logger: logging.Logger, pin_lib_logger: Callable[[int], None]
+) -> None:
+    """Debug logging switched on mid-capture (HA pins the logger) survives the restore."""
+    with session_capture():
+        pin_lib_logger(logging.DEBUG)  # e.g. the integration's debug-logging toggle
+
+    assert lib_logger.level == logging.DEBUG
+
+
+async def test_session_capture_keeps_chattier_child_loggers_in_ha_log(
+    lib_logger: logging.Logger,
+    root_log: _Collector,
+    child_levels: Callable[[str, int], None],
+) -> None:
+    """Each record reaches HA's log if its own logger's level would have let it through."""
+    child_levels(FRAMES_LOGGER, logging.DEBUG)
+    child_levels("govee_ble_local.devices", logging.INFO)
+    frames = logging.getLogger(FRAMES_LOGGER)
+    device_log = logging.getLogger("govee_ble_local.devices.device")  # inherits INFO
+    session = logging.getLogger("govee_ble_local.session")  # inherits WARNING
+
+    with session_capture() as ring:
+        frames.debug("frame")
+        device_log.info("device info")
+        device_log.debug("device debug")
+        session.info("session info")
+        session.warning("session warning")
+
+    assert root_log.lines == ["DEBUG frame", "INFO device info", "WARNING session warning"]
+    # A child's own level also bounds what is captured from it.
+    assert [r["message"] for r in ring.buffer] == [
+        "frame",
+        "device info",
+        "session info",
+        "session warning",
+    ]
+
+
+async def test_session_capture_forwards_nothing_without_prior_propagation(
+    lib_logger: logging.Logger, root_log: _Collector
+) -> None:
+    """A library logger that didn't propagate before the capture doesn't reach HA's log in one."""
+    lib_logger.propagate = False
+    handlers_before = list(lib_logger.handlers)
+
+    with session_capture() as ring:
+        logging.getLogger("govee_ble_local.session").warning("loud")
+
+    assert [r["message"] for r in ring.buffer] == ["loud"]
+    assert root_log.lines == []
+    assert lib_logger.propagate is False
+    assert lib_logger.handlers == handlers_before
 
 
 # -- LogCapture -------------------------------------------------------------

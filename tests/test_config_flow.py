@@ -8,8 +8,15 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from bleak.backends.device import BLEDevice
-from govee_ble_local import Device, GoveeBleConnectionError, GoveeBleNotSupported
+import govee_ble_local
+from govee_ble_local import (
+    Device,
+    GoveeBleConnectionError,
+    GoveeBleNotSupported,
+    cloud as govee_cloud,
+)
 from govee_ble_local.cloud import CloudDevice, GoveeCloudError
+from govee_ble_local.identify import identify
 from homeassistant.config_entries import (
     SOURCE_BLUETOOTH,
     SOURCE_REAUTH,
@@ -19,24 +26,42 @@ from homeassistant.config_entries import (
 from homeassistant.const import CONF_ADDRESS, CONF_EMAIL, CONF_PASSWORD
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import AbortFlow, FlowResult, FlowResultType
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from custom_components.govee_ble_local import config_flow
 from custom_components.govee_ble_local.config_flow import GoveeBleLocalConfigFlow
 from custom_components.govee_ble_local.const import (
+    CONF_ALLOW_MODELLED,
     CONF_CLEAR_SECRET,
     CONF_SECRET,
     CONF_SKU,
     DOMAIN,
 )
 
-from .conftest import make_device, make_service_info
-from .const import ADDRESS, LOCAL_NAME, PLUG_ADDRESS, PLUG_NAME, SECRET_HEX
+from .conftest import ModelledCase, make_device, make_service_info
+from .const import ADDRESS, LOCAL_NAME, PLUG_ADDRESS, PLUG_NAME, SECRET_HEX, pact_mfg
 
 FLOW = "custom_components.govee_ble_local.config_flow"
 UNSUPPORTED_NAME = "GVH9999ABCD"
 OTHER_SECRET_HEX = "0011223344556677"
 PLUG_NO_COLON = PLUG_ADDRESS.replace(":", "").lower()
+# Govee device ids are 8 octets ending in the Wi-Fi MAC, which is one below the BLE
+# address the device advertises (the library's own example has the same pair).
+PLUG_DEVICE_ID = "86:9D:AA:BB:CC:DD:EE:06"
+PLUG_WIFI_MAC = "AA:BB:CC:DD:EE:06"
+OTHER_DEVICE_ID = "86:9D:98:17:3C:B1:A2:D0"
+OTHER_BLE_MAC = "98:17:3C:B1:A2:D1"
+# The library's GoveeCloudAuthError (rejected credentials), where it has one: from the
+# cloud module the flow reads it from, and from the top-level export (the library's
+# semver-stable API), a source independent of the flow's own lookup.
+LIBRARY_CLOUD_AUTH_ERROR: type[GoveeCloudError] | None = getattr(
+    govee_cloud, "GoveeCloudAuthError", None
+)
+TOP_LEVEL_CLOUD_AUTH_ERROR: type[GoveeCloudError] | None = getattr(
+    govee_ble_local, "GoveeCloudAuthError", None
+)
 
 
 @pytest.fixture
@@ -70,13 +95,19 @@ def plug_device() -> Generator[Device]:
 
 
 @pytest.fixture
-def cloud_account() -> Generator[MagicMock]:
-    """Patch GoveeCloudAccount; tests set ``get_devices`` results."""
+def cloud_account_cls() -> Generator[MagicMock]:
+    """Patch the GoveeCloudAccount class (its instance is ``cloud_account``)."""
     with patch(f"{FLOW}.GoveeCloudAccount") as cls:
-        account = cls.return_value
-        account.get_devices = AsyncMock(return_value=[])
-        account.close = AsyncMock()
-        yield account
+        cls.return_value.get_devices = AsyncMock(return_value=[])
+        cls.return_value.close = AsyncMock()
+        yield cls
+
+
+@pytest.fixture
+def cloud_account(cloud_account_cls: MagicMock) -> MagicMock:
+    """The patched cloud account; tests set ``get_devices`` results."""
+    account: MagicMock = cloud_account_cls.return_value
+    return account
 
 
 def plug_entry(**extra: Any) -> MockConfigEntry:
@@ -92,10 +123,17 @@ def plug_entry(**extra: Any) -> MockConfigEntry:
 def cloud_device(
     *,
     secret: bytes | None,
-    ble_mac: str | None,
-    device: str = "98:17:3C:B1:A2:D0:00:11:22:33:44:55",
+    address: str | None,
+    device: str = PLUG_DEVICE_ID,
 ) -> CloudDevice:
-    """Build a cloud account device."""
+    """Build a cloud account device the way the library's account parser fills one.
+
+    ``address`` is the response's ``deviceSettings.address`` (the BLE MAC). Without it
+    the parser takes the last 6 octets of the device id (the Wi-Fi MAC) as ``ble_mac``,
+    and None only for an id with fewer than 6 octets.
+    """
+    octets = device.split(":")
+    fallback = ":".join(octets[-6:]) if len(octets) >= 6 else None
     return CloudDevice(
         sku="H5083",
         device=device,
@@ -104,7 +142,14 @@ def cloud_device(
         pact_type=None,
         pact_code=None,
         goods_type=None,
-        ble_mac=ble_mac,
+        ble_mac=address or fallback,
+    )
+
+
+def other_cloud_device() -> CloudDevice:
+    """Another device on the same account, with a secret of its own."""
+    return cloud_device(
+        secret=bytes.fromhex(OTHER_SECRET_HEX), address=OTHER_BLE_MAC, device=OTHER_DEVICE_ID
     )
 
 
@@ -172,6 +217,15 @@ async def choose(hass: HomeAssistant, result: FlowResult, option: str) -> FlowRe
     )
 
 
+async def assert_set_up_once(hass: HomeAssistant, setup_entry: AsyncMock) -> None:
+    """The created entry was set up, or the updated one reloaded, exactly once.
+
+    For reauth/reconfigure the reload is what makes the new secret take effect.
+    """
+    await hass.async_block_till_done()
+    assert len(setup_entry.mock_calls) == 1
+
+
 # -- Bluetooth discovery ------------------------------------------------------
 
 
@@ -191,6 +245,7 @@ async def test_bluetooth_discovery_creates_entry(
     assert result["title"] == LOCAL_NAME
     assert result["data"] == {CONF_ADDRESS: ADDRESS, CONF_SKU: "H60A6"}
     assert result["result"].unique_id == ADDRESS
+    await assert_set_up_once(hass, setup_entry)
 
 
 async def test_bluetooth_discovery_already_configured(hass: HomeAssistant) -> None:
@@ -221,6 +276,289 @@ async def test_bluetooth_discovery_not_supported(hass: HomeAssistant, info: Any)
     )
     assert result["type"] is FlowResultType.ABORT
     assert result["reason"] == "not_supported"
+
+
+_GOVEE_PAYLOAD = next(iter(make_service_info().manufacturer_data.values()))
+
+
+@pytest.mark.parametrize(
+    ("name", "company_id"),
+    [
+        ("Govee_B7080_1A2B", 0x8841),  # B7080: matched by Govee_*, admitted only by a later library
+        ("GBK_B7082_1A2B", 0x8842),
+        ("GVH50751A2B", 0x8801),  # a Govee thermometer: matched by GVH*, never a light
+        (LOCAL_NAME, 0x8841),  # a supported light on the encrypted-header variants
+        (LOCAL_NAME, 0x8842),
+        ("GV60471A2B", 0x8843),  # plain GV + digit (GV6*): read as an H6047
+    ],
+)
+async def test_bluetooth_discovery_follows_the_librarys_supported_check(
+    hass: HomeAssistant, name: str, company_id: int
+) -> None:
+    """The matchers may catch more than the library drives; only what it supports is offered."""
+    info = make_service_info(name=name, manufacturer_data={company_id: _GOVEE_PAYLOAD})
+    adv = identify(info.name, info.manufacturer_data)
+    supported = adv is not None and govee_ble_local.is_supported_sku(adv.sku, pact=adv.pact)
+    if name in (LOCAL_NAME, "GV60471A2B"):
+        assert supported  # supported lights on every library: these must reach the confirm step
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": SOURCE_BLUETOOTH}, data=info
+    )
+    if supported:
+        assert result["type"] is FlowResultType.FORM
+        assert result["step_id"] == "bluetooth_confirm"
+    else:
+        assert result["type"] is FlowResultType.ABORT
+        assert result["reason"] == "not_supported"
+
+
+# H6009 is routed only by the library's catalogue: it is served at its row's pacts alone.
+PACT_CASES = pytest.mark.parametrize(
+    ("name", "pact", "offered"),
+    [
+        ("GVH6009ABCD", (1, 1), True),  # a pact its row accepts
+        ("GVH6009ABCD", (2, 3), False),  # a pact it doesn't: setup would refuse the model
+        (LOCAL_NAME, (9, 9), True),  # a 1.4.0 model still routes at a pact no row lists
+    ],
+    ids=["catalogue_accepted_pact", "catalogue_other_pact", "known_model_unlisted_pact"],
+)
+
+
+@PACT_CASES
+async def test_bluetooth_discovery_checks_support_at_the_advertised_pact(
+    hass: HomeAssistant, setup_entry: AsyncMock, name: str, pact: tuple[int, int], offered: bool
+) -> None:
+    """Discovery offers a model only where setup would route it: at its advertised pact."""
+    info = make_service_info(name=name, manufacturer_data=pact_mfg(*pact))
+    assert identify(info.name, info.manufacturer_data).pact == pact
+    with patch(f"{FLOW}.profile_for", wraps=config_flow.profile_for) as profile:
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": SOURCE_BLUETOOTH}, data=info
+        )
+        if not offered:
+            assert result["type"] is FlowResultType.ABORT
+            assert result["reason"] == "not_supported"
+            return
+        assert result["type"] is FlowResultType.FORM
+        assert result["step_id"] == "bluetooth_confirm"
+        result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    # The secret check looked the profile up at the same pact (threaded, not re-derived).
+    assert profile.call_args.kwargs == {"pact": pact, "allow_modelled": False}
+
+
+@PACT_CASES
+async def test_user_flow_offers_only_devices_supported_at_their_pact(
+    hass: HomeAssistant, setup_entry: AsyncMock, name: str, pact: tuple[int, int], offered: bool
+) -> None:
+    """The manual picker lists a model only at a pact it is served at, and sets it up there."""
+    infos = [make_service_info(name=name, manufacturer_data=pact_mfg(*pact))]
+    with patch(f"{FLOW}.async_discovered_service_info", return_value=infos):
+        result = await hass.config_entries.flow.async_init(DOMAIN, context={"source": SOURCE_USER})
+    if not offered:
+        assert result["type"] is FlowResultType.ABORT
+        assert result["reason"] == "no_devices_found"
+        return
+    assert result["step_id"] == "user"
+    assert next(iter(result["data_schema"].schema.values())).container == {ADDRESS: name}
+    with patch(f"{FLOW}.profile_for", wraps=config_flow.profile_for) as profile:
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {CONF_ADDRESS: ADDRESS}
+        )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert profile.call_args.kwargs == {"pact": pact, "allow_modelled": False}
+
+
+@pytest.mark.parametrize(
+    ("name", "flow_mfg", "latest_mfg", "entry_pact"),
+    [
+        ("GVH6009ABCD", {}, pact_mfg(1, 1), (1, 1)),  # no pact, then one its row accepts
+        ("GVH6009ABCD", {}, pact_mfg(2, 3), None),  # no pact, then one it doesn't: refused
+        ("GVH6009ABCD", {}, {}, None),  # still no pact: any pact, as setup will take it
+        ("GVH6009ABCD", {}, None, None),  # no connectable advert to check against
+        ("GVH6009ABCD", pact_mfg(1, 1), pact_mfg(2, 3), None),  # the pact changed: refused
+        (LOCAL_NAME, pact_mfg(1, 1), pact_mfg(9, 9), (9, 9)),  # changed, still served
+        ("GVH6009ABCD", pact_mfg(1, 1), {}, (1, 1)),  # setup's advert has none: flow's stands
+        ("GVH6009ABCD", pact_mfg(1, 1), None, (1, 1)),  # no connectable advert: flow's stands
+    ],
+    ids=[
+        "none_then_accepted",
+        "none_then_refused",
+        "still_none",
+        "none_no_advert",
+        "changed_refused",
+        "changed_accepted",
+        "pact_then_none",
+        "pact_no_advert",
+    ],
+)
+async def test_finish_rechecks_at_the_setup_advert_pact(
+    hass: HomeAssistant,
+    setup_entry: AsyncMock,
+    *,
+    name: str,
+    flow_mfg: dict[int, bytes],
+    latest_mfg: dict[int, bytes] | None,
+    entry_pact: tuple[int, int] | None,
+) -> None:
+    """The entry follows the pact setup will route by, and isn't created where it's refused."""
+    info = make_service_info(name=name, manufacturer_data=flow_mfg)
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": SOURCE_BLUETOOTH}, data=info
+    )
+    assert result["step_id"] == "bluetooth_confirm"
+    latest = (
+        None if latest_mfg is None else make_service_info(name=name, manufacturer_data=latest_mfg)
+    )
+    with (
+        patch(f"{FLOW}.async_last_service_info", return_value=latest) as last,
+        patch(f"{FLOW}.profile_for", wraps=config_flow.profile_for) as profile,
+    ):
+        result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+    assert last.call_args.args[1:] == (ADDRESS,)
+    assert last.call_args.kwargs == {"connectable": True}
+    refused = latest_mfg not in (None, {}) and entry_pact is None
+    if refused:
+        assert result["type"] is FlowResultType.ABORT
+        assert result["reason"] == "protocol_not_supported"
+        assert hass.config_entries.async_entries(DOMAIN) == []
+    else:
+        assert result["type"] is FlowResultType.CREATE_ENTRY
+        assert profile.call_args.kwargs == {"pact": entry_pact, "allow_modelled": False}
+
+
+# -- modelled-only models ---------------------------------------------------------
+
+
+async def test_modelled_model_asks_before_setup_and_records_the_opt_in(
+    hass: HomeAssistant, setup_entry: AsyncMock, modelled: ModelledCase
+) -> None:
+    """Discovery asks before setting up a modelled-only model, and the entry records the yes."""
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": SOURCE_BLUETOOTH}, data=modelled.info()
+    )
+    assert result["type"] is FlowResultType.MENU
+    assert result["step_id"] == "modelled_confirm"
+    assert result["menu_options"] == ["modelled_accept", "modelled_decline"]
+    assert result["description_placeholders"] == {"name": modelled.name, "model": modelled.sku}
+
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"next_step_id": "modelled_accept"}
+    )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["data"] == {
+        CONF_ADDRESS: ADDRESS,
+        CONF_SKU: modelled.sku,
+        CONF_ALLOW_MODELLED: True,
+    }
+
+
+async def test_declining_a_modelled_model_aborts(
+    hass: HomeAssistant, modelled: ModelledCase
+) -> None:
+    """Declining the modelled-only model ends the flow without an entry."""
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": SOURCE_BLUETOOTH}, data=modelled.info()
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"next_step_id": "modelled_decline"}
+    )
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "modelled_declined"
+    assert not hass.config_entries.async_entries(DOMAIN)
+
+
+async def test_manual_setup_of_a_modelled_model_asks_too(
+    hass: HomeAssistant, setup_entry: AsyncMock, modelled: ModelledCase
+) -> None:
+    """Picking a modelled-only model from the manual list asks the same question."""
+    with patch(f"{FLOW}.async_discovered_service_info", return_value=[modelled.info()]):
+        result = await hass.config_entries.flow.async_init(DOMAIN, context={"source": SOURCE_USER})
+    assert next(iter(result["data_schema"].schema.values())).container == {ADDRESS: modelled.name}
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_ADDRESS: ADDRESS}
+    )
+    assert result["type"] is FlowResultType.MENU
+    assert result["step_id"] == "modelled_confirm"
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"next_step_id": "modelled_accept"}
+    )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["data"][CONF_ALLOW_MODELLED] is True
+
+
+async def test_modelled_opt_in_reaches_the_secret_check(
+    hass: HomeAssistant, setup_entry: AsyncMock, modelled: ModelledCase
+) -> None:
+    """The profile behind the secret decision is the modelled one the user accepted."""
+    with patch(f"{FLOW}.profile_for", wraps=config_flow.profile_for) as profile:
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": SOURCE_BLUETOOTH}, data=modelled.info()
+        )
+        await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"next_step_id": "modelled_accept"}
+        )
+    assert profile.call_args.kwargs == {"pact": modelled.pact, "allow_modelled": True}
+
+
+async def test_pactless_modelled_model_is_rechecked_with_the_opt_in(
+    hass: HomeAssistant, setup_entry: AsyncMock, modelled: ModelledCase
+) -> None:
+    """A pact-less modelled-only model is re-checked at setup's pact as modelled, not refused."""
+    info = modelled.info(manufacturer_data={})
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": SOURCE_BLUETOOTH}, data=info
+    )
+    assert result["step_id"] == "modelled_confirm"
+    with patch(f"{FLOW}.async_last_service_info", return_value=modelled.info()):
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"next_step_id": "modelled_accept"}
+        )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["data"][CONF_ALLOW_MODELLED] is True
+
+
+async def test_modelled_opt_in_reaches_the_secret_read(
+    hass: HomeAssistant, setup_entry: AsyncMock, modelled: ModelledCase
+) -> None:
+    """A modelled device that needs a secret is read with the modelled profile.
+
+    Pins both hand-offs: the read task passes the opt-in, and the read passes it to
+    create_device.
+    """
+    ble_device = BLEDevice(address=ADDRESS, name=modelled.name, details={})
+    with (
+        patch(f"{FLOW}._requires_secret", return_value=True),
+        patch(f"{FLOW}.async_ble_device_from_address", return_value=ble_device),
+        patch(f"{FLOW}.async_last_service_info", return_value=modelled.info()),
+        patch(f"{FLOW}.create_device", side_effect=GoveeBleConnectionError("no link")) as create,
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": SOURCE_BLUETOOTH}, data=modelled.info()
+        )
+        await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"next_step_id": "modelled_accept"}
+        )
+        await hass.async_block_till_done()
+    assert create.call_args.args[:2] == (ble_device, modelled.sku)
+    assert create.call_args.kwargs == {"allow_modelled": True}
+
+
+@pytest.mark.parametrize("opted_in", [True, False])
+async def test_reconfigure_checks_the_secret_with_the_entrys_opt_in(
+    hass: HomeAssistant, setup_entry: AsyncMock, modelled: ModelledCase, opted_in: bool
+) -> None:
+    """Reconfigure decides on the secret with the profile the entry was set up with."""
+    data: dict[str, Any] = {CONF_ADDRESS: ADDRESS, CONF_SKU: modelled.sku}
+    if opted_in:
+        data[CONF_ALLOW_MODELLED] = True
+    entry = MockConfigEntry(domain=DOMAIN, unique_id=ADDRESS, data=data)
+    entry.add_to_hass(hass)
+    with patch(f"{FLOW}.profile_for", wraps=config_flow.profile_for) as profile:
+        result = await entry.start_reconfigure_flow(hass)
+    assert result["step_id"] == "reconfigure"
+    assert profile.call_args.args == (modelled.sku,)
+    assert profile.call_args.kwargs == {"pact": None, "allow_modelled": opted_in}
 
 
 # -- user flow ----------------------------------------------------------------
@@ -255,6 +593,10 @@ async def test_user_flow_lists_only_supported_new_devices(
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["title"] == LOCAL_NAME
     assert result["data"] == {CONF_ADDRESS: ADDRESS, CONF_SKU: "H60A6"}
+    # Setting the domain up also sets up the other (already configured) entry.
+    await hass.async_block_till_done()
+    set_up = [call.args[1].entry_id for call in setup_entry.call_args_list]
+    assert set_up.count(result["result"].entry_id) == 1
 
 
 async def test_user_flow_no_devices(hass: HomeAssistant) -> None:
@@ -310,6 +652,7 @@ async def test_user_flow_secret_device_goes_to_secret_step(
         CONF_SKU: "H5083",
         CONF_SECRET: SECRET_HEX,
     }
+    await assert_set_up_once(hass, setup_entry)
 
 
 # -- secret read off the device ----------------------------------------------
@@ -335,6 +678,7 @@ async def test_secret_read_shows_progress_then_creates_entry(
     }
     plug_device.read_secret.assert_awaited_once()
     plug_device.stop.assert_awaited_once()
+    await assert_set_up_once(hass, setup_entry)
 
 
 async def test_secret_progress_not_done_keeps_showing_progress(
@@ -351,6 +695,27 @@ async def test_secret_progress_not_done_keeps_showing_progress(
 
     result = await finish_read(hass, again, gate)
     assert result["type"] is FlowResultType.CREATE_ENTRY
+
+
+async def test_closing_the_flow_mid_read_stops_the_link(
+    hass: HomeAssistant, plug_device: Device, setup_entry: AsyncMock
+) -> None:
+    """Closing the dialog while the secret is being read still stops the device link.
+
+    HA cancels the read task; without the stop the plug's connection slot would
+    stay held until the library's idle disconnect.
+    """
+    gate_read(plug_device, returns=bytes.fromhex(SECRET_HEX))
+    result = await start_plug_discovery(hass)
+    assert result["type"] is FlowResultType.SHOW_PROGRESS
+
+    hass.config_entries.flow.async_abort(result["flow_id"])
+    await hass.async_block_till_done()
+    plug_device.read_secret.assert_awaited_once()
+    plug_device.stop.assert_awaited_once()
+    assert [f for f in hass.config_entries.flow.async_progress() if f["handler"] == DOMAIN] == []
+    assert hass.config_entries.async_entries(DOMAIN) == []
+    setup_entry.assert_not_called()
 
 
 async def test_secret_read_passes_advertisement_to_create_device(
@@ -468,6 +833,7 @@ async def test_manual_secret_normalized(
         CONF_SKU: "H5083",
         CONF_SECRET: SECRET_HEX,
     }
+    await assert_set_up_once(hass, setup_entry)
 
 
 async def test_manual_secret_blank_allowed_on_setup(
@@ -481,6 +847,7 @@ async def test_manual_secret_blank_allowed_on_setup(
     assert result["title"] == PLUG_NAME
     assert result["data"] == {CONF_ADDRESS: PLUG_ADDRESS, CONF_SKU: "H5083"}
     assert CONF_SECRET not in result["data"]
+    await assert_set_up_once(hass, setup_entry)
 
 
 # -- cloud secret -------------------------------------------------------------
@@ -499,12 +866,16 @@ CREDENTIALS = {CONF_EMAIL: "user@example.com", CONF_PASSWORD: "hunter2"}
 
 
 async def test_cloud_secret_picks_matching_device(
-    hass: HomeAssistant, plug_device: Device, cloud_account: MagicMock, setup_entry: AsyncMock
+    hass: HomeAssistant,
+    plug_device: Device,
+    cloud_account_cls: MagicMock,
+    cloud_account: MagicMock,
+    setup_entry: AsyncMock,
 ) -> None:
     """The secret of the device matching the address wins, not the first with a secret."""
     cloud_account.get_devices.return_value = [
-        cloud_device(secret=bytes.fromhex(OTHER_SECRET_HEX), ble_mac="98:17:3C:B1:A2:D1"),
-        cloud_device(secret=bytes.fromhex(SECRET_HEX), ble_mac=PLUG_ADDRESS),
+        other_cloud_device(),
+        cloud_device(secret=bytes.fromhex(SECRET_HEX), address=PLUG_ADDRESS),
     ]
     form = await open_cloud_form(hass, plug_device)
     result = await hass.config_entries.flow.async_configure(form["flow_id"], CREDENTIALS)
@@ -517,7 +888,14 @@ async def test_cloud_secret_picks_matching_device(
     }
     assert CONF_EMAIL not in result["data"]
     assert CONF_PASSWORD not in result["data"]
+    # Logged in with the entered credentials, on Home Assistant's shared session.
+    cloud_account_cls.assert_called_once_with(
+        CREDENTIALS[CONF_EMAIL],
+        CREDENTIALS[CONF_PASSWORD],
+        session=async_get_clientsession(hass),
+    )
     cloud_account.close.assert_awaited_once()
+    await assert_set_up_once(hass, setup_entry)
 
 
 async def test_cloud_secret_matches_lowercase_ble_mac(
@@ -525,7 +903,7 @@ async def test_cloud_secret_matches_lowercase_ble_mac(
 ) -> None:
     """The BLE MAC match is case- and separator-insensitive."""
     cloud_account.get_devices.return_value = [
-        cloud_device(secret=bytes.fromhex(SECRET_HEX), ble_mac=PLUG_ADDRESS.lower()),
+        cloud_device(secret=bytes.fromhex(SECRET_HEX), address=PLUG_ADDRESS.lower()),
     ]
     form = await open_cloud_form(hass, plug_device)
     result = await hass.config_entries.flow.async_configure(form["flow_id"], CREDENTIALS)
@@ -533,26 +911,21 @@ async def test_cloud_secret_matches_lowercase_ble_mac(
     assert result["data"][CONF_SECRET] == SECRET_HEX
 
 
-async def test_cloud_secret_device_id_fallback(
-    hass: HomeAssistant, plug_device: Device, cloud_account: MagicMock, setup_entry: AsyncMock
+async def test_cloud_secret_without_ble_address_is_not_matched_by_wifi_mac(
+    hass: HomeAssistant, plug_device: Device, cloud_account: MagicMock
 ) -> None:
-    """Without a BLE MAC, the device id's trailing octets identify the device."""
-    cloud_account.get_devices.return_value = [
-        cloud_device(
-            secret=bytes.fromhex(OTHER_SECRET_HEX),
-            ble_mac=None,
-            device="98:17:3C:B1:A2:D0:11:22:33:44:55:66",
-        ),
-        cloud_device(
-            secret=bytes.fromhex(SECRET_HEX),
-            ble_mac=None,
-            device=f"98:17:3C:B1:A2:D0:{PLUG_ADDRESS.lower()}",
-        ),
-    ]
+    """Without deviceSettings.address the fallback MAC is the Wi-Fi MAC, which doesn't match.
+
+    The device id ends in the Wi-Fi MAC, one below the advertised BLE address, so the
+    plug's own secret isn't picked: secret_not_found.
+    """
+    plug = cloud_device(secret=bytes.fromhex(SECRET_HEX), address=None)
+    assert plug.ble_mac == PLUG_WIFI_MAC
+    cloud_account.get_devices.return_value = [other_cloud_device(), plug]
     form = await open_cloud_form(hass, plug_device)
     result = await hass.config_entries.flow.async_configure(form["flow_id"], CREDENTIALS)
-    assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert result["data"][CONF_SECRET] == SECRET_HEX
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {"base": "secret_not_found"}
     cloud_account.close.assert_awaited_once()
 
 
@@ -569,15 +942,61 @@ async def test_cloud_secret_login_error(
     cloud_account.close.assert_awaited_once()
 
 
+def test_cloud_auth_error_is_the_librarys_where_it_has_one() -> None:
+    """Newer libraries' GoveeCloudAuthError is caught; the 1.2.1 floor gets a stand-in.
+
+    The stand-in is private to the flow, so on the floor nothing raises it and every cloud
+    failure stays cannot_connect, as before. Checked against the top-level export first:
+    a library that still has the class but dropped the cloud module's re-export fails
+    here instead of quietly showing cannot_connect for a wrong password again.
+    """
+    if TOP_LEVEL_CLOUD_AUTH_ERROR is not None:
+        assert config_flow._CLOUD_AUTH_ERROR is TOP_LEVEL_CLOUD_AUTH_ERROR
+    elif LIBRARY_CLOUD_AUTH_ERROR is not None:
+        assert config_flow._CLOUD_AUTH_ERROR is LIBRARY_CLOUD_AUTH_ERROR
+    else:
+        assert config_flow._CLOUD_AUTH_ERROR is config_flow._CloudAuthErrorUnavailable
+    assert issubclass(config_flow._CLOUD_AUTH_ERROR, GoveeCloudError)
+
+
+async def test_cloud_secret_rejected_credentials_show_invalid_auth(
+    hass: HomeAssistant, plug_device: Device, cloud_account: MagicMock
+) -> None:
+    """Credentials the account rejects (GoveeCloudAuthError) show invalid_auth.
+
+    The library's own class where it has one; on the floor, the stand-in the flow catches.
+    """
+    auth_error = (
+        TOP_LEVEL_CLOUD_AUTH_ERROR or LIBRARY_CLOUD_AUTH_ERROR or config_flow._CLOUD_AUTH_ERROR
+    )
+    cloud_account.get_devices.side_effect = auth_error("login rejected")
+    form = await open_cloud_form(hass, plug_device)
+    result = await hass.config_entries.flow.async_configure(form["flow_id"], CREDENTIALS)
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "secret_cloud"
+    assert result["errors"] == {"base": "invalid_auth"}
+    cloud_account.close.assert_awaited_once()
+
+
 @pytest.mark.parametrize(
     "devices",
     [
         [],
-        [cloud_device(secret=bytes.fromhex(OTHER_SECRET_HEX), ble_mac="98:17:3C:B1:A2:D1")],
-        [cloud_device(secret=None, ble_mac=PLUG_ADDRESS)],
-        [cloud_device(secret=b"", ble_mac=PLUG_ADDRESS)],
+        [other_cloud_device()],
+        [cloud_device(secret=None, address=PLUG_ADDRESS)],
+        [cloud_device(secret=b"", address=PLUG_ADDRESS)],
+        [cloud_device(secret=bytes.fromhex(SECRET_HEX), address=None, device="AA:BB")],
+        # Only the library's MAC is matched, never the raw id it couldn't split into octets.
+        [cloud_device(secret=bytes.fromhex(SECRET_HEX), address=None, device=PLUG_NO_COLON)],
     ],
-    ids=["empty_account", "other_device_only", "match_without_secret", "match_empty_secret"],
+    ids=[
+        "empty_account",
+        "other_device_only",
+        "match_without_secret",
+        "match_empty_secret",
+        "no_mac_at_all",
+        "unsplit_device_id",
+    ],
 )
 async def test_cloud_secret_not_found(
     hass: HomeAssistant,
@@ -605,7 +1024,7 @@ async def test_cloud_secret_retry_after_error(
 
     cloud_account.get_devices.side_effect = None
     cloud_account.get_devices.return_value = [
-        cloud_device(secret=bytes.fromhex(SECRET_HEX), ble_mac=PLUG_ADDRESS)
+        cloud_device(secret=bytes.fromhex(SECRET_HEX), address=PLUG_ADDRESS)
     ]
     result = await hass.config_entries.flow.async_configure(form["flow_id"], CREDENTIALS)
     assert result["type"] is FlowResultType.CREATE_ENTRY
@@ -662,6 +1081,26 @@ async def test_reauth_manual_updates_secret(hass: HomeAssistant, setup_entry: As
     assert result["type"] is FlowResultType.ABORT
     assert result["reason"] == "reauth_successful"
     assert entry.data == {CONF_ADDRESS: PLUG_ADDRESS, CONF_SKU: "H5083", CONF_SECRET: SECRET_HEX}
+    await assert_set_up_once(hass, setup_entry)
+
+
+async def test_reauth_keeps_the_modelled_opt_in(
+    hass: HomeAssistant, setup_entry: AsyncMock
+) -> None:
+    """Replacing the secret keeps the entry's opt-in: without it, setup would refuse the model."""
+    entry = plug_entry(**{CONF_SECRET: OTHER_SECRET_HEX, CONF_ALLOW_MODELLED: True})
+    menu = await start_reauth(hass, entry)
+    form = await choose(hass, menu, "secret_manual")
+    result = await hass.config_entries.flow.async_configure(
+        form["flow_id"], {CONF_SECRET: SECRET_HEX}
+    )
+    assert result["reason"] == "reauth_successful"
+    assert entry.data == {
+        CONF_ADDRESS: PLUG_ADDRESS,
+        CONF_SKU: "H5083",
+        CONF_SECRET: SECRET_HEX,
+        CONF_ALLOW_MODELLED: True,
+    }
 
 
 async def test_reauth_manual_blank_rejected(hass: HomeAssistant) -> None:
@@ -691,8 +1130,8 @@ async def test_reauth_cloud_updates_secret(
 ) -> None:
     """The cloud path replaces the stored secret during reauth."""
     cloud_account.get_devices.return_value = [
-        cloud_device(secret=bytes.fromhex(OTHER_SECRET_HEX), ble_mac="98:17:3C:B1:A2:D1"),
-        cloud_device(secret=bytes.fromhex(SECRET_HEX), ble_mac=PLUG_ADDRESS),
+        other_cloud_device(),
+        cloud_device(secret=bytes.fromhex(SECRET_HEX), address=PLUG_ADDRESS),
     ]
     entry = plug_entry(**{CONF_SECRET: OTHER_SECRET_HEX})
     menu = await start_reauth(hass, entry)
@@ -704,6 +1143,7 @@ async def test_reauth_cloud_updates_secret(
     assert result["reason"] == "reauth_successful"
     assert entry.data == {CONF_ADDRESS: PLUG_ADDRESS, CONF_SKU: "H5083", CONF_SECRET: SECRET_HEX}
     cloud_account.close.assert_awaited_once()
+    await assert_set_up_once(hass, setup_entry)
 
 
 async def test_reauth_via_flow_init(hass: HomeAssistant) -> None:
@@ -739,6 +1179,7 @@ async def test_reconfigure_device_without_secret(
     assert result["type"] is FlowResultType.ABORT
     assert result["reason"] == "reconfigure_successful"
     assert entry.data == {CONF_ADDRESS: ADDRESS, CONF_SKU: "H60A6"}
+    await assert_set_up_once(hass, setup_entry)
 
 
 async def test_reconfigure_entry_without_sku(hass: HomeAssistant, setup_entry: AsyncMock) -> None:
@@ -750,6 +1191,7 @@ async def test_reconfigure_entry_without_sku(hass: HomeAssistant, setup_entry: A
     result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
     assert result["reason"] == "reconfigure_successful"
     assert entry.data == {CONF_ADDRESS: ADDRESS}
+    await assert_set_up_once(hass, setup_entry)
 
 
 async def test_reconfigure_secret_form_fields(hass: HomeAssistant) -> None:
@@ -773,6 +1215,26 @@ async def test_reconfigure_blank_keeps_secret(
     assert result["type"] is FlowResultType.ABORT
     assert result["reason"] == "reconfigure_successful"
     assert entry.data[CONF_SECRET] == SECRET_HEX
+    await assert_set_up_once(hass, setup_entry)
+
+
+async def test_reconfigure_keeps_the_modelled_opt_in(
+    hass: HomeAssistant, setup_entry: AsyncMock
+) -> None:
+    """Changing the secret keeps the entry's opt-in: without it, setup would refuse the model."""
+    entry = plug_entry(**{CONF_SECRET: OTHER_SECRET_HEX, CONF_ALLOW_MODELLED: True})
+    entry.add_to_hass(hass)
+    result = await entry.start_reconfigure_flow(hass)
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_SECRET: SECRET_HEX}
+    )
+    assert result["reason"] == "reconfigure_successful"
+    assert entry.data == {
+        CONF_ADDRESS: PLUG_ADDRESS,
+        CONF_SKU: "H5083",
+        CONF_SECRET: SECRET_HEX,
+        CONF_ALLOW_MODELLED: True,
+    }
 
 
 async def test_reconfigure_replaces_secret(hass: HomeAssistant, setup_entry: AsyncMock) -> None:
@@ -785,6 +1247,7 @@ async def test_reconfigure_replaces_secret(hass: HomeAssistant, setup_entry: Asy
     )
     assert result["reason"] == "reconfigure_successful"
     assert entry.data == {CONF_ADDRESS: PLUG_ADDRESS, CONF_SKU: "H5083", CONF_SECRET: SECRET_HEX}
+    await assert_set_up_once(hass, setup_entry)
 
 
 async def test_reconfigure_sets_secret_when_missing(
@@ -799,6 +1262,7 @@ async def test_reconfigure_sets_secret_when_missing(
     )
     assert result["reason"] == "reconfigure_successful"
     assert entry.data[CONF_SECRET] == SECRET_HEX
+    await assert_set_up_once(hass, setup_entry)
 
 
 async def test_reconfigure_clear_secret(hass: HomeAssistant, setup_entry: AsyncMock) -> None:
@@ -811,6 +1275,7 @@ async def test_reconfigure_clear_secret(hass: HomeAssistant, setup_entry: AsyncM
     )
     assert result["reason"] == "reconfigure_successful"
     assert entry.data == {CONF_ADDRESS: PLUG_ADDRESS, CONF_SKU: "H5083"}
+    await assert_set_up_once(hass, setup_entry)
 
 
 async def test_reconfigure_new_secret_wins_over_clear(
@@ -825,6 +1290,7 @@ async def test_reconfigure_new_secret_wins_over_clear(
     )
     assert result["reason"] == "reconfigure_successful"
     assert entry.data[CONF_SECRET] == SECRET_HEX
+    await assert_set_up_once(hass, setup_entry)
 
 
 async def test_reconfigure_invalid_secret(hass: HomeAssistant) -> None:
