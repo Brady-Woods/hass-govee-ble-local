@@ -559,13 +559,37 @@ async def test_effect_list_follows_the_device_on_each_update(
         entry.runtime_data.coordinator.async_publish_device_state()
         await hass.async_block_till_done()
 
-    assert hass.states.get(MAIN).attributes["effect_list"] == ["off", *offered]
-    capabilities = er.async_get(hass).async_get(MAIN).capabilities
-    assert capabilities["effect_list"] == ["off", *offered]
-    assert light._optimistic_effect is None  # no longer one the device offers
-    with pytest.raises(ServiceValidationError):
-        await _call(hass, "turn_on", MAIN, effect=dropped)
+        assert hass.states.get(MAIN).attributes["effect_list"] == ["off", *offered]
+        capabilities = er.async_get(hass).async_get(MAIN).capabilities
+        assert capabilities["effect_list"] == ["off", *offered]
+        assert light._optimistic_effect is None  # no longer one the device offers
+        with pytest.raises(ServiceValidationError):
+            await _call(hass, "turn_on", MAIN, effect=dropped)
     mock_device.set_scene_by_name.assert_not_awaited()
+
+
+async def test_a_scene_dropped_since_the_last_update_is_refused_before_any_write(
+    hass: HomeAssistant, entry: MockConfigEntry, mock_device: Device
+) -> None:
+    """The library stops offering a scene before the light has heard (a poll read the
+    device's versions, its update not yet published): turning the light on with it is
+    refused with nothing sent, not after the power-on went out."""
+    _seed(entry, is_on=False)
+    full = list(mock_device.scene_names)
+    dropped = full[-1]
+    assert dropped in hass.states.get(MAIN).attributes["effect_list"]
+    with (
+        patch.object(Device, "scene_names", new_callable=PropertyMock, return_value=full[:-1]),
+        pytest.raises(ServiceValidationError) as exc,
+    ):
+        await _call(hass, "turn_on", MAIN, effect=dropped)
+    assert exc.value.translation_key == "unknown_effect"
+    assert connection(mock_device).sent == []
+    mock_device.turn_on.assert_not_awaited()
+    assert hass.states.get(MAIN).state == STATE_OFF
+    # ...and the picker no longer offers it.
+    assert dropped not in hass.states.get(MAIN).attributes["effect_list"]
+    assert dropped not in er.async_get(hass).async_get(MAIN).capabilities["effect_list"]
 
 
 async def test_effect_off_in_rgb_mode_restores_the_colour(

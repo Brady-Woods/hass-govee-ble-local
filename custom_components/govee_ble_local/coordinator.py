@@ -218,10 +218,14 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         # When the device was last known reachable (monotonic): the last
         # advertisement a connectable scanner heard before HA dropped it from its
         # connectable history (``async_handle_unavailable``), or HA reaching it
-        # since (a command that landed, a poll that read it back: it doesn't
-        # advertise while HA holds the link), and no earlier than setup.
+        # since (a command that landed, or a poll that didn't fail once the device
+        # has been read back at least once: it doesn't advertise while HA holds
+        # the link), and no earlier than setup.
         # Availability once it is gone counts from it (``device_available``).
         self._connectable_heard_at = bluetooth.MONOTONIC_TIME()
+        # When an entity command last landed (monotonic): its link may still be
+        # open (``_async_link_held``).
+        self._command_landed_at: float | None = None
         # Availability as last pushed to the entities (None = never pushed).
         self._published_available: bool | None = None
         # A poll was skipped because the device wasn't advertising; when it
@@ -765,9 +769,16 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         to follow up (a second tap, a slider drag), and HA already shows what the
         command did. It is held until the hold-off ends (``_async_end_holdoff``),
         or for at most POLL_HOLDOFF_MAX_SECONDS (``_async_holdoff_cap_reached``).
+        Nor while a poll already runs: that poll re-arms the timer as it ends.
         Overrides DataUpdateCoordinator's scheduled-refresh entry point (present
         since before 2025.10; from 2026.10 it also takes the debouncer's lock).
         """
+        if self._poll_running:
+            # A refresh started meanwhile reads the device now, and HA re-arms
+            # the timer as it ends: running this one too would queue a second
+            # poll behind it.
+            self._unsub_refresh = None  # the timer that just fired
+            return
         if self.commands_holding_off:
             self._unsub_refresh = None  # the timer that just fired
             self._async_hold_poll()
@@ -809,7 +820,7 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         if self._shutting_down:
             return
         # It answered: reachable, though it doesn't advertise while HA holds the link.
-        self._connectable_heard_at = bluetooth.MONOTONIC_TIME()
+        self._connectable_heard_at = self._command_landed_at = bluetooth.MONOTONIC_TIME()
         rescheduled = self._async_apply_policy()
         rescheduled = self._async_restart_on_backoff() or rescheduled
         interval = self.scheduled_interval
@@ -996,14 +1007,14 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         # Any poll that runs (a manual refresh after an auth failure included)
         # means polling is scheduled again.
         self._auth_failed = False
-        if not self.async_address_present():
-            # Nothing can reach it: a connect would just burn ~1 min of
-            # bleak-retry-connector attempts (and a poll slot) to fail.
-            self._skipped_absent = True
-            self._async_note_failure()
-            raise self._update_failed("poll_skipped_absent")
+        if self._async_unreachable():
+            raise self._async_skip_absent()
 
         async with _poll_semaphore(self.hass):
+            # Again once it has a slot: the wait may have outlasted a held link.
+            if self._async_unreachable():
+                raise self._async_skip_absent()
+            present = self.async_address_present()
             started = bluetooth.MONOTONIC_TIME()
             try:
                 # A tighter connect budget than a command's: a device that doesn't
@@ -1027,7 +1038,13 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
             except BLE_ERRORS as err:
                 self.total_failures += 1
                 elapsed = bluetooth.MONOTONIC_TIME() - started
-                if isinstance(err, GoveeBleTimeout) and elapsed >= SLOW_POLL_SECONDS:
+                if not present:
+                    # It ran only for a link a command left open, which was gone by
+                    # then: absent, as a skip counts it (no slow step; polled as
+                    # soon as it is heard again).
+                    self._skipped_absent = True
+                    self._async_note_failure()
+                elif isinstance(err, GoveeBleTimeout) and elapsed >= SLOW_POLL_SECONDS:
                     # Typically the connect ran out of POLL_CONNECT_TIMEOUT_SECONDS.
                     self._async_note_failure(slow_seconds=elapsed)
                 else:
@@ -1057,6 +1074,47 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         self._note_poll_speed(bluetooth.MONOTONIC_TIME() - started)
         self._async_note_success(data)
         return data
+
+    @callback
+    def _async_unreachable(self) -> bool:
+        """Return whether nothing can reach the device: no connectable scanner, no held link."""
+        return not self.async_address_present() and not self._async_link_held()
+
+    @callback
+    def _async_skip_absent(self) -> UpdateFailed:
+        """Count a poll skipped because nothing can reach the device; return its error.
+
+        A connect would just burn ~1 min of bleak-retry-connector attempts (and a
+        poll slot) to fail.
+        """
+        self._skipped_absent = True
+        self._async_note_failure()
+        return self._update_failed("poll_skipped_absent")
+
+    @callback
+    def _async_link_held(self) -> bool:
+        """Return whether a command landed within the library's warm window: its link may be up.
+
+        The library keeps a command's link open ACTIVE_IDLE_DELAY (30 s) after
+        each write starts (transport/connection.py ``_run``, and
+        ``_schedule_idle_timer`` waits it out). The device doesn't advertise
+        meanwhile, so HA may drop it from its history, yet a poll still reaches
+        it: update() reuses the open link (``_ensure_connected_locked`` returns
+        while ``is_connected``), with no BLEDevice lookup. So such a poll runs
+        instead of being skipped as absent, and its read resets the failures.
+        The stamp is taken as the command returns, after its last write
+        started, so the window can outlast the link by that write's time. A
+        poll in that gap connects afresh and fails within its connect budget,
+        counted as the skipped poll would have been. The window is longer than
+        the hold-off (POLL_HOLDOFF_AFTER_COMMAND_SECONDS), so the poll the
+        hold-off releases still runs over the link. The poll checks it again
+        once it has a poll slot (the wait can outlast the window), and one that
+        fails because the link was gone counts as a skip.
+        """
+        landed = self._command_landed_at
+        return (
+            landed is not None and bluetooth.MONOTONIC_TIME() - landed < lib_const.ACTIVE_IDLE_DELAY
+        )
 
     def _note_poll_speed(self, seconds: float) -> None:
         """Count a slow successful poll (or a weak signal) toward its slow backoff, or reset it."""

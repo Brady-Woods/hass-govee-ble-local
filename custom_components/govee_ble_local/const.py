@@ -174,11 +174,13 @@ SLOW_POLL_MAX_STEPS = 3
 # whole fixture's on/off), so it is switched on first.
 ZONE_STATE_FRESH_SECONDS = 120
 
-# A device that has vanished from every connectable scanner (HA drops it from
-# its history 195-525 s after its last advertisement) goes unavailable after
-# this many consecutive failed (or skipped) polls, or once it has gone
-# UNAVAILABLE_AFTER_UNHEARD_SECONDS without being heard or reached (a command
-# that landed, a poll that read it), whichever comes first: a slow device's
+# A device that has vanished from every connectable scanner (through a Bluetooth
+# proxy HA drops it from its history 195-525 s after its last advertisement;
+# through a local adapter, at HA's next 5-minute sweep after BlueZ removes it)
+# goes unavailable after this many consecutive failed (or skipped) polls, or
+# once it has gone UNAVAILABLE_AFTER_UNHEARD_SECONDS without being heard or
+# reached (a command that landed, or a poll that didn't fail once the device
+# has been read back at least once), whichever comes first: a slow device's
 # polls are spaced up to 8x apart, so counting them alone could take most of an
 # hour. A device still advertising stays available.
 UNAVAILABLE_AFTER_FAILURES = 3

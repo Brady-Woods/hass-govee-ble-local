@@ -170,11 +170,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   holds up a command to it for up to 45 s; commands keep the library's full connect budget. A poll
   that times out after 10 s or more, such as one whose connect ran out of those 15 s, backs off as
   a slow poll (so at most every 16 minutes) rather than to the 30-minute cap, and still counts as a
-  failed poll. However far apart a device's polls are, it now goes unavailable within about 9
-  minutes of last being heard: once Home Assistant's Bluetooth stops listing it (3 to 9 minutes
-  after its last advertisement), as soon as it has also gone 6 minutes without being heard or
-  reached by a command or poll, or has failed three polls. The diagnostics show the slow-poll
-  steps and how long the last poll took.
+  failed poll. However far apart a device's polls are, it now goes unavailable once Home
+  Assistant's Bluetooth stops listing it and it has also gone 6 minutes without being heard or
+  reached by a command or poll (or has failed three polls). Through a Bluetooth proxy, Home
+  Assistant stops listing a device 3 to 9 minutes after its last advertisement, so it goes
+  unavailable within about 9 minutes; through a local adapter, at Home Assistant's next 5-minute
+  check after BlueZ drops it. A device commanded every few seconds, which doesn't advertise while
+  that keeps its link open, stays available: its polls use that link. A device heard less often
+  than about every 6 minutes can now show unavailable in the gaps between its advertisements
+  (through a proxy, always once its gaps are longer than about 9 minutes). The diagnostics show
+  the slow-poll steps and how long the last poll took.
 - The RSSI, last seen, last connected and poll interval diagnostic sensors are disabled by default
   for newly added devices (existing ones keep their setting).
 - Poll errors and the rejected-secret error are translated.
@@ -212,8 +217,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `pytest-homeassistant-custom-component==0.13.371`), and CI uses `actions/checkout` v7 and
   `actions/setup-python` v7 (Node 24).
 - The config flow type-checks against probatio, which Home Assistant 2026.10 uses for flow schemas
-  (it aliases `voluptuous` to probatio at runtime). At runtime the flow still imports
-  `voluptuous`, so Home Assistant 2025.10+ is unaffected.
+  (it aliases `voluptuous` to probatio at runtime). At runtime the flow imports `voluptuous`,
+  which Home Assistant aliases to probatio.
 
 ## [1.4.1] - 2026-10-13
 

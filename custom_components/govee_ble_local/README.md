@@ -71,7 +71,9 @@ profile's capabilities:
 - Everything else keeps the **fixed cadence** of 120 s + jitter: a device whose
   byte isn't heard (an H6006 heard only by a passive scanner, which never gets
   its scan response) or has gone stale, one no connectable scanner sees (its
-  polls are skipped and counted as before), a model in
+  polls are skipped and counted as before, except within the library's 30 s
+  warm window after a command landed, when they use the link it holds), a
+  model in
   `EXCLUDED_FROM_ADVERT_POLICY` (H60A6 and H60A1: a disconnect may end a
   music or group mode started over Wi-Fi; static finding, bench check
   pending), and every device on a `govee-ble-local` without the
@@ -99,7 +101,11 @@ profile's capabilities:
   unknown while no background polls are scheduled (polling turned off, halted
   by a rejected key, or off under the policy).
 - A device no connectable scanner can see is **not connected to** (the poll
-  fails fast instead of spending ~1 min on hopeless retries).
+  fails fast instead of spending ~1 min on hopeless retries), except within
+  `ACTIVE_IDLE_DELAY` (30 s) of a command that landed: a device doesn't
+  advertise while the library holds a command's link, so its poll runs over
+  that link (and if the link has closed meanwhile, its connect fails within
+  the 15 s poll budget and counts as a skip).
 - At most `MAX_CONCURRENT_POLLS` polls run at once, integration-wide. HA's
   Bluetooth manager already routes each connection to a scanner with a free
   slot; this only stops our own polling from causing a connect storm.
@@ -107,7 +113,8 @@ profile's capabilities:
   is advertising, regardless of poll failures (commands can still reach it).
   A device that vanished from every connectable scanner goes unavailable
   after `UNAVAILABLE_AFTER_FAILURES` failed polls or once it hasn't been heard
-  or reached (a command that landed, a poll that read it) for
+  or reached (a command that landed, or a poll that didn't fail once the device
+  has been read back at least once) for
   `UNAVAILABLE_AFTER_UNHEARD_SECONDS`, whichever comes first, or as soon as it
   vanishes when no background polls are scheduled (polling turned off in the entry's
   system options, halted by a rejected key, or off under the policy); polls

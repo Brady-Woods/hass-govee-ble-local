@@ -258,10 +258,20 @@ class GoveeBleLocalLight(GoveeBleLocalEntity, LightEntity):
         return data.rgb_color or WHITE, None
 
     async def async_turn_on(self, **kwargs: Any) -> None:
-        """Turn on, optionally setting brightness, colour or a scene."""
+        """Turn on, optionally setting brightness, colour or a scene.
+
+        A scene is checked against what the device offers now, not the list last
+        shown: the library can stop offering one between updates (once a poll
+        has read the device's versions), and refusing it only after the power-on
+        went out would leave the light on with the scene refused.
+        """
         data = self.coordinator.data
         effect: str | None = kwargs.get(ATTR_EFFECT)
+        if effect is not None:
+            self._apply_effect_list()
         if effect is not None and effect not in (self._attr_effect_list or []):
+            # Show the list just re-read: the picker mustn't keep offering it.
+            self.async_write_ha_state()
             raise ServiceValidationError(
                 translation_domain=DOMAIN,
                 translation_key="unknown_effect",

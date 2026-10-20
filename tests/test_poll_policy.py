@@ -66,6 +66,7 @@ from .conftest import (
     SAME_AS_ANY_SCANNER,
     advance,
     advertisement_callback,
+    connection,
     make_service_info,
     unavailable_callback,
 )
@@ -1390,31 +1391,41 @@ async def test_a_device_commanded_over_a_held_link_stays_available(
     mock_bluetooth: SimpleNamespace,
     presence: SimpleNamespace,
 ) -> None:
-    """A device doesn't advertise while HA holds its link, so commands under 30 s apart can
-    outlast HA's history of it. Each command that lands shows it reachable: it stays available
-    (HA would skip the commands of an unavailable entity). Here its polls read nothing back,
-    so only the commands show it."""
-    read = mock_device.update.side_effect  # type: ignore[attr-defined]
+    """A device doesn't advertise while HA holds its link, so commands under 30 s apart
+    outlast HA's history of it. Each command that lands shows it reachable, and its polls run
+    over the held link instead of being skipped as absent: it stays available for 40 minutes
+    and no command is skipped (HA skips an unavailable entity's commands). Once its power is
+    cut, it goes unavailable within UNAVAILABLE_AFTER_UNHEARD_SECONDS (plus a presence tick)
+    of the last command that landed.
 
-    async def _unanswered(**kwargs: Any) -> Any:
-        state = await read(**kwargs)
-        state.optimistic = True
-        return state
-
-    mock_device.update.side_effect = _unanswered  # type: ignore[attr-defined]
+    Source-modelled: the library reuses its open link for a poll (transport/connection.py
+    ``_ensure_connected_locked``) and keeps it ACTIVE_IDLE_DELAY after each write; not yet
+    checked on the bench, which needs commands (visible changes) and the user's OK.
+    """
     last_heard = await _went_silent(air)
+    polls_before_drop = 0
     dropped = False
-    for step in range(24):  # a command every 20 s for 8 minutes
-        await light_service(hass, "turn_on", brightness=10 + step)
+    for step in range(120):  # a command every 20 s for 40 minutes
+        sent = len(connection(mock_device).sent)
+        await light_service(hass, "turn_on", brightness=10 + step % 80)
+        assert len(connection(mock_device).sent) > sent, step  # it went out
         assert hass.states.get(MAIN_LIGHT).state == "on", step
         await air.wait(20, heard=False)
         if not dropped and air.clock.now - last_heard >= 300:
             _dropped(mock_bluetooth, presence, last_heard)
             dropped = True
+            polls_before_drop = polls(mock_device)
     assert dropped
-    unheard = air.clock.now - last_heard
-    assert unheard > UNAVAILABLE_AFTER_UNHEARD_SECONDS + LAST_SEEN_RESOLUTION_SECONDS
-    assert coordinator.consecutive_failures < UNAVAILABLE_AFTER_FAILURES  # skipped polls
+    assert polls(mock_device) > polls_before_drop  # polls ran over the held link
+    assert coordinator.consecutive_failures == 0
+
+    last_landed = air.clock.now - 20
+    mock_device.update.side_effect = GoveeBleConnectionError("link lost")  # power cut
+    while hass.states.get(MAIN_LIGHT).state != STATE_UNAVAILABLE:
+        await air.wait(10, heard=False)
+        bound = UNAVAILABLE_AFTER_UNHEARD_SECONDS + LAST_SEEN_RESOLUTION_SECONDS + 10
+        assert air.clock.now - last_landed <= bound
+    assert air.clock.now - last_landed >= UNAVAILABLE_AFTER_UNHEARD_SECONDS
 
 
 # -- the poll interval sensor -----------------------------------------------------

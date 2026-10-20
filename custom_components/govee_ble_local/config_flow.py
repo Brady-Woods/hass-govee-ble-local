@@ -45,9 +45,9 @@ from homeassistant.helpers.selector import (
 
 if TYPE_CHECKING:
     # Home Assistant 2026.10+ types flow schemas as probatio, and at runtime aliases
-    # `voluptuous` to probatio (homeassistant/__init__.py, install_as_voluptuous). Older
-    # supported Home Assistant (hacs.json: 2025.10+) has no probatio, so import voluptuous
-    # at runtime and type-check against probatio.
+    # `voluptuous` to probatio (homeassistant/__init__.py, install_as_voluptuous). The flow
+    # imports voluptuous at runtime, as it did for older Home Assistant (dropping that is a
+    # later cleanup), and type-checks against probatio.
     import probatio as vol
 else:
     import voluptuous as vol

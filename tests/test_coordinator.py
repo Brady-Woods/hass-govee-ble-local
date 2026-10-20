@@ -19,6 +19,7 @@ from govee_ble_local import (
     GoveeBleHandshakeError,
     GoveeBleNotSupported,
     GoveeBleTimeout,
+    const as lib_const,
     create_device,
 )
 from homeassistant.components.bluetooth import BluetoothChange
@@ -52,7 +53,11 @@ from custom_components.govee_ble_local.const import (
     UNAVAILABLE_AFTER_UNHEARD_SECONDS,
     WEAK_SIGNAL_RSSI,
 )
-from custom_components.govee_ble_local.coordinator import GoveeBleLocalCoordinator, PollPolicy
+from custom_components.govee_ble_local.coordinator import (
+    GoveeBleLocalCoordinator,
+    PollPolicy,
+    _poll_semaphore,
+)
 
 from .conftest import (
     FakeConnection,
@@ -748,8 +753,6 @@ async def test_scheduled_poll_waits_for_a_running_command_and_the_hold_off(
 
 def test_hold_off_ends_while_the_command_link_is_still_up() -> None:
     """The held poll runs a few seconds before the library drops a command's link."""
-    from govee_ble_local import const as lib_const  # noqa: PLC0415
-
     assert lib_const.ACTIVE_IDLE_DELAY - 10 <= HOLDOFF < lib_const.ACTIVE_IDLE_DELAY
 
 
@@ -937,6 +940,14 @@ async def test_a_poll_running_when_the_hold_off_ends_is_the_held_first_poll(
     if released_by == "cap":
         coordinator.async_note_command_finished()
 
+    # Polling carries on, however that poll ended: a later held poll is released and runs.
+    mock_device.update.side_effect = read  # type: ignore[attr-defined]
+    await _turn_on(hass)
+    await _poll_comes_due(hass, coordinator)
+    assert coordinator._poll_waiting
+    await advance(hass, HOLDOFF + 1)
+    assert mock_device.update.await_count == 2  # type: ignore[attr-defined]
+
 
 async def test_the_first_poll_due_while_a_poll_runs_is_that_poll(
     hass: HomeAssistant, coordinator: GoveeBleLocalCoordinator, mock_device: Device
@@ -963,6 +974,41 @@ async def test_the_first_poll_due_while_a_poll_runs_is_that_poll(
     await first
     await hass.async_block_till_done()
     mock_device.update.assert_awaited_once()  # type: ignore[attr-defined]
+
+
+async def test_a_poll_timer_firing_while_a_poll_runs_adds_no_poll(
+    hass: HomeAssistant, coordinator: GoveeBleLocalCoordinator, mock_device: Device
+) -> None:
+    """After failures (backed off to 480 s) a command lands during a long poll and re-arms
+    the timer at the base cadence; when it fires the poll still runs, past the hold-off. It
+    queues no second poll behind it: the running poll re-arms the timer as it ends."""
+    fail(mock_device, GoveeBleConnectionError("no slot"))
+    for _ in range(3):
+        await coordinator.async_refresh()
+    assert interval(coordinator) == BASE * 4
+    gate = asyncio.Event()
+
+    async def _long(**_kwargs: Any) -> Any:
+        await gate.wait()
+        mock_device.state.optimistic = False
+        return mock_device.state
+
+    mock_device.update.reset_mock()  # type: ignore[attr-defined]
+    mock_device.update.side_effect = _long  # type: ignore[attr-defined]
+    refresh = hass.async_create_task(coordinator.async_refresh())
+    for _ in range(5):
+        await asyncio.sleep(0)
+    await _turn_on(hass)  # lands: the backoff is dropped, the timer re-armed at BASE
+    assert len(_live_timers(hass, "wrap_handle_refresh_interval")) == 1
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=BASE + 1))
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert _live_timers(hass, "wrap_handle_refresh_interval") == []  # it fired
+    gate.set()
+    await refresh
+    await hass.async_block_till_done()
+    mock_device.update.assert_awaited_once()  # type: ignore[attr-defined]
+    assert len(_live_timers(hass, "wrap_handle_refresh_interval")) == 1  # re-armed once
 
 
 async def test_the_cap_runs_a_held_first_poll_while_a_command_runs(
@@ -1384,24 +1430,30 @@ async def test_an_absent_device_is_unavailable_once_unheard_long_enough(
     assert hass.states.get(MAIN_LIGHT).state == STATE_UNAVAILABLE
 
 
-async def test_a_poll_that_read_the_device_counts_as_hearing_it(
+@pytest.mark.parametrize("optimistic", [False, True], ids=["connected", "never_read"])
+async def test_a_poll_that_connected_and_didnt_fail_counts_as_hearing_it(
     hass: HomeAssistant,
     monotonic: SimpleNamespace,
     coordinator: GoveeBleLocalCoordinator,
+    mock_device: Device,
     *,
     mock_bluetooth: SimpleNamespace,
     presence: SimpleNamespace,
+    optimistic: bool,
 ) -> None:
-    """A poll that read the device back shows it reachable, though it didn't advertise around
-    it: the unheard time counts from that poll, not its last advertisement."""
+    """A poll that connected and didn't fail shows the device reachable, though it didn't
+    advertise around it: the unheard time counts from that poll, not its last advertisement.
+    Not while the library's state is still only optimistic (nothing ever read back)."""
     monotonic.now += 100
     last_heard = monotonic.now
     monotonic.now += UNAVAILABLE_AFTER_UNHEARD_SECONDS - 60
-    await coordinator.async_refresh()  # reads it back (while HA still lists it)
+    succeed(mock_device, optimistic=optimistic)
+    await coordinator.async_refresh()  # while HA still lists it
     monotonic.now += 120  # 420 s since its last advertisement, 120 s since the poll
     presence.connectable = False
     unavailable_callback(mock_bluetooth, connectable=True)(make_service_info(seen_at=last_heard))
-    assert hass.states.get(MAIN_LIGHT).state != STATE_UNAVAILABLE
+    available = hass.states.get(MAIN_LIGHT).state != STATE_UNAVAILABLE
+    assert available is not optimistic
 
 
 async def test_a_device_dropped_before_its_first_poll_gets_its_grace_from_setup(
@@ -1423,6 +1475,121 @@ async def test_a_device_dropped_before_its_first_poll_gets_its_grace_from_setup(
         make_service_info(seen_at=old.time - 10_000)
     )
     assert hass.states.get(MAIN_LIGHT).state != STATE_UNAVAILABLE
+
+
+async def test_a_poll_that_reads_nothing_still_ends_the_failure_streak(
+    hass: HomeAssistant,
+    coordinator: GoveeBleLocalCoordinator,
+    mock_device: Device,
+) -> None:
+    """A poll that connects but reads nothing back (optimistic) is no failure: the next
+    quick failure keeps the base cadence."""
+    fail(mock_device, GoveeBleConnectionError("no slot"))
+    for _ in range(3):
+        await coordinator.async_refresh()
+    succeed(mock_device, optimistic=True)
+    await coordinator.async_refresh()
+    fail(mock_device, GoveeBleConnectionError("no slot"))
+    await coordinator.async_refresh()
+    assert interval(coordinator) == BASE
+
+
+async def test_a_poll_runs_over_a_held_link_only_within_the_librarys_warm_window(
+    hass: HomeAssistant,
+    monotonic: SimpleNamespace,
+    coordinator: GoveeBleLocalCoordinator,
+    mock_device: Device,
+    presence: SimpleNamespace,
+) -> None:
+    """Gone from HA's history, a device a command reached less than the library's
+    ACTIVE_IDLE_DELAY ago is polled over the link that command left open; from then on the
+    poll is skipped as absent again."""
+    coordinator.async_handle_command_success()  # a command landed
+    presence.connectable = False
+    mock_device.update.reset_mock()  # type: ignore[attr-defined]
+    monotonic.now += lib_const.ACTIVE_IDLE_DELAY - 0.5
+    await coordinator.async_refresh()
+    mock_device.update.assert_awaited_once()  # type: ignore[attr-defined]
+    assert coordinator.consecutive_failures == 0
+    monotonic.now += 0.5
+    await coordinator.async_refresh()
+    mock_device.update.assert_awaited_once()  # type: ignore[attr-defined]
+    assert coordinator.consecutive_failures == 1  # skipped: nothing can reach it
+
+
+async def test_a_held_link_poll_that_finds_the_link_gone_counts_as_a_skip(
+    hass: HomeAssistant,
+    monotonic: SimpleNamespace,
+    coordinator: GoveeBleLocalCoordinator,
+    mock_device: Device,
+    *,
+    mock_bluetooth: SimpleNamespace,
+    presence: SimpleNamespace,
+) -> None:
+    """A poll run for a command's held link, which was gone by then (its connect runs out),
+    counts as the skip it stood in for: no slow step, and the device is polled as soon as it
+    is heard again."""
+    coordinator.async_handle_command_success()
+    presence.connectable = False
+
+    async def _gone(**_kwargs: Any) -> Any:
+        monotonic.now += POLL_CONNECT_TIMEOUT_SECONDS + 1
+        raise GoveeBleTimeout(f"{ADDRESS}: connect exceeded {POLL_CONNECT_TIMEOUT_SECONDS}s")
+
+    mock_device.update.side_effect = _gone  # type: ignore[attr-defined]
+    await coordinator.async_refresh()
+    assert coordinator.consecutive_failures == 1
+    assert coordinator.slow_poll_steps == 0
+    succeed(mock_device)
+    mock_device.update.reset_mock()  # type: ignore[attr-defined]
+    presence.connectable = True
+    advertisement_callback(mock_bluetooth)(make_service_info(), BluetoothChange.ADVERTISEMENT)
+    await hass.async_block_till_done()
+    mock_device.update.assert_awaited_once()  # type: ignore[attr-defined]  # the return poll
+
+
+async def test_a_held_link_poll_that_waited_out_the_window_for_a_slot_is_skipped(
+    hass: HomeAssistant,
+    monotonic: SimpleNamespace,
+    coordinator: GoveeBleLocalCoordinator,
+    mock_device: Device,
+    presence: SimpleNamespace,
+) -> None:
+    """The warm window is checked again once the poll has a slot: a poll that waited past it
+    behind other devices' polls is skipped as absent rather than connecting afresh."""
+    coordinator.async_handle_command_success()
+    presence.connectable = False
+    mock_device.update.reset_mock()  # type: ignore[attr-defined]
+    semaphore = _poll_semaphore(hass)
+    for _ in range(MAX_CONCURRENT_POLLS):
+        await semaphore.acquire()
+    refresh = hass.async_create_task(coordinator.async_refresh())
+    for _ in range(5):
+        await asyncio.sleep(0)
+    monotonic.now += lib_const.ACTIVE_IDLE_DELAY  # the other polls take that long
+    for _ in range(MAX_CONCURRENT_POLLS):
+        semaphore.release()
+    await refresh
+    mock_device.update.assert_not_awaited()  # type: ignore[attr-defined]
+    assert coordinator.consecutive_failures == 1
+
+
+async def test_a_failed_command_opens_no_held_link_window(
+    hass: HomeAssistant,
+    coordinator: GoveeBleLocalCoordinator,
+    mock_device: Device,
+    presence: SimpleNamespace,
+) -> None:
+    """Only a command that landed holds a link open: after one that failed, a poll of a
+    device no connectable scanner sees is skipped as absent."""
+    presence.connectable = False
+    connection(mock_device).error = GoveeBleConnectionError("link lost")
+    with pytest.raises(HomeAssistantError):
+        await _turn_on(hass)
+    connection(mock_device).error = None
+    mock_device.update.reset_mock()  # type: ignore[attr-defined]
+    await coordinator.async_refresh()
+    mock_device.update.assert_not_awaited()  # type: ignore[attr-defined]
 
 
 async def test_a_weak_signal_backs_polls_off_too(
