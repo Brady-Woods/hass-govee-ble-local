@@ -54,8 +54,6 @@ deleting the entry withdraws it.
   none while a light is off or for a smart plug, one poll 5 s after a light is turned on outside
   Home Assistant, and every 2 min backing off to 15 min while it stays on unchanged. H60A6 / H60A1
   ceilings, and devices whose on/off broadcast Home Assistant doesn't hear, are polled every 2 min
-  (needs a `govee-ble-local` release after 1.3.0; on 1.2.1 and 1.3.0 every device is polled
-  every 2 min)
 - Diagnostics: signal strength, connectivity (advertisement presence), last-seen / last-connected
   timestamps, poll interval, connection-failure count — plus a **self-test** button and a
   `capture_session` service that exercises the device and returns a captured BLE session
