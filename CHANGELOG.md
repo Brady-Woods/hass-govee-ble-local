@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- Tests: the stand-in for the library's connection (`tests/conftest.py` `FakeConnection`) gains
+  `hold_heartbeat()` and `disconnect()`, which `govee-ble-local` 1.6.0's `Device` calls (its BLE
+  heartbeat and `Device.release()`), so the suite keeps passing once 1.6.0 is the newest library.
+  No change to the integration itself.
 - Removed the code that only existed for `govee-ble-local` before 1.5.0 or Home Assistant before
   2026.10, which 1.5.0 already requires. The config flow catches the library's
   `GoveeCloudAuthError` directly and imports `probatio` instead of Home Assistant's `voluptuous`

@@ -81,6 +81,8 @@ class FakeConnection:
         self.error: BaseException | None = None
         self.fail_after: int | None = None
         self.closed = False
+        # How often the link was dropped while the Device stays usable (disconnect()).
+        self.disconnects = 0
         # The default BLE write size (ATT MTU 23 - 3); the library sizes
         # multi-packet uploads to it.
         self.write_payload_size = 20
@@ -121,8 +123,18 @@ class FakeConnection:
     async def close(self) -> None:
         self.closed = True
 
+    async def disconnect(self) -> bool:
+        """Drop the link now; the Device stays usable (no link here: counted, said dropped)."""
+        self.disconnects += 1
+        return True
+
     def update_ble_device(self, ble_device: BLEDevice) -> None:
         """Accept a fresher BLEDevice (no-op)."""
+
+    @contextmanager
+    def hold_heartbeat(self) -> Iterator[None]:
+        """Stand in for GoveeConnection.hold_heartbeat (library 1.6.0+): nothing to hold."""
+        yield
 
 
 def make_device(
