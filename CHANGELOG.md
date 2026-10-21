@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-10-21
+
+Requires `govee-ble-local` 1.6.0 or newer (any 1.x) **from PyPI** and Home Assistant 2026.10+.
+
 ### Added
 - **Lights already off go last in a burst:** when commands go to several devices at once ("turn
   off all the lights", an area, a light group), turning off a light or smart plug that is already
@@ -107,7 +111,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Tests: the stand-in for the library's connection (`tests/conftest.py` `FakeConnection`) gains
   what `govee-ble-local` 1.6.0's `Device` uses (its BLE heartbeat and `Device.release()`):
   `hold_heartbeat()`, `disconnect(*, keep=None) -> bool`, `is_connected` and `link_number`, so
-  the suite keeps passing once 1.6.0 is the newest library. No change to the integration itself.
+  the suite passes against 1.6.0, the newest library. No change to the integration itself.
 - Removed the code that only existed for `govee-ble-local` before 1.5.0 or Home Assistant before
   2026.10, which 1.5.0 already requires. The config flow catches the library's
   `GoveeCloudAuthError` directly and imports `probatio` instead of Home Assistant's `voluptuous`
@@ -589,7 +593,8 @@ Migration to the `govee-ble-local` v3 library and a large feature expansion.
 - Fixed / added entity icons and names; on/off tracked passively from advertisements between
   polls.
 
-[Unreleased]: https://github.com/Brady-Woods/hass-govee-ble-local/compare/v1.5.0...HEAD
+[Unreleased]: https://github.com/Brady-Woods/hass-govee-ble-local/compare/v1.6.0...HEAD
+[1.6.0]: https://github.com/Brady-Woods/hass-govee-ble-local/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/Brady-Woods/hass-govee-ble-local/compare/v1.4.1...v1.5.0
 [1.4.1]: https://github.com/Brady-Woods/hass-govee-ble-local/compare/v1.4.0...v1.4.1
 [1.4.0]: https://github.com/Brady-Woods/hass-govee-ble-local/compare/v1.2.1...v1.4.0
