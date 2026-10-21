@@ -795,8 +795,8 @@ def _unknown(rig: Rig, clock: Clock) -> None:
 
 
 def _optimistic(rig: Rig, clock: Clock) -> None:
-    # No read has answered since setup: the library keeps the state optimistic until one does
-    # (and govee-ble-local 1.6.0 never sets it back), whatever its polls returned meanwhile.
+    # As if no state read had answered since setup (this rig's first poll did): the library
+    # keeps the state optimistic until one does, and govee-ble-local 1.6.0 never sets it back.
     rig.device.state.optimistic = True
 
 

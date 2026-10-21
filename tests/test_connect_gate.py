@@ -2008,7 +2008,8 @@ async def test_a_link_being_released_counts_as_down(
     end()
     end()  # twice is harmless
     assert async_link_up(hass, NIGHTSTAND)  # listed, and no longer being released
-    await tick(hass)
+    for _ in range(5):  # no tick: the end judges the waiting calls again itself
+        await asyncio.sleep(0)
     assert other.admitted  # the device's ticket now shows its link up
     await again.finish()
     await other.finish()
@@ -2022,10 +2023,12 @@ async def test_overlapping_releases_of_a_link_end_with_the_last(
     radios.athom.hear(NIGHTSTAND, -70)
     radios.athom.take(NIGHTSTAND)
     first, second = async_note_releasing(hass, NIGHTSTAND), async_note_releasing(hass, NIGHTSTAND)
+    elsewhere = async_note_releasing(hass, BULB_2)  # another device's release: no effect here
     first()
     assert not async_link_up(hass, NIGHTSTAND)
     second()
     assert async_link_up(hass, NIGHTSTAND)
+    elsewhere()
 
 
 async def test_a_listed_link_not_being_released_is_used(

@@ -149,28 +149,27 @@ profile's capabilities:
   its heartbeat keeps the device from ending it sooner), for a follow-up tap
   or slider drag. A device's command window opens as a command to it starts
   and closes `COMMAND_RELEASE_DELAY_SECONDS` (0.5 s) after its last command
-  ends; a command meanwhile restarts the wait, so a device's lights in one call
-  share one link. The window's close calls `Device.release()` (the link and its
-  connection slot go now; the next command reconnects) unless a command in it
-  came from a person and no other device's window was open at any point during
-  it (`CommandBurst`: a light group, an area, "turn off all the lights", a
-  script's steps). A person is the context's user, if that user still exists
-  and isn't a system user (`helpers.async_context_is_person`), read as the
-  command starts: HA forgets an entity's context on a state write 5 s after
-  the call. So the dashboard, the companion app, typed Assist, your own
-  long-lived tokens (a standalone Node-RED) and Alexa/Google linked without
-  the cloud keep the link; voice satellites, automations, HomeKit, Cloud
-  Alexa/Google, VoIP and add-ons that reach HA through the Supervisor (the
-  Node-RED and AppDaemon add-ons as set up by default: a system user) release
-  it. A release waits for the device's operations queued before it, and a
-  command started after it queues behind it and reconnects, unless it reaches
-  the link first: the library then keeps the link and drops nothing. While a
-  poll is
-  reading the device, the release is put off until the poll ends (released
-  between the poll's reads, the rest of the poll would connect again); a
-  command that starts meanwhile drops the put-off release, and its own window
-  decides when it closes. An unload drops a pending close (`device.stop()`
-  closes the link anyway).
+  ends; a command meanwhile restarts the wait, so a device's lights in one
+  call share one link. The window's close calls `Device.release()` (the link
+  and its connection slot go now; the next command reconnects) unless a
+  command in it came from a person and no other device's window was open at
+  any point during it (`CommandBurst`: a light group, an area, "turn off all
+  the lights", a script's steps). A person is the context's user, if that user
+  still exists and isn't a system user (`helpers.async_context_is_person`),
+  read as the command starts: HA forgets an entity's context on a state write
+  5 s after the call. So the dashboard, the companion app, typed Assist, your
+  own long-lived tokens (a standalone Node-RED) and Alexa/Google linked
+  without the cloud keep the link; voice satellites, automations, HomeKit,
+  Cloud Alexa/Google, VoIP and add-ons that reach HA through the Supervisor
+  (the Node-RED and AppDaemon add-ons as set up by default: a system user)
+  release it. A release waits for the device's operations queued before it,
+  and a command started after it queues behind it and reconnects, unless it
+  reaches the link first: the library then keeps the link and drops nothing.
+  While a poll is reading the device, the release is put off until the poll
+  ends (released between the poll's reads, the rest of the poll would connect
+  again); a command that starts meanwhile drops the put-off release, and its
+  own window decides when it closes. An unload drops a pending close
+  (`device.stop()` closes the link anyway).
 - A zone light's or zone switch's turn_off sends nothing while the fixture isn't
   known on, no other command to the device is running, and the device confirmed
   that zone off less than `ZONE_OFF_FRESH_SECONDS` (5 s) ago (its ack of the

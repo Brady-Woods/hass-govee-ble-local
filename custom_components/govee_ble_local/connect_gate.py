@@ -12,9 +12,10 @@ a 20 s connect timeout.
 Every entity command's library call (entity.py) and every background poll
 (coordinator.py) first takes a ticket here (``async_connect_slot``):
 
-* A device with a link up (it is in a radio's allocated list), or whose ticket
-  another call holds (that call is connecting), goes at once: it needs no new
-  connect. So does one no connectable scanner sees: there is nothing to judge.
+* A device with a link up (it is in a radio's allocated list, and the
+  integration isn't releasing that link: ``async_note_releasing``), or whose
+  ticket another call holds (that call is connecting), goes at once: it needs
+  no new connect. So does one no connectable scanner sees: there is nothing to judge.
 * Any other device goes when the radio of the path habluetooth would pick now
   (its own scoring, ``BluetoothScannerDevice.score_connection_path``, over the
   paths whose radio reports a free slot) has room: an effective free slot (the

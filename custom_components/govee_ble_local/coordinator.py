@@ -1295,11 +1295,12 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         for a while after it. The library's on/off must say off as well, so an
         unknown on/off never counts.
 
-        A poll counts once any read since setup has answered: govee-ble-local
-        1.6.0 clears ``optimistic`` on the first answered read and never sets it
-        again, and doesn't say whether a later poll's reads answered, so a poll
-        whose reads all went unanswered (the library returns the state it had)
-        counts too. Before the first answered read, no poll counts.
+        A poll counts once a poll's state read has answered since setup:
+        govee-ble-local 1.6.0 clears ``optimistic`` on the first answered state
+        read and never sets it again, and doesn't say whether a later poll's
+        reads answered, so a poll whose reads all went unanswered (the library
+        returns the state it had) counts too. Before the first answered state
+        read, no poll counts.
 
         Not words from the device, so they don't count: a command that failed
         (one that may have switched the device on leaves the off standing: the

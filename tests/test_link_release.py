@@ -481,6 +481,33 @@ async def test_a_release_waits_for_a_running_polls_reads(
     assert "the poll ended: releasing the link" in caplog.text
 
 
+async def test_a_release_after_a_poll_takes_the_gates_mark(
+    freezer: Any, hass: HomeAssistant, entry: MockConfigEntry, device: Device
+) -> None:
+    """The release a poll put off counts the link as being released at the gate too, from its
+    start to its end, as a window's own release does."""
+    gate = connect_gate._gate(hass)
+    marks: list[int] = []
+
+    async def _release() -> bool:
+        marks.append(gate._releasing[ADDRESS])
+        return True
+
+    device.release.side_effect = _release  # type: ignore[attr-defined]
+    reading, finish = hold_poll(device)
+    poll = asyncio.create_task(coordinator_of(entry).async_refresh())
+    await reading.wait()
+    await turn_on(hass, MAIN, Context())
+    await run(hass, freezer, PAST)  # put off: the poll reads
+    assert marks == []
+
+    finish.set()
+    await poll
+    await hass.async_block_till_done()
+    assert marks == [1]  # held while the release ran
+    assert ADDRESS not in gate._releasing
+
+
 async def test_a_persons_command_during_the_poll_keeps_the_link(
     freezer: Any,
     hass: HomeAssistant,
@@ -566,6 +593,31 @@ async def test_a_release_that_raises_is_logged_not_raised(
     assert releases(device) == 1
     assert "releasing the link failed: proxy gone" in caplog.text
     assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert ADDRESS not in connect_gate._gate(hass)._releasing  # the gate's mark ended too
+
+
+async def test_a_release_cancelled_by_an_unload_ends_the_gates_mark(
+    freezer: Any, hass: HomeAssistant, entry: MockConfigEntry, device: Device
+) -> None:
+    """A release still running when its entry unloads is cancelled with the entry's tasks: the
+    gate's mark ends with it, or the domain-wide gate would count that link down until HA
+    restarts (every call to the device taking a ticket, its link never up)."""
+    gate = connect_gate._gate(hass)
+    started, never = asyncio.Event(), asyncio.Event()
+
+    async def _held_release() -> bool:
+        started.set()
+        await never.wait()
+        return True
+
+    device.release.side_effect = _held_release  # type: ignore[attr-defined]
+    await turn_on(hass, MAIN, Context())
+    await run(hass, freezer, PAST)
+    await started.wait()
+    assert gate._releasing[ADDRESS] == 1
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+    assert ADDRESS not in gate._releasing
 
 
 # -- several devices ------------------------------------------------------------------------

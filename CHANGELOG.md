@@ -18,20 +18,20 @@ Requires `govee-ble-local` 1.6.0 or newer (any 1.x) **from PyPI** and Home Assis
   that actually change get the scarce Bluetooth connection slots first. In real nightly "all off"
   bursts about half the lights were already off, and the last light to go out waited for the slot of
   one of them. The turn-off is still sent, so a light wrongly believed off still goes off. Only the
-  device's own report counts: an advertised on/off, an acknowledged turn-off, or a poll once one of
-  the device's reads has answered since setup, from the last 3 minutes (with `govee-ble-local` 1.6.0
-  a later poll whose reads went unanswered also counts, as the library doesn't say; that delays such
-  a turn-off by 10 s at most). An unknown, assumed or older state goes out at once, and so does a
-  command to a single device. Lights already off don't wait for each other: with every light already
-  off, all go out at once, and so does the turn-off of a device whose Bluetooth link is already up
-  (waiting would save no connection slot). Another call to the same light while its turn-off waits
-  (a motion automation turning it back on, say) sends the turn-off at once, so the newer call isn't
-  held up behind it; for a zone's turn-off, a call to any of the device's lights does. A waiting
-  turn-off counts as one of the commands to several devices (every device's polls wait for it), and
-  at the connect gate it goes after the other commands. A turn-off still waiting when Home Assistant
-  stops or the device's entry unloads is dropped. This covers the whole-fixture light, the plug's
-  power switch and, while the whole fixture is already off, a zone light's or zone switch's
-  turn-off.
+  device's own report counts: an advertised on/off, an acknowledged turn-off, or a poll once a
+  poll's state read has answered since setup, from the last 3 minutes (with `govee-ble-local` 1.6.0
+  a later poll whose reads went unanswered also counts, as the library doesn't say; such a turn-off
+  then waits up to 10 s, then goes last at the gate). An unknown, assumed or older state goes out at
+  once, and so does a command to a single device. Lights already off don't wait for each other: with
+  every light already off, all go out at once, and so does the turn-off of a device whose Bluetooth
+  link is already up (waiting would save no connection slot). Another call to the same light while
+  its turn-off waits (a motion automation turning it back on, say) sends the turn-off at once, so
+  the newer call isn't held up behind it; for a zone's turn-off, a call to any of the device's
+  lights does. A waiting turn-off counts as one of the commands to several devices (every device's
+  polls wait for it), and at the connect gate it goes after the other commands. A turn-off still
+  waiting when Home Assistant stops or the device's entry unloads is dropped. This covers the
+  whole-fixture light, the plug's power switch and, while the whole fixture is already off, a zone
+  light's or zone switch's turn-off.
 
 ### Changed
 - **The README lists every supported model:** 98 with `govee-ble-local` 1.6.0, plus 6 you can
