@@ -62,7 +62,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from homeassistant.util import dt as dt_util
 from homeassistant.util.hass_dict import HassKey
 
-from .connect_gate import async_connect_slot
+from .connect_gate import Outcome, async_connect_slot
 from .const import (
     ADVERT_FLIP_POLL_DELAY_SECONDS,
     ADVERT_POWER_FRESH_SECONDS,
@@ -469,6 +469,11 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         # in it came from a person, and the timer that closes it.
         self._window_person = False
         self._unsub_window_end: CALLBACK_TYPE | None = None
+        # A poll is reading the device (``_async_poll``): a window closing then
+        # releases the link only once the poll ends (``_release_after_poll``),
+        # so the poll's remaining reads don't have to connect again.
+        self._poll_reading = False
+        self._release_after_poll = False
         # A poll is running (``_async_update_data``): it uses up the polls held
         # meanwhile, so the hold-off ending doesn't release one alongside it.
         self._poll_running = False
@@ -747,6 +752,7 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         closes the link next.
         """
         self._shutting_down = True
+        self._release_after_poll = False  # device.stop() closes the link next
         self._async_cancel_flip_poll()
         self._async_cancel_holdoff_end()
         self._async_cancel_window_end()
@@ -905,6 +911,14 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         self._async_cancel_holdoff_end()  # the hold-off restarts when the last one ends
         self._async_cancel_window_end()  # and so does the window's settle
         self._window_person = self._window_person or person
+        # A release a poll put off belongs to the window before: this one decides
+        # again when it closes (a person's command alone keeps the link).
+        if self._release_after_poll:
+            _LOGGER.debug(
+                "%s: not releasing the link after the poll: a new command's window decides",
+                self.name,
+            )
+            self._release_after_poll = False
         if not self._shutting_down:
             # Once unloading, no settle would close it.
             self._burst.async_note_window_open(self._address)
@@ -943,12 +957,25 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         link is released now (``Device.release``), and the connection slot it
         holds with it. A command after that connects again. The release waits
         for any operation queued before it, and isn't cancelled by a command
-        starting meanwhile: that one queues behind it and reconnects.
+        starting meanwhile: that one queues behind it and reconnects. While a
+        poll is reading the device, the release is put off until the poll ends
+        (``_async_update_data``): released between its reads, the rest of the
+        poll would connect again. A command starting before then drops the
+        put-off release (``async_note_command_started``): its own window
+        decides when it closes.
         """
         self._unsub_window_end = None
         burst = self._burst.async_close_window(self._address)
         person, self._window_person = self._window_person, False
         if person and not burst:
+            return
+        if self._poll_reading:
+            _LOGGER.debug(
+                "%s: releasing the link once the running poll ends (%s)",
+                self.name,
+                "commands to other devices too" if burst else "no person's command",
+            )
+            self._release_after_poll = True
             return
         _LOGGER.debug(
             "%s: releasing the link (%s)",
@@ -1422,6 +1449,24 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         finally:
             self._poll_running = False
             self._async_drop_held_polls()
+            self._async_release_after_poll()
+
+    @callback
+    def _async_release_after_poll(self) -> None:
+        """Release the link a command window closed on while this poll read the device.
+
+        Not once a command runs again or its window is open (that window
+        decides when it closes), nor once the entry is unloading.
+        """
+        if not self._release_after_poll:
+            return
+        self._release_after_poll = False
+        if self._commands_running or self._unsub_window_end is not None or self._shutting_down:
+            return
+        _LOGGER.debug("%s: the poll ended: releasing the link", self.name)
+        self.config_entry.async_create_background_task(
+            self.hass, self._async_release_link(), name=f"{self.name}_release", eager_start=True
+        )
 
     async def _async_poll(self) -> DeviceState:
         """Read the device (``_async_update_data``), counting the outcome for the backoff."""
@@ -1434,8 +1479,16 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         async with (
             _poll_semaphore(self.hass),
             # Behind every waiting command: see connect_gate.py.
-            async_connect_slot(self.hass, self._address, poll=True),
+            async_connect_slot(self.hass, self._address, poll=True) as admission,
         ):
+            if admission.outcome is Outcome.RELEASED:
+                # Its entry is unloading (or HA stopping) and the link closes next:
+                # no new connect. HA cancels a background poll right after anyway.
+                if not self.last_update_success:
+                    # Returning would read as a recovery ("data recovered") with
+                    # nothing read: stay failed, which HA doesn't log again.
+                    raise self._update_failed("poll_failed", error="its entry is unloading")
+                return self._device.state
             # Again once it has a slot: the wait may have outlasted a held link.
             if self._async_unreachable():
                 raise self._async_skip_absent()
@@ -1444,10 +1497,14 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
             try:
                 # A tighter connect budget than a command's: a device that doesn't
                 # answer frees the device (and a command waiting for it) sooner.
-                data = await self._device.update(
-                    connect_attempts=POLL_CONNECT_ATTEMPTS,
-                    connect_timeout=POLL_CONNECT_TIMEOUT_SECONDS,
-                )
+                self._poll_reading = True
+                try:
+                    data = await self._device.update(
+                        connect_attempts=POLL_CONNECT_ATTEMPTS,
+                        connect_timeout=POLL_CONNECT_TIMEOUT_SECONDS,
+                    )
+                finally:
+                    self._poll_reading = False
             except GoveeBleAuthError as err:
                 # Starts HA's reauth flow (config_flow.async_step_reauth); HA stops
                 # scheduling polls until the entry is reloaded with a new secret.

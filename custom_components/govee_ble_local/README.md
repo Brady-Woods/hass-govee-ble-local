@@ -72,7 +72,8 @@ profile's capabilities:
   byte isn't heard (an H6006 heard only by a passive scanner, which never gets
   its scan response) or has gone stale, one no connectable scanner sees (its
   polls are skipped and counted as before, except within the library's 30 s
-  warm window after a command landed, when they use the link it holds), and a
+  warm window after a command whose link the integration kept, when they use
+  the link it holds), and a
   model in `EXCLUDED_FROM_ADVERT_POLICY` (H60A6 and H60A1: a disconnect may
   end a music or group mode started over Wi-Fi; static finding, bench check
   pending). The policy is re-checked on every advertisement callback and
@@ -99,10 +100,12 @@ profile's capabilities:
   by a rejected key, or off under the policy).
 - A device no connectable scanner can see is **not connected to** (the poll
   fails fast instead of spending ~1 min on hopeless retries), except within
-  `ACTIVE_IDLE_DELAY` (30 s) of a command that landed: a device doesn't
-  advertise while the library holds a command's link, so its poll runs over
-  that link (and if the link has closed meanwhile, its connect fails within
-  the 15 s poll budget and counts as a skip).
+  `ACTIVE_IDLE_DELAY` (30 s) of a command that landed while the integration
+  still holds its link (it wasn't released: see the command window below): a
+  device doesn't advertise while the library holds a command's link, so its
+  poll runs over that link (and if the link has closed meanwhile, its connect
+  fails within the 15 s poll budget and counts as a skip). Once released, the
+  link no longer counts, and the device is skipped as absent.
 - At most `MAX_CONCURRENT_POLLS` polls run at once, integration-wide, and
   each waits at the connect gate (below) behind every waiting command; this
   only stops our own polling from causing a connect storm.
@@ -154,12 +157,18 @@ profile's capabilities:
   script's steps). A person is the context's user, if that user still exists
   and isn't a system user (`helpers.async_context_is_person`), read as the
   command starts: HA forgets an entity's context on a state write 5 s after
-  the call. So the dashboard, the companion app, typed Assist, long-lived
-  tokens and Alexa/Google linked without the cloud keep the link; voice
-  satellites, automations, HomeKit, Cloud Alexa/Google and VoIP release it. A
-  release waits for the device's running and queued operations; a command
-  started after it queues behind it and reconnects. An unload drops a pending
-  close (`device.stop()` closes the link anyway).
+  the call. So the dashboard, the companion app, typed Assist, your own
+  long-lived tokens (a standalone Node-RED) and Alexa/Google linked without
+  the cloud keep the link; voice satellites, automations, HomeKit, Cloud
+  Alexa/Google, VoIP and add-ons that reach HA through the Supervisor (the
+  Node-RED and AppDaemon add-ons as set up by default: a system user) release
+  it. A release waits for the device's operations queued before it, and a
+  command started after it queues behind it and reconnects. While a poll is
+  reading the device, the release is put off until the poll ends (released
+  between the poll's reads, the rest of the poll would connect again); a
+  command that starts meanwhile drops the put-off release, and its own window
+  decides when it closes. An unload drops a pending close (`device.stop()`
+  closes the link anyway).
 - A zone light's or zone switch's turn_off sends nothing while the fixture isn't
   known on, no other command to the device is running, and the device confirmed
   that zone off less than `ZONE_OFF_FRESH_SECONDS` (5 s) ago (its ack of the
@@ -288,7 +297,8 @@ recent warnings, so an identifier split across frame chunks can't leak).
   capability and returns the captured session.
 - Enable `custom_components.govee_ble_local.connect_gate: debug` for one line
   per command and poll: how it got through the connect gate (`admitted`,
-  `linked`, `joined`, `unseen`, `capped` or `unjudged`), how long it waited, the
+  `linked`, `joined`, `unseen`, `capped`, `unjudged` or `released`, the last when
+  its entry unloads or Home Assistant stops), how long it waited, the
   radio its connect was expected on (and where it turned up, if elsewhere), and
   how long the call took after that. Alongside, `habluetooth.wrappers: info`
   logs each connect's ranked paths (`debug` also the path it connected through),

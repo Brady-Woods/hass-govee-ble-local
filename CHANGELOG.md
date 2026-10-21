@@ -43,11 +43,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for the others: an ESPHome proxy has three, and held links made the last lights of "turn off all
   the lights" wait 10-30 s for one. A light and its zone lights in one call still share one link.
   The cost is a reconnect for a command that follows a released one (about 1-2 s, more through a
-  busy proxy). Typed or spoken Assist in the app, a client using a long-lived token (Node-RED) and
-  Alexa or Google Assistant linked without Home Assistant Cloud act as a logged-in user, so they
-  keep the link as the dashboard does. Once a link is released, polls no longer count on it: a
-  light that has stopped advertising is skipped as absent and goes unavailable, as after an idle
-  disconnect, instead of spending a connect on it. Turn on
+  busy proxy). Typed or spoken Assist in the app, a client using your own long-lived token (a
+  standalone Node-RED, say) and Alexa or Google Assistant linked without Home Assistant Cloud act
+  as a logged-in user, so they keep the link as the dashboard does. Add-ons that reach Home
+  Assistant through the Supervisor, such as the Node-RED and AppDaemon add-ons as set up by
+  default, act as its system user, so their commands release the link as an automation's do. A
+  release that falls while a poll is reading the device waits for the poll to end, so the poll's
+  remaining reads don't have to connect again. Once a link is released, polls no longer count on
+  it: a light that has stopped advertising is skipped as absent and goes unavailable, as after an
+  idle disconnect, instead of spending a connect on it. Turn on
   `custom_components.govee_ble_local.coordinator` debug logging for a line per release and its
   reason.
 - **Mass commands no longer overbook a Bluetooth proxy.** "Turn off all the lights" started every
@@ -69,10 +73,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   proxy pauses listening while it connects); one that failed has its radio judged once those 3 s
   are over, and one that worked queues no such check. A call waits at most 12 s, then
   goes ahead as before, one per radio at a time and not to a radio just given another connect.
-  When a device's entry unloads or Home Assistant stops, its calls still waiting go ahead at once,
-  so they reach the device before its link closes. If the gate can't read the Bluetooth scanners
-  it logs the error and lets the calls through. It can't
-  force Home Assistant's path choice, only predict it, and it doesn't cover the self-test. Turn on
+  When a device's entry unloads or Home Assistant stops, its commands still waiting go ahead at
+  once, so they reach the device before its link closes; a poll still waiting skips its read. If
+  the gate can't read the Bluetooth scanners it logs the error and lets the calls through, and a
+  turn-off waiting for the other devices ("Lights already off go last", above) then goes out as
+  if its link were down. It can't force Home Assistant's path choice, only predict it, and it
+  doesn't cover the self-test. Turn on
   `custom_components.govee_ble_local.connect_gate` debug logging for one line per call: how long it
   waited, the radio expected, how long the call took after.
 - **No background polls while commands go to several devices at once.** While Home Assistant

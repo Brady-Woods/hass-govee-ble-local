@@ -409,6 +409,74 @@ async def test_a_link_the_library_kept_still_counts_for_a_poll(
     assert coordinator._async_link_held()
 
 
+def hold_poll(device: Device) -> tuple[asyncio.Event, asyncio.Event]:
+    """Make the device's poll read until the second event is set; the first is set as it reads."""
+    reading, finish = asyncio.Event(), asyncio.Event()
+
+    async def _held(**_kwargs: Any) -> Any:
+        reading.set()
+        await finish.wait()
+        device.state.optimistic = False
+        return device.state
+
+    device.update.side_effect = _held  # type: ignore[attr-defined]
+    return reading, finish
+
+
+async def test_a_release_waits_for_a_running_polls_reads(
+    freezer: Any,
+    hass: HomeAssistant,
+    entry: MockConfigEntry,
+    device: Device,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A window closing while a poll reads the device releases the link once the poll ends:
+    released between its reads, the rest of the poll would have to connect again."""
+    caplog.set_level(logging.DEBUG, logger="custom_components.govee_ble_local.coordinator")
+    reading, finish = hold_poll(device)
+    poll = asyncio.create_task(coordinator_of(entry).async_refresh())  # not an HA task: held
+    await reading.wait()
+    await turn_on(hass, MAIN, Context())  # an automation's command while the poll reads
+    await run(hass, freezer, PAST)
+    assert releases(device) == 0
+    assert "releasing the link once the running poll ends (no person's command)" in caplog.text
+
+    finish.set()
+    await poll
+    await hass.async_block_till_done()
+    assert releases(device) == 1
+    assert connection(device).disconnects == 1
+    assert "the poll ended: releasing the link" in caplog.text
+
+
+async def test_a_persons_command_during_the_poll_keeps_the_link(
+    freezer: Any,
+    hass: HomeAssistant,
+    entry: MockConfigEntry,
+    device: Device,
+    *,
+    gui: Context,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A release a poll put off belongs to the window before: a person's command in a new
+    window decides again, and a person alone keeps the link."""
+    caplog.set_level(logging.DEBUG, logger="custom_components.govee_ble_local.coordinator")
+    reading, finish = hold_poll(device)
+    poll = asyncio.create_task(coordinator_of(entry).async_refresh())
+    await reading.wait()
+    await turn_on(hass, MAIN, Context())
+    await run(hass, freezer, PAST)  # put off: the poll reads
+    await turn_on(hass, MAIN, gui)
+    await run(hass, freezer, PAST)  # a person alone: kept
+
+    finish.set()
+    await poll
+    await hass.async_block_till_done()
+    assert releases(device) == 0
+    assert "not releasing the link after the poll: a new command's window decides" in caplog.text
+    assert "the poll ended: releasing the link" not in caplog.text
+
+
 async def test_a_release_that_raises_is_logged_not_raised(
     freezer: Any, hass: HomeAssistant, device: Device, caplog: pytest.LogCaptureFixture
 ) -> None:

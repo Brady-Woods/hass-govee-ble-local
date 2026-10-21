@@ -344,11 +344,26 @@ class ConnectGate:
 
     @callback
     def async_link_up(self, address: str) -> bool:
-        """Whether a radio lists ``address`` as holding a slot: its link is up (or coming up)."""
+        """Whether a radio lists ``address`` as holding a slot: its link is up (or coming up).
+
+        False if the scanners can't be read, as the gate's own passes treat a
+        failure (logged in full once): a broken gate must not hold up a call.
+        """
         radios: dict[str, _Radio] = {}
-        return any(
-            self._radio(path.scanner, radios).lists(address) for path in self._paths(address)
-        )
+        try:
+            return any(
+                self._radio(path.scanner, radios).lists(address) for path in self._paths(address)
+            )
+        except Exception:
+            _LOGGER.log(
+                logging.DEBUG if self._failed else logging.ERROR,
+                "%s: the connect gate couldn't read the Bluetooth scanners;"
+                " taking its link as down",
+                address,
+                exc_info=True,
+            )
+            self._failed = True
+            return False
 
     @callback
     def async_release_waiters(self, address: str) -> None:

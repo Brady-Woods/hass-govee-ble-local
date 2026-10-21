@@ -111,6 +111,68 @@ async def _stop(hass: HomeAssistant, entry: MockConfigEntry) -> None:
     assert entry.state is ConfigEntryState.LOADED
 
 
+@pytest.mark.parametrize("background", [True, False], ids=["background_poll", "refresh"])
+async def test_a_poll_waiting_at_the_gate_reads_nothing_as_its_entry_unloads(
+    hass: HomeAssistant, proxy: Radio, entry: MockConfigEntry, background: bool
+) -> None:
+    """Released as its entry unloads, a waiting poll skips its read: the link closes next.
+
+    A connect started then would only be cancelled a moment later (HA cancels the
+    entry's background tasks after the unload) or, for a refresh HA doesn't
+    cancel, fail on the closed link.
+    """
+    device = entry.runtime_data.device
+    coordinator = entry.runtime_data.coordinator
+    for slot in range(3):
+        proxy.take(f"11:22:33:44:55:{slot:02X}")
+    proxy.hear(ADDRESS, -70)
+    polls = device.update.await_count  # type: ignore[attr-defined]
+    refresh = None
+    if background:
+        coordinator._async_release_poll("test_poll")
+    else:
+        refresh = asyncio.create_task(coordinator.async_refresh())
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert [waiter.poll for waiter in hass.data[_GATE]._waiters] == [True]
+
+    await _unload(hass, entry)
+    await hass.async_block_till_done()
+    if refresh is not None:
+        async with asyncio.timeout(5):
+            await refresh
+    assert device.update.await_count == polls  # type: ignore[attr-defined]
+    assert not hass.data[_GATE]._waiters
+
+
+async def test_a_poll_released_after_a_failed_one_logs_no_recovery(
+    hass: HomeAssistant, proxy: Radio, entry: MockConfigEntry, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A poll released as its entry unloads reads nothing, so it isn't a recovery: after a
+    failed poll it stays failed, without HA's "data recovered" line."""
+    device = entry.runtime_data.device
+    coordinator = entry.runtime_data.coordinator
+    proxy.hear(ADDRESS, -70)
+    device.update.side_effect = GoveeBleConnectionError("down")  # type: ignore[attr-defined]
+    await coordinator.async_refresh()
+    assert not coordinator.last_update_success
+    for slot in range(3):
+        proxy.take(f"11:22:33:44:55:{slot:02X}")
+    polls = device.update.await_count  # type: ignore[attr-defined]
+    refresh = asyncio.create_task(coordinator.async_refresh())
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert [waiter.poll for waiter in hass.data[_GATE]._waiters] == [True]
+
+    with caplog.at_level(logging.INFO):
+        await _unload(hass, entry)
+        async with asyncio.timeout(5):
+            await refresh
+    assert device.update.await_count == polls  # type: ignore[attr-defined]
+    assert not coordinator.last_update_success
+    assert "data recovered" not in caplog.text
+
+
 @pytest.mark.parametrize("close", [_unload, _stop], ids=["unload", "home_assistant_stop"])
 async def test_a_command_waiting_at_the_gate_reaches_the_device_before_its_link_closes(
     hass: HomeAssistant,

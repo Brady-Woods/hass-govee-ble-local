@@ -289,6 +289,37 @@ async def test_an_off_light_goes_out_after_the_other_devices(
     assert waits(hass, off) == 0
 
 
+async def test_a_failed_scanner_read_doesnt_fail_the_deferred_off(
+    hass: HomeAssistant,
+    add_device: Callable[..., Any],
+    tracker: CommandTracker,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """If the Bluetooth scanners can't be read, the deferral still waits and then sends.
+
+    Its "is the link up" check reads them; a failure counts as no link (logged),
+    as the gate itself lets its waiting calls through unjudged, instead of
+    failing the service call (an automation's "all off" step would abort).
+    """
+    off, lit = await add_device(is_on=False), await add_device(is_on=True)
+    lit_gate = hold(lit)
+    with patch(
+        "homeassistant.components.bluetooth.async_scanner_devices_by_address",
+        side_effect=RuntimeError("no paths today"),
+    ):
+        calls = [turn_off(hass, off), turn_off(hass, lit)]
+        await settle()
+        assert off.sent == []  # waits for the lit light, as with readable scanners
+        assert waits(hass, off) == 1
+
+        lit_gate.set()
+        await settle()
+        await asyncio.gather(*calls)  # neither call raises
+    assert lit.sent
+    assert off.sent
+    assert "couldn't read the Bluetooth scanners" in caplog.text
+
+
 def commanding(tracker: CommandTracker, *rigs: Rig) -> bool:
     """Return whether every rig's command has started and is still running."""
     return all(tracker.running[rig.device.address] for rig in rigs)
