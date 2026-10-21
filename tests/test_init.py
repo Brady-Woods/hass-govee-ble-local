@@ -13,6 +13,7 @@ from bleak.backends.device import BLEDevice
 import govee_ble_local
 from govee_ble_local import (
     Device,
+    Encryption,
     GoveeBleConnectionError,
     GoveeBleError,
     create_device,
@@ -745,13 +746,19 @@ async def test_setup_with_the_real_library_routes_by_the_advertised_pact(
         domain=DOMAIN, title=TITLE, unique_id=ADDRESS, data={"address": ADDRESS, CONF_SKU: "H6009"}
     )
     entry.add_to_hass(hass)
-    with _fake_transport():
+    with _fake_transport() as transport:
         await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done(wait_background_tasks=True)
         assert entry.state is state
         if state is ConfigEntryState.LOADED:
-            assert entry.runtime_data.device.profile == profile_for("H6009", pact=pact)
-            assert isinstance(entry.runtime_data.device._conn, FakeConnection)
+            device = entry.runtime_data.device
+            assert device.profile == profile_for("H6009", pact=pact)
+            assert isinstance(device._conn, FakeConnection)
+            # The advert's encrypted Govee block decides, whatever the name: library 1.6.1
+            # (the floor) does so for a renamed record too; 1.6.0 fell back to the profile's
+            # cipher. (The fake transport reports none of its own: check what it was built with.)
+            assert device.pact == pact
+            assert transport.call_args.kwargs["encryption"] is Encryption.AES_RC4_PSK
             assert await hass.config_entries.async_unload(entry.entry_id)
         else:
             assert entry.error_reason_translation_domain == DOMAIN

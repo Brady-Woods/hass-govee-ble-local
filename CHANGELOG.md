@@ -14,7 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an unencrypted one and talked to it in plain text. It now takes encryption and the protocol
   version from the light's own Govee manufacturer data, whatever the name, as the Govee app does
   for a light already added. Seen on the lab's H6008, whose record had a nearby device's name
-  merged in through an ESPHome proxy; reloading the light's entry was the workaround.
+  merged in through an ESPHome proxy. Reloading the light's entry helped only once Home Assistant's
+  record showed the light's own name again: the library picks the cipher when the light is set up.
 - The README's list of supported models is generated from `govee-ble-local` 1.6.1 (unchanged: 98,
   plus 6 opt-in), and shows where a model's colour-temperature range depends on its hardware or
   software version or its protocol (the H61A8 narrows to 2700-6500 K from hardware 3.08.01; the
@@ -51,8 +52,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A light whose record shows another device's name no longer fails setup for good when its
   protocol version isn't served.** Setup read the version from the name-gated advertisement check,
   found nothing, and reported the model as unsupported (a permanent error). It now reads the
-  light's Govee manufacturer data, so setup retries ("protocol not supported") as for any light,
-  and the same holds for the protocol check during setup in the config flow.
+  light's Govee manufacturer data, so setup retries ("protocol not supported") as for any light.
+  Adding such a light in the config flow stops with "protocol not supported" too, instead of
+  creating an entry that can't load.
 - Tests: a context without a user is checked to be no person's without the user store being
   asked. Home Assistant answers "no user" for no id today, so dropping that check in
   `helpers.async_context_is_person` passed every test. No change to the integration itself.
