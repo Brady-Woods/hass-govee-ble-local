@@ -53,7 +53,12 @@ rules:
       a music or group mode started over Wi-Fi; static finding, not yet
       bench-checked). Failed polls back off exponentially to 30 min; no more
       than two background polls run at once integration-wide; the first poll
-      after a restart is staggered per device.
+      after a restart is staggered per device. Background polls give way to
+      commands, which need the same slots: a poll due while a command to its
+      device runs, or within 25 s after, waits until then, and while commands
+      to two or more devices run at once (a light group, an area) every
+      device's polls wait until 25 s after the last of them; a poll waits
+      2 min at most.
   brands:
     status: done
     comment: >

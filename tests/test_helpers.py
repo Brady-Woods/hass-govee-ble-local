@@ -4,10 +4,13 @@ from __future__ import annotations
 
 from bleak.exc import BleakError
 from govee_ble_local import GoveeBleConnectionError, GoveeBleError
+from homeassistant.core import Context, HomeAssistant
 import pytest
+from pytest_homeassistant_custom_component.common import MockUser
 
 from custom_components.govee_ble_local.helpers import (
     BLE_ERRORS,
+    async_context_is_person,
     brightness_to_pct,
     clean_mac,
     clean_text,
@@ -124,3 +127,24 @@ def test_ble_errors_catches_subclasses() -> None:
     """A library subclass is caught by BLE_ERRORS in an except clause."""
     with pytest.raises(BLE_ERRORS):
         raise GoveeBleConnectionError("nope")
+
+
+async def test_a_logged_in_users_context_is_a_persons(
+    hass: HomeAssistant, hass_admin_user: MockUser, hass_read_only_user: MockUser
+) -> None:
+    """A user of Home Assistant (an admin or not) is a person."""
+    assert await async_context_is_person(hass, Context(user_id=hass_admin_user.id))
+    assert await async_context_is_person(hass, Context(user_id=hass_read_only_user.id))
+
+
+@pytest.mark.usefixtures("hass_owner_user")  # so the user deleted below isn't the owner
+async def test_contexts_without_a_person(hass: HomeAssistant) -> None:
+    """No context, one without a user (an automation, a voice satellite), a system user's
+    (Home Assistant Cloud, VoIP) and a user since deleted's are no person's."""
+    system = await hass.auth.async_create_system_user("Home Assistant Cloud")
+    deleted = await hass.auth.async_create_user("Gone")
+    await hass.auth.async_remove_user(deleted)
+    assert not await async_context_is_person(hass, None)
+    assert not await async_context_is_person(hass, Context())
+    assert not await async_context_is_person(hass, Context(user_id=system.id))
+    assert not await async_context_is_person(hass, Context(user_id=deleted.id))

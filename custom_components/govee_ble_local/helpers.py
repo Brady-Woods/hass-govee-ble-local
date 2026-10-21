@@ -1,15 +1,16 @@
-"""Small shared helpers: entity partition, device-info cleaning, unit conversion, secrets."""
+"""Small shared helpers: entity partition, zone state, device info, unit conversion, secrets."""
 
 from __future__ import annotations
 
+import time
 from typing import TYPE_CHECKING
 
 from bleak.exc import BleakError
 from govee_ble_local import Capability, GoveeBleError
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import Context, HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 
-from .const import DEFAULT_MAX_KELVIN, DEFAULT_MIN_KELVIN, DOMAIN
+from .const import DEFAULT_MAX_KELVIN, DEFAULT_MIN_KELVIN, DOMAIN, ZONE_OFF_FRESH_SECONDS
 
 if TYPE_CHECKING:
     from govee_ble_local import Device, Zone
@@ -53,6 +54,26 @@ def has_power_switch(device: Device) -> bool:
 def is_colour_zone(zone: Zone) -> bool:
     """Return True if the zone has segments: a light, else an on/off-only switch."""
     return bool(zone.segments)
+
+
+def zone_confirmed_off(device: Device, zone_name: str) -> bool:
+    """Return whether the device itself said, a moment ago, that the zone is off.
+
+    Only while the whole fixture isn't known on, and by a confirmation less than
+    ZONE_OFF_FRESH_SECONDS old. The library stamps a zone's power as confirmed
+    (``zone_power_confirmed``, on ``time.monotonic()``) only when the device
+    reported it or acked a write that sets it, as an acked whole-fixture power-off
+    does for every zone. It drops the stamp when anything else changes the zone's
+    power (an advertisement, a scene), when a write may have lit the zone (a
+    brightness, colour or segment write wakes a fixture not known on), and when a
+    power write may have landed unacked. A zone off by an advertisement or by the
+    library's assumption alone has none.
+    """
+    if device.state.is_on is True or device.zone_is_on(zone_name) is not False:
+        return False
+    power_index = next(z.power_index for z in device.zones if z.name == zone_name)
+    confirmed = device.state.zone_power_confirmed.get(power_index)
+    return confirmed is not None and time.monotonic() - confirmed < ZONE_OFF_FRESH_SECONDS
 
 
 def kelvin_range(device: Device) -> tuple[int, int]:
@@ -143,3 +164,20 @@ def async_secret_rejected(
         translation_key="secret_rejected",
         translation_placeholders={"device_name": entry.title},
     )
+
+
+async def async_context_is_person(hass: HomeAssistant, context: Context | None) -> bool:
+    """Return whether a command came from a person: a user of Home Assistant, not a system user.
+
+    The context's user is the one logged in to the frontend or the companion
+    app (a dashboard, a more-info dialog, a widget; typed or phone Assist looks
+    the same), or a long-lived token's owner. An automation, a voice satellite
+    or HomeKit has none; a script, a scene or a light group passes on the
+    context of what called it (from a dashboard, the user's). Home Assistant
+    Cloud's Alexa and Google Assistant, and VoIP phones, act as system users.
+    A user since deleted isn't a person either.
+    """
+    if context is None or context.user_id is None:
+        return False
+    user = await hass.auth.async_get_user(context.user_id)
+    return user is not None and not user.system_generated

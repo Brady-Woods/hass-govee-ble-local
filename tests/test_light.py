@@ -44,12 +44,14 @@ from custom_components.govee_ble_local.const import (
     DEFAULT_MIN_KELVIN,
     DOMAIN,
     UNAVAILABLE_AFTER_FAILURES,
+    ZONE_OFF_FRESH_SECONDS,
     ZONE_STATE_FRESH_SECONDS,
 )
 
 from .conftest import (
     FakeConnection,
     advertisement_callback,
+    allow_adverts,
     connection,
     make_device,
     make_service_info,
@@ -1310,7 +1312,7 @@ async def test_segment_readback_remembers_colour_for_later_turn_on(
 ) -> None:
     """A colour learned from read-back is what a later 'off' then 'on' restores."""
     seg = _segment(hass, SEG)
-    _seed(enabled_entry, segments=[Segment(index=SEG, rgb=GREEN, brightness=60)])
+    _seed(enabled_entry, is_on=True, segments=[Segment(index=SEG, rgb=GREEN, brightness=60)])
     await _call(hass, "turn_off", seg)
     mock_device.set_segment_rgb.reset_mock()
     await _call(hass, "turn_on", seg)
@@ -1322,6 +1324,7 @@ async def test_segment_partial_failure_still_publishes(
 ) -> None:
     """The colour lands, the brightness frame fails: error raised, landed colour published."""
     seg = _segment(hass, SEG)
+    _seed(enabled_entry, is_on=True)
     _fail(mock_device, GoveeBleConnectionError("dropped"), after=1)
 
     with pytest.raises(HomeAssistantError) as exc:
@@ -1368,6 +1371,226 @@ async def test_segment_lights_unavailable_with_the_device(
     enabled_entry.runtime_data.coordinator.async_update_listeners()
     assert hass.states.get(seg).state == STATE_UNAVAILABLE
     assert enabled_entry.state is ConfigEntryState.LOADED
+
+
+# Segment lights and the fixture's power. A segment has no power of its own: it is dark
+# while the fixture is off, and on a zoned fixture (H60A6, H6047) a segment's colour frame
+# (33 05) switches the fixture on.
+
+SEGMENT_COUNTS = {"H60A6": 13, "H6047": 10}
+ZONED_SEGMENTED = pytest.mark.parametrize("device_sku", list(SEGMENT_COUNTS))
+SEGMENTED = pytest.mark.parametrize("device_sku", [*SEGMENT_COUNTS, "H61A8"])
+
+
+def _colour_frames(sent: list[bytes]) -> list[bytes]:
+    """The 33 05 (mode/colour) writes among ``sent``: the frames that wake a zoned fixture."""
+    return [frame for frame in sent if frame[:2] == b"\x33\x05"]
+
+
+def _lit(entry: MockConfigEntry) -> None:
+    """Seed the fixture read back on, both zones lit and every segment red."""
+    count = entry.runtime_data.device.segment_count
+    _seed(
+        entry,
+        is_on=True,
+        zone_power={0: True, 1: True},
+        segments=[Segment(index=index, rgb=RED, brightness=80) for index in range(count)],
+    )
+
+
+@ZONED_SEGMENTED
+async def test_turning_every_light_off_leaves_a_zoned_fixture_off(
+    hass: HomeAssistant, enabled_entry: MockConfigEntry, mock_device: Device
+) -> None:
+    """Turning every light off with the segment lights enabled blacks no segment out.
+
+    ``entity_id: all`` runs the lights in the order they were added: the fixture's
+    power-off first, then its zone and segment lights. A black-out after the power-off
+    would switch the fixture back on, every zone lit, while every light shows off. The
+    library models that wake by dropping the zones' "off" confirmations, which stay here.
+    """
+    _lit(enabled_entry)
+    segments = [_segment(hass, index) for index in range(mock_device.segment_count)]
+    assert len(segments) == SEGMENT_COUNTS[mock_device.sku]
+    assert {hass.states.get(seg).state for seg in segments} == {STATE_ON}
+    connection(mock_device).sent.clear()
+
+    await _call(hass, "turn_off", "all")
+
+    sent = connection(mock_device).sent
+    assert sent[0] == build.switch(False)
+    assert _colour_frames(sent) == []
+    mock_device.set_segment_rgb.assert_not_awaited()
+    assert mock_device.state.is_on is False
+    assert set(mock_device.state.zone_power_confirmed) == {0, 1}
+    lights = hass.states.async_entity_ids("light")
+    assert set(segments) < set(lights)
+    assert {hass.states.get(entity_id).state for entity_id in lights} == {STATE_OFF}
+    # Each segment keeps its colour, for the fixture's next turn-on.
+    assert {segment.rgb for segment in mock_device.state.segments} == {RED}
+
+
+@ZONED_SEGMENTED
+async def test_a_segment_spared_its_black_out_is_lit_again_with_the_fixture(
+    hass: HomeAssistant, enabled_entry: MockConfigEntry, mock_device: Device
+) -> None:
+    """A segment turned off while its fixture is off kept its colour: the fixture's next
+    turn-on lights it again, and it shows on with it."""
+    _lit(enabled_entry)
+    seg = _segment(hass, SEG)
+    await _call(hass, "turn_off", MAIN)
+    await _call(hass, "turn_off", seg)
+    assert hass.states.get(seg).state == STATE_OFF
+    connection(mock_device).sent.clear()
+
+    await _call(hass, "turn_on", MAIN)
+
+    assert connection(mock_device).sent == [build.switch(True)]
+    state = hass.states.get(seg)
+    assert state.state == STATE_ON
+    assert state.attributes["rgb_color"] == RED
+
+
+@ZONED_SEGMENTED
+@pytest.mark.parametrize(
+    ("is_on", "expected"),
+    [(False, STATE_OFF), (None, STATE_ON)],
+    ids=["known_off", "unknown"],
+)
+async def test_a_segment_of_a_zoned_fixture_not_known_on_is_not_blacked_out(
+    hass: HomeAssistant,
+    enabled_entry: MockConfigEntry,
+    mock_device: Device,
+    caplog: pytest.LogCaptureFixture,
+    *,
+    is_on: bool | None,
+    expected: str,
+) -> None:
+    """Nothing is sent while the fixture isn't known on, and it is no command: it holds no
+    poll off, notes no device I/O and resets no backoff. The state is still written, and a
+    debug line says why nothing went out. The segment shows off with its fixture known
+    off; while the fixture's on/off is still unknown it keeps showing its own state."""
+    caplog.set_level(logging.DEBUG, logger="custom_components.govee_ble_local.light")
+    _seed(enabled_entry, is_on=is_on, segments=[Segment(index=SEG, rgb=RED, brightness=80)])
+    coordinator = enabled_entry.runtime_data.coordinator
+    seg = _segment(hass, SEG)
+    written = hass.states.get(seg).last_reported
+    with (
+        patch.object(coordinator, "async_note_command_started") as started,
+        patch.object(coordinator, "async_note_device_io") as device_io,
+        patch.object(coordinator, "async_handle_command_success") as success,
+    ):
+        await _call(hass, "turn_off", seg)
+    started.assert_not_called()
+    device_io.assert_not_called()
+    success.assert_not_called()
+    assert not coordinator.commands_holding_off
+    mock_device.set_segment_rgb.assert_not_awaited()
+    assert connection(mock_device).sent == []
+    assert hass.states.get(seg).state == expected
+    assert hass.states.get(seg).last_reported > written
+    assert (
+        f"{ADDRESS} isn't known on; not blacking segment {SEG + 1} out (that would switch it on)"
+        in caplog.text
+    )
+
+
+@ZONED_SEGMENTED
+async def test_a_segment_of_a_lit_zoned_fixture_is_blacked_out(
+    hass: HomeAssistant, enabled_entry: MockConfigEntry, mock_device: Device
+) -> None:
+    """With the fixture known on, turn_off blacks the segment out with one 33 05 frame:
+    on a lit fixture it wakes nothing. So does a segment turned off before its fixture."""
+    _lit(enabled_entry)
+    seg = _segment(hass, SEG)
+    connection(mock_device).sent.clear()
+
+    await _call(hass, "turn_off", seg)
+
+    mock_device.set_segment_rgb.assert_awaited_once_with([SEG], BLACK)
+    sent = connection(mock_device).sent
+    assert len(sent) == 1
+    assert _colour_frames(sent) == sent
+    assert hass.states.get(seg).state == STATE_OFF
+    assert hass.states.get(MAIN).state == STATE_ON
+
+
+@SEGMENTED
+@pytest.mark.parametrize(
+    ("is_on", "expected"),
+    [(False, STATE_OFF), (True, STATE_ON), (None, STATE_ON)],
+    ids=["known_off", "known_on", "unknown"],
+)
+async def test_a_segment_shows_off_while_its_fixture_is_known_off(
+    hass: HomeAssistant, enabled_entry: MockConfigEntry, *, is_on: bool | None, expected: str
+) -> None:
+    """A fixture switched off keeps its segments' colours, which the read-back still
+    reports: a segment shows off while its fixture is known off, else its own state."""
+    _seed(enabled_entry, is_on=is_on, segments=[Segment(index=SEG, rgb=RED, brightness=80)])
+    assert hass.states.get(_segment(hass, SEG)).state == expected
+
+
+@SEGMENTED
+@pytest.mark.parametrize("is_on", [False, None], ids=["known_off", "unknown"])
+async def test_a_segment_turned_on_switches_its_fixture_on_first(
+    hass: HomeAssistant, enabled_entry: MockConfigEntry, mock_device: Device, *, is_on: bool | None
+) -> None:
+    """A plain turn_on of a segment that kept its colour, on a fixture that isn't known on,
+    switches the fixture on, which lights the segment, and sends nothing else."""
+    _seed(enabled_entry, is_on=is_on, segments=[Segment(index=SEG, rgb=RED, brightness=80)])
+    seg = _segment(hass, SEG)
+    connection(mock_device).sent.clear()
+
+    await _call(hass, "turn_on", seg)
+
+    mock_device.set_power.assert_awaited_once_with(True)
+    assert connection(mock_device).sent == [build.switch(True)]
+    assert hass.states.get(MAIN).state == STATE_ON
+    state = hass.states.get(seg)
+    assert state.state == STATE_ON
+    assert state.attributes["rgb_color"] == RED
+
+
+@ZONED_SEGMENTED
+async def test_a_colour_for_a_segment_of_a_fixture_known_off_follows_its_power_on(
+    hass: HomeAssistant, enabled_entry: MockConfigEntry, mock_device: Device
+) -> None:
+    """A colour for a segment of a fixture known off goes out after the fixture's
+    power-on, so both show on: the colour frame alone would switch the fixture on while
+    the library kept it off."""
+    _seed(enabled_entry, is_on=False)
+    seg = _segment(hass, SEG)
+    connection(mock_device).sent.clear()
+
+    await _call(hass, "turn_on", seg, rgb_color=GREEN)
+
+    sent = connection(mock_device).sent
+    assert len(sent) == 2
+    assert sent[0] == build.switch(True)
+    assert _colour_frames(sent) == sent[1:]
+    mock_device.set_segment_rgb.assert_awaited_once_with([SEG], GREEN)
+    assert hass.states.get(MAIN).state == STATE_ON
+    assert hass.states.get(seg).state == STATE_ON
+
+
+@pytest.mark.parametrize("device_sku", ["H61A8"])
+async def test_a_segment_of_a_zoneless_fixture_known_off_is_still_blacked_out(
+    hass: HomeAssistant, enabled_entry: MockConfigEntry, mock_device: Device
+) -> None:
+    """The library models no wake for a fixture without zones (H61A8), so turn_off
+    blacks the segment out even while the fixture is off: it stays dark when the fixture
+    comes back on."""
+    _seed(enabled_entry, is_on=False, segments=[Segment(index=SEG, rgb=RED, brightness=80)])
+    seg = _segment(hass, SEG)
+    connection(mock_device).sent.clear()
+
+    await _call(hass, "turn_off", seg)
+
+    mock_device.set_segment_rgb.assert_awaited_once_with([SEG], BLACK)
+    assert len(connection(mock_device).sent) == 1
+    assert hass.states.get(seg).state == STATE_OFF
+    await _call(hass, "turn_on", MAIN)
+    assert hass.states.get(seg).state == STATE_OFF
 
 
 # -- 9. zone lights -------------------------------------------------------------------
@@ -1455,8 +1678,11 @@ async def test_zone_plain_turn_on_only_powers_the_zone(
     assert hass.states.get(zone).state == STATE_ON
 
 
-async def _poll_back(entry: MockConfigEntry, zone_power: dict[int, bool]) -> None:
-    """Run a poll that read the fixture on and the zones' power back, as the library applies it.
+async def _poll_back(
+    entry: MockConfigEntry, zone_power: dict[int, bool], *, is_on: bool = True
+) -> None:
+    """Run a poll that read the fixture's on/off and the zones' power back, as the library
+    applies it.
 
     A read that carries a zone's power stamps it confirmed (``zone_power_confirmed``, on
     ``time.monotonic()``); one whose reads go unanswered stamps nothing.
@@ -1464,7 +1690,7 @@ async def _poll_back(entry: MockConfigEntry, zone_power: dict[int, bool]) -> Non
     device = entry.runtime_data.device
 
     async def _update(**_kwargs: Any) -> Any:
-        device.state.is_on = True
+        device.state.is_on = is_on
         device.state.zone_power = dict(zone_power)
         device.state.zone_power_confirmed = dict.fromkeys(zone_power, time.monotonic())
         device.state.optimistic = False
@@ -1946,3 +2172,322 @@ async def test_h6047_bar_of_unknown_state_gets_no_colour_when_its_switch_is_refu
         await _call(hass, "turn_on", _zone(hass, "left"), rgb_color=RED)
     assert build.bar_switch_query() in connection(mock_device).queries
     mock_device.set_zone_rgb.assert_not_awaited()
+
+
+# Zone turn_off right after the fixture's power-off ("turn off all the lights").
+
+ZONES = {"H60A6": ("main", "background"), "H6047": ("left", "right")}
+ZONED = pytest.mark.parametrize("device_sku", list(ZONES))
+
+
+def _confirm_at(entry: MockConfigEntry, at: float) -> None:
+    """Move every zone confirmation the device holds to ``at`` (on the ``zone_clock``)."""
+    state = entry.runtime_data.device.state
+    state.zone_power_confirmed = dict.fromkeys(state.zone_power_confirmed, at)
+
+
+def test_zone_off_window() -> None:
+    """The chosen window: 5 s covers one fan-out, whose commands come 0.03-0.1 s apart, and
+    stays far inside the 120 s a lit zone's confirmation is trusted for."""
+    assert ZONE_OFF_FRESH_SECONDS == 5
+    assert ZONE_OFF_FRESH_SECONDS < ZONE_STATE_FRESH_SECONDS
+
+
+@ZONED
+@pytest.mark.parametrize("together", [True, False], ids=["all", "one_by_one"])
+async def test_all_off_sends_one_power_frame_per_device(
+    hass: HomeAssistant, entry: MockConfigEntry, mock_device: Device, *, together: bool
+) -> None:
+    """Turning every light of the fixture off, the fixture first, sends only its power-off:
+    the device acks it for every zone, so the zone lights' turn_offs after it send nothing.
+    ``entity_id: all`` runs the lights in the order they were added, the fixture first."""
+    zones = [_zone(hass, name) for name in ZONES[mock_device.sku]]
+    await _call(hass, "turn_on", MAIN)  # H60A6: both zones confirmed on; H6047: bars unknown
+    connection(mock_device).sent.clear()
+    if together:
+        await _call(hass, "turn_off", "all")
+    else:
+        for entity_id in (MAIN, *zones):
+            await _call(hass, "turn_off", entity_id)
+    assert connection(mock_device).sent == [build.switch(False)]
+    mock_device.set_zone_power.assert_not_awaited()
+    assert {hass.states.get(entity_id).state for entity_id in (MAIN, *zones)} == {STATE_OFF}
+
+
+@ZONED
+async def test_all_off_with_segment_lights_sends_one_power_frame_and_stays_off(
+    hass: HomeAssistant, enabled_entry: MockConfigEntry, mock_device: Device
+) -> None:
+    """With the segment lights enabled too, "turn off all the lights" still sends only the
+    fixture's power-off: neither a zone-off nor a segment's black-out (which would switch
+    the fixture back on) follows it, and every light shows off."""
+    lights = [state.entity_id for state in hass.states.async_all("light")]
+    assert len(lights) == 1 + len(ZONES[mock_device.sku]) + mock_device.segment_count
+    await _call(hass, "turn_on", MAIN)
+    connection(mock_device).sent.clear()
+    await _call(hass, "turn_off", "all")
+    assert connection(mock_device).sent == [build.switch(False)]
+    mock_device.set_zone_power.assert_not_awaited()
+    mock_device.set_segment_rgb.assert_not_awaited()
+    assert mock_device.state.is_on is False
+    assert {hass.states.get(entity_id).state for entity_id in lights} == {STATE_OFF}
+
+
+@ZONED
+async def test_a_call_listing_the_fixture_and_its_zones_sends_nothing_after_the_power_off(
+    hass: HomeAssistant, entry: MockConfigEntry, mock_device: Device
+) -> None:
+    """One call listing several lights runs them in no fixed order (a set's): whatever it
+    is, nothing goes out after the fixture's power-off, and only a zone run before it
+    sends its own zone-off."""
+    zones = [_zone(hass, name) for name in ZONES[mock_device.sku]]
+    await _poll_back(entry, {0: True, 1: True})
+    connection(mock_device).sent.clear()
+    await hass.services.async_call(
+        "light", "turn_off", {"entity_id": [MAIN, *zones]}, blocking=True
+    )
+    sent = connection(mock_device).sent
+    assert sent[-1] == build.switch(False)
+    assert len(sent) == 1 + mock_device.set_zone_power.await_count
+    assert {call.args[1] for call in mock_device.set_zone_power.await_args_list} <= {False}
+    assert {hass.states.get(entity_id).state for entity_id in (MAIN, *zones)} == {STATE_OFF}
+
+
+@ZONED
+async def test_a_zone_turned_off_before_the_fixture_still_sends_its_frame(
+    hass: HomeAssistant, entry: MockConfigEntry, mock_device: Device
+) -> None:
+    """The order isn't guaranteed (one service call for several lights runs them in no
+    set order): a zone turned off before the fixture sends its own power-off, and only a
+    zone after the fixture's is spared."""
+    first, last = ZONES[mock_device.sku]
+    await _poll_back(entry, {0: True, 1: True})
+    connection(mock_device).sent.clear()
+    for entity_id in (_zone(hass, first), MAIN, _zone(hass, last)):
+        await _call(hass, "turn_off", entity_id)
+    mock_device.set_zone_power.assert_awaited_once_with(first, False)
+    sent = connection(mock_device).sent
+    assert len(sent) == 2
+    assert sent[1] == build.switch(False)
+
+
+@ZONED
+async def test_a_lit_zone_turned_off_alone_still_sends_its_frame(
+    hass: HomeAssistant, entry: MockConfigEntry, mock_device: Device
+) -> None:
+    """Turning one lit zone off, the rest of the fixture staying on, sends its power-off."""
+    zone, other = ZONES[mock_device.sku]
+    await _poll_back(entry, {0: True, 1: True})
+    connection(mock_device).sent.clear()
+    await _call(hass, "turn_off", _zone(hass, zone))
+    mock_device.set_zone_power.assert_awaited_once_with(zone, False)
+    assert len(connection(mock_device).sent) == 1
+    assert hass.states.get(_zone(hass, zone)).state == STATE_OFF
+    assert hass.states.get(_zone(hass, other)).state == STATE_ON
+
+
+@ZONED
+@pytest.mark.parametrize(
+    ("age", "sent"),
+    [
+        (ZONE_OFF_FRESH_SECONDS - 0.5, False),
+        (ZONE_OFF_FRESH_SECONDS, True),
+        (60.0, True),
+    ],
+    ids=["fresh", "at_the_window", "a_minute_ago"],
+)
+async def test_a_zone_confirmed_off_too_long_ago_is_switched_off_again(
+    hass: HomeAssistant,
+    entry: MockConfigEntry,
+    mock_device: Device,
+    zone_clock: SimpleNamespace,
+    *,
+    age: float,
+    sent: bool,
+) -> None:
+    """Only a confirmation younger than ZONE_OFF_FRESH_SECONDS spares a zone's power-off:
+    by then the zone may have been switched on elsewhere, which shows only in a read-back."""
+    zone = ZONES[mock_device.sku][0]
+    await _call(hass, "turn_off", MAIN)  # the device confirms every zone off
+    _confirm_at(entry, zone_clock.now)
+    zone_clock.now += age
+    connection(mock_device).sent.clear()
+    await _call(hass, "turn_off", _zone(hass, zone))
+    assert mock_device.set_zone_power.await_count == int(sent)
+    assert len(connection(mock_device).sent) == int(sent)
+    assert hass.states.get(_zone(hass, zone)).state == STATE_OFF
+
+
+async def test_a_zone_just_switched_off_is_spared_while_the_fixtures_on_off_is_unknown(
+    hass: HomeAssistant, entry: MockConfigEntry, mock_device: Device
+) -> None:
+    """The fixture need only not be known on: with the other zone's power unknown, the
+    fixture's on/off stays unknown after a zone-off, and a second one right after it, which
+    the device just confirmed, sends nothing."""
+    zone = _zone(hass, "main")
+    _seed(entry, is_on=None, zone_power={0: True})
+    await _call(hass, "turn_off", zone)
+    assert mock_device.state.is_on is None
+    await _call(hass, "turn_off", zone)
+    mock_device.set_zone_power.assert_awaited_once_with("main", False)
+    assert connection(mock_device).sent == [build.zone_power(0, False)]
+
+
+@ZONED
+async def test_a_zone_confirmed_on_is_switched_off(
+    hass: HomeAssistant, entry: MockConfigEntry, mock_device: Device
+) -> None:
+    """Only a zone confirmed off is spared: one the device just confirmed on gets its
+    power-off, even while the fixture isn't known on (here its on/off is unknown)."""
+    zone = ZONES[mock_device.sku][0]
+    await _poll_back(entry, {0: True, 1: True})
+    _seed(entry, is_on=None)
+    connection(mock_device).sent.clear()
+    await _call(hass, "turn_off", _zone(hass, zone))
+    mock_device.set_zone_power.assert_awaited_once_with(zone, False)
+    assert len(connection(mock_device).sent) == 1
+
+
+@ZONED
+async def test_a_zone_confirmed_off_in_a_lit_fixture_is_switched_off(
+    hass: HomeAssistant, entry: MockConfigEntry, mock_device: Device
+) -> None:
+    """A zone the device just reported off, in a fixture known on, still gets its power-off."""
+    zone = ZONES[mock_device.sku][0]
+    await _poll_back(entry, {0: False, 1: True})
+    connection(mock_device).sent.clear()
+    await _call(hass, "turn_off", _zone(hass, zone))
+    mock_device.set_zone_power.assert_awaited_once_with(zone, False)
+    assert len(connection(mock_device).sent) == 1
+
+
+@ZONED
+@pytest.mark.parametrize("source", ["advertisement", "assumed"])
+async def test_a_zone_off_without_a_confirmation_is_switched_off(
+    hass: HomeAssistant,
+    entry: MockConfigEntry,
+    mock_device: Device,
+    mock_bluetooth: SimpleNamespace,
+    source: str,
+) -> None:
+    """A zone off only by an advertisement (it carries the whole fixture's on/off, and its
+    "off" drops the zones' stamps) or by state nothing confirmed gets its power-off."""
+    zone = ZONES[mock_device.sku][0]
+    if source == "advertisement":
+        await _poll_back(entry, {0: True, 1: True})
+        allow_adverts(mock_device)
+        advertisement_callback(mock_bluetooth)(
+            make_service_info(on=False), BluetoothChange.ADVERTISEMENT
+        )
+        await hass.async_block_till_done()
+    else:
+        _seed(entry, is_on=False, zone_power={0: False, 1: False})
+    state = mock_device.state
+    assert (state.is_on, state.zone_power, state.zone_power_confirmed) == (
+        False,
+        {0: False, 1: False},
+        {},
+    )
+    connection(mock_device).sent.clear()
+    await _call(hass, "turn_off", _zone(hass, zone))
+    mock_device.set_zone_power.assert_awaited_once_with(zone, False)
+    assert len(connection(mock_device).sent) == 1
+
+
+@ZONED
+async def test_a_zone_off_after_a_failed_fixture_off_is_sent(
+    hass: HomeAssistant, entry: MockConfigEntry, mock_device: Device
+) -> None:
+    """A fixture power-off that fails may or may not have landed: it confirms no zone off,
+    so the zone's own power-off goes out."""
+    zone = ZONES[mock_device.sku][0]
+    await _poll_back(entry, {0: True, 1: True})
+    _fail(mock_device, GoveeBleTimeout("no ack"))
+    with pytest.raises(HomeAssistantError):
+        await _call(hass, "turn_off", MAIN)
+    connection(mock_device).error = None
+    connection(mock_device).sent.clear()
+    await _call(hass, "turn_off", _zone(hass, zone))
+    mock_device.set_zone_power.assert_awaited_once_with(zone, False)
+    assert len(connection(mock_device).sent) == 1
+
+
+@ZONED
+async def test_a_zone_off_after_a_write_that_wakes_the_fixture_is_sent(
+    hass: HomeAssistant, entry: MockConfigEntry, mock_device: Device
+) -> None:
+    """A colour frame that reaches the fixture after its power-off (one the self-test
+    writes, say; a segment light powers the fixture on first) wakes it, lighting every
+    zone: the library confirms the zones' "off" no more, so the zone-off goes out."""
+    zone = ZONES[mock_device.sku][0]
+    await _call(hass, "turn_off", MAIN)
+    await mock_device.set_segment_rgb([0], RED)
+    assert mock_device.state.is_on is False  # the library keeps it off; the stamps went
+    connection(mock_device).sent.clear()
+    await _call(hass, "turn_off", _zone(hass, zone))
+    mock_device.set_zone_power.assert_awaited_once_with(zone, False)
+    assert len(connection(mock_device).sent) == 1
+
+
+@ZONED
+async def test_a_zone_off_while_another_command_runs_is_sent(
+    hass: HomeAssistant, entry: MockConfigEntry, mock_device: Device
+) -> None:
+    """While another command to the device is in flight (here the fixture light's, held
+    open), a zone confirmed off still gets its power-off: that command may switch it on."""
+    zone = ZONES[mock_device.sku][0]
+    await _call(hass, "turn_off", MAIN)
+    fixture = hass.data[DATA_COMPONENT].get_entity(MAIN)
+    connection(mock_device).sent.clear()
+    async with fixture._command():
+        await _call(hass, "turn_off", _zone(hass, zone))
+    mock_device.set_zone_power.assert_awaited_once_with(zone, False)
+    assert len(connection(mock_device).sent) == 1
+
+
+@pytest.mark.parametrize("device_sku", ["H6047"])
+async def test_h6047_bar_of_unknown_power_is_switched_off(
+    hass: HomeAssistant, entry: MockConfigEntry, mock_device: Device
+) -> None:
+    """Before the bars are read (``zone_power`` is ``{}``, as after a whole-fixture
+    turn-on), nothing vouches for a bar being off: its turn_off goes to the library, which
+    reads the bars first (here unanswered, so it refuses)."""
+    _seed(entry, is_on=None, zone_power={})
+    with pytest.raises(HomeAssistantError):
+        await _call(hass, "turn_off", _zone(hass, "left"))
+    mock_device.set_zone_power.assert_awaited_once_with("left", False)
+    assert build.bar_switch_query() in connection(mock_device).queries
+
+
+async def test_a_spared_zone_off_is_no_command(
+    hass: HomeAssistant,
+    entry: MockConfigEntry,
+    mock_device: Device,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A spared power-off does no I/O and is no command: it holds no poll off, notes no
+    device I/O and resets no backoff. The zone's state is still written, and a debug line
+    says why nothing went out."""
+    caplog.set_level(logging.DEBUG, logger="custom_components.govee_ble_local.light")
+    await _poll_back(entry, {0: False, 1: False}, is_on=False)
+    coordinator = entry.runtime_data.coordinator
+    zone = _zone(hass, "main")
+    written = hass.states.get(zone).last_reported
+    connection(mock_device).sent.clear()
+    with (
+        patch.object(coordinator, "async_note_command_started") as started,
+        patch.object(coordinator, "async_note_device_io") as device_io,
+        patch.object(coordinator, "async_handle_command_success") as success,
+    ):
+        await _call(hass, "turn_off", zone)
+    started.assert_not_called()
+    device_io.assert_not_called()
+    success.assert_not_called()
+    assert not coordinator.commands_holding_off
+    mock_device.set_zone_power.assert_not_awaited()
+    assert connection(mock_device).sent == []
+    assert hass.states.get(zone).state == STATE_OFF
+    assert hass.states.get(zone).last_reported > written
+    assert f"Zone main of {ADDRESS} was just confirmed off; not sending its power-off" in (
+        caplog.text
+    )
