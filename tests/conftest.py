@@ -123,10 +123,25 @@ class FakeConnection:
     async def close(self) -> None:
         self.closed = True
 
-    async def disconnect(self) -> bool:
-        """Drop the link now; the Device stays usable (no link here: counted, said dropped)."""
+    async def disconnect(self, *, keep: Callable[[], bool] | None = None) -> bool:
+        """Drop the link now, the Device staying usable; False if ``keep()`` says keep it.
+
+        No link here: a drop is counted and reported (govee-ble-local 1.6.0's signature).
+        """
+        if keep is not None and keep():
+            return False
         self.disconnects += 1
         return True
+
+    @property
+    def is_connected(self) -> bool:
+        """Whether a link is up (no link here)."""
+        return False
+
+    @property
+    def link_number(self) -> int:
+        """Which link is up, 0 with none (govee-ble-local 1.6.0+; no link here)."""
+        return 0
 
     def update_ble_device(self, ble_device: BLEDevice) -> None:
         """Accept a fresher BLEDevice (no-op)."""
