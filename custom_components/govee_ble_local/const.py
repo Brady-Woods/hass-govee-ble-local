@@ -103,10 +103,27 @@ MAX_CONCURRENT_POLLS = 2
 # back-to-back calls (the reads of one update(), a zone light's 2-4 calls,
 # the self-test's steps) start the next one well within 1 s. A write still
 # keeps its link warm for 30 s (the library waits for the longer of the two),
-# so only the tail after a read gets shorter; the cost is that a command 1-8 s
-# after a poll opens a new link instead of reusing the poll's. It must be
-# above 0: 0 or less never drops an idle link.
+# unless the integration releases it (COMMAND_RELEASE_DELAY_SECONDS), so only
+# the tail after a read gets shorter; the cost is that a command 1-8 s after a
+# poll opens a new link instead of reusing the poll's. It must be above 0: 0 or
+# less never drops an idle link.
 POLL_IDLE_DISCONNECT_SECONDS = 1.0
+
+# After an entity command the library keeps the device's link up for its
+# ACTIVE_IDLE_DELAY (30 s, and its heartbeat keeps the device from ending it
+# sooner), so a person adjusting again (a second tap, a slider drag) finds it
+# up. Only for that: this long after the device's last command ends, unless
+# another starts meanwhile, the integration releases the link
+# (``Device.release``) when no command to the device in that time came from a
+# person (``helpers.async_context_is_person``: a voice satellite, an
+# automation, HomeKit or a cloud voice assistant isn't one), or when another
+# device's command window was open at some point during it (a burst: a light
+# group, an area, "turn off all the lights", a script's steps; see
+# ``coordinator.CommandBurst``). A held link keeps one of the few connection
+# slots of the adapter or proxy (an ESPHome proxy has three) that the other
+# devices' commands need. Long enough that a device's entities in one service
+# call (0.03-0.1 s apart) share one link; a connect takes longer.
+COMMAND_RELEASE_DELAY_SECONDS = 0.5
 
 # Random jitter (seconds) added to the poll interval (base and backoff) so
 # devices don't drift into lockstep over uptime. The crc32 stagger in
@@ -128,11 +145,18 @@ FIRST_POLL_STAGGER_MAX_SECONDS = POLL_INTERVAL_SECONDS - 20
 # A background poll that comes due while an entity command to the device is
 # running, or within this long after one ended, waits until then: a poll then
 # would take the device for its reads just when the user is likely to adjust
-# again, and Home Assistant already shows what the command did. It ends a few
-# seconds before the library drops a command's link (its 30 s ACTIVE_IDLE_DELAY
-# after a write), so the held-off poll still finds the link up. A stream of
-# commands holds a poll off at most POLL_HOLDOFF_MAX_SECONDS from when it came
-# due; then it runs anyway.
+# again, and Home Assistant already shows what the command did. While commands
+# to two or more devices run at once (a light group, an area, "turn off all the
+# lights"), every device's polls wait, until this long after the last of them
+# ends (coordinator.CommandBurst): a poll of any device would take one of the
+# connection slots those commands need. The hold-off ends a few seconds before
+# the library drops a command's link (its 30 s ACTIVE_IDLE_DELAY after a write,
+# the longest a link stays up after a command), so the poll the device's own
+# hold-off held can still find up the link a person's command kept. A link the
+# integration released (COMMAND_RELEASE_DELAY_SECONDS) is gone by then, and so
+# is one a burst holds a poll past those 30 s: that poll reconnects. A stream
+# of commands holds a poll off at most POLL_HOLDOFF_MAX_SECONDS from when it
+# came due; then it runs anyway.
 POLL_HOLDOFF_AFTER_COMMAND_SECONDS = 25
 POLL_HOLDOFF_MAX_SECONDS = POLL_INTERVAL_SECONDS
 
@@ -174,6 +198,22 @@ SLOW_POLL_MAX_STEPS = 3
 # whole fixture's on/off), so it is switched on first.
 ZONE_STATE_FRESH_SECONDS = 120
 
+# A zone's turn_off sends nothing while the fixture isn't known on and the
+# device confirmed that zone off less than this long ago (``zone_power_confirmed``
+# again). "Turn off all the lights" turns the fixture and each of its zone lights
+# off at once, their commands 0.03-0.1 s apart: the fixture's power-off, once
+# the device acks it, confirms every zone off, and each zone's own off frame
+# after it would only keep the link, and its connection slot, busy longer. The
+# library stamps the zones as the firmware sets them (on the H60A6 and the
+# H6047 the 33 01 sets every zone flag), and a bench check of both (2026-10-21)
+# found that a whole-fixture on relights every zone whether or not the zone-offs
+# followed the off, so skipping them doesn't change what comes back on. The
+# window covers one such fan-out and no more: a zone switched back on elsewhere
+# meanwhile still reads off here (the library ignores advertisements for 15 s
+# after a command, and they carry only the whole fixture's on/off), and a
+# turn_off must reach it then.
+ZONE_OFF_FRESH_SECONDS = 5
+
 # A device that has vanished from every connectable scanner (through a Bluetooth
 # proxy HA drops it from its history 195-525 s after its last advertisement;
 # through a local adapter, at HA's next 5-minute sweep after BlueZ removes it)
@@ -191,13 +231,71 @@ UNAVAILABLE_AFTER_UNHEARD_SECONDS = UNAVAILABLE_AFTER_FAILURES * POLL_INTERVAL_S
 # advertisement is bloat).
 LAST_SEEN_RESOLUTION_SECONDS = 60
 
-# Upper bound for each library call an entity command makes (connect + handshake
-# + frames, and any wait for the library's per-device connection lock), so a
-# call to a present-but-unconnectable device fails instead of hanging. It bounds
-# each call, not a whole service call (a zone light's turn_on can make up to
-# four), and not the time a command waits in Home Assistant's PARALLEL_UPDATES
-# queue before it starts.
+# The connect gate (connect_gate.py). Every entity command's library call, and
+# every background poll after all waiting commands, waits there until Home
+# Assistant's Bluetooth stack would route its connect to a radio (a local
+# adapter or a proxy) with room for it. Without it a mass command ("turn off all
+# the lights") starts every device's connect within milliseconds, and an ESPHome
+# proxy was handed more connects than it has slots: habluetooth trusts the free
+# count the proxy last reported. The extra ones were refused, and
+# bleak-retry-connector moved them on to whatever path was left, even a local
+# adapter at -96 dBm that waited out a 20 s connect timeout.
+#
+# A radio takes our connects while its effective free count (the slots it
+# reported free, less our connects it hasn't listed yet) allows. A proxy also
+# takes at most CONNECT_GATE_IN_FLIGHT_PER_PROXY connects in progress at a time,
+# ours or anyone's: an ESPHome proxy jams on concurrent connect requests while
+# one of its slots is still connecting. A local adapter has no such limit: BlueZ
+# runs pending connects side by side. A path is usable for a device while its
+# advertisement there is at or above CONNECT_GATE_RSSI_FLOOR and fewer than
+# CONNECT_GATE_PATH_FAILURES connects to the device through it have failed since
+# one last worked (habluetooth's own per-scanner count). While anything waits,
+# the gate re-reads the scanners every CONNECT_GATE_TICK_SECONDS: Home
+# Assistant's API has no callback for a slot freeing. A call waits at most
+# CONNECT_GATE_MAX_WAIT_SECONDS, then goes ahead as it would without the gate
+# (one per radio per tick). One of our connects stops counting against its
+# radio after that long too (a proxy still counts any connect habluetooth has in
+# progress through it): past that, a connect that slow can't be told from a
+# stuck command.
+#
+# A radio that has heard no advertisement for CONNECT_GATE_DEAF_SECONDS, while
+# not connecting normally (no connect in progress, or one with no slot listed),
+# is avoided for CONNECT_GATE_AVOID_SECONDS: no path through it counts as usable,
+# so it doesn't draw the overflow from a busy radio. In a measured burst, a
+# software proxy reporting all 3 slots free, and never listing one taken, went
+# deaf for over 79 s while the two connects habluetooth sent it hung for 40 s,
+# and the healthy radios heard something every second. An ESPHome proxy pauses
+# scanning while it connects, but lists the slot it reserved for that. One of
+# our connects seen coming up through an avoided radio ends its avoidance (until
+# a later look finds it still stuck).
+CONNECT_GATE_IN_FLIGHT_PER_PROXY = 1
+CONNECT_GATE_RSSI_FLOOR = -85
+CONNECT_GATE_PATH_FAILURES = 3
+CONNECT_GATE_TICK_SECONDS = 0.25
+CONNECT_GATE_MAX_WAIT_SECONDS = 12
+CONNECT_GATE_DEAF_SECONDS = 10
+CONNECT_GATE_AVOID_SECONDS = 300
+# A call that failed has its radio checked for being stuck this long after it
+# ended, not at once: an ESPHome proxy pauses scanning while it connects, so a
+# healthy one has heard nothing yet the moment a slow connect gives up, and only
+# one still deaf a few seconds later (a proxy whose connects hang) is avoided.
+CONNECT_GATE_RELEASE_GRACE_SECONDS = 3
+
+# Upper bound for each library call an entity command makes (its wait at the
+# connect gate, any wait for the library's per-device connection lock, connect +
+# handshake + frames), so a call to a present-but-unconnectable device fails
+# instead of hanging. It bounds each call, not a whole service call (a zone
+# light's turn_on can make up to four), and not the time a command waits in
+# Home Assistant's PARALLEL_UPDATES queue before it starts.
 COMMAND_TIMEOUT_SECONDS = 60
+
+# The longest a turn-off of a device that already said it is off waits for the
+# commands to other devices running at the same time (deferral.py): "turn off
+# all the lights" with half of them already off lets the lights that change take
+# the connection slots first. A light that is on finishes in about 5-7 s, so 10 s
+# lets the usual burst through, and bounds the wait when one of them hangs. Not
+# part of COMMAND_TIMEOUT_SECONDS, which bounds the device call after the wait.
+DEFER_OFF_MAX_SECONDS = 10
 
 # How long unloading an entry waits for a running self-test to finish (and put
 # the device back the way it found it) before the BLE link is closed under it.

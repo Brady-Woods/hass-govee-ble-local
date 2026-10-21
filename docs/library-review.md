@@ -75,7 +75,7 @@ for a library change. Item details further down still describe the 1.2.1 / `c823
 | 3.1 | not library-dependent | Only message text changed | Integration: typed report |
 | 3.2 | still open | Field names unchanged | Integration: typed accessors |
 | 3.3 | not library-dependent | Unchanged | Integration: stable `reason` code |
-| 4.1 | still open | Unchanged | Integration (floor): fixture-off gate plus power-on |
+| 4.1 | done in the integration | Segment lights show off with the fixture known off, power it on first, and send no black-out to an H60A6 / H6047 not known on ([Unreleased]) | None |
 | 4.2 | still open | No `Segment.kelvin`; per-bar Kelvin is still H6047-only | Integration (floor) stopgap; Library for `Segment.kelvin` |
 | 4.3 | still open | Unchanged | Integration (floor): remember the Kelvin across off |
 | 4.4 | still open | Unchanged | Library: fold whole-device writes into `state.segments` |
@@ -649,7 +649,11 @@ types are written once.
   `is_on=False, segments=[Segment(rgb=RED)]` shows off; `turn_on` with the fixture off sends power.
 - **Verification:** confirmed by 1 verifier, who made the power-first step part of the fix rather than
   optional.
-- **Decision:** open
+- **Decision:** done in the integration ([Unreleased]). A segment light shows off while
+  `coordinator.data.is_on is False`, and `async_turn_on` sends `set_power(True)` first while the
+  fixture isn't known on. `_is_dark()` stays on `_attr_is_on`. On a zoned fixture (H60A6, H6047) that
+  isn't known on, `async_turn_off` sends nothing: library 1.5.0 models a `33 05` there as waking the
+  fixture (`Device._wake_power`), so "turn off all the lights" relit it.
 
 ### 4.2 `sublight-cct-mode-never-reconciles`
 

@@ -62,9 +62,11 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from homeassistant.util import dt as dt_util
 from homeassistant.util.hass_dict import HassKey
 
+from .connect_gate import async_connect_slot
 from .const import (
     ADVERT_FLIP_POLL_DELAY_SECONDS,
     ADVERT_POWER_FRESH_SECONDS,
+    COMMAND_RELEASE_DELAY_SECONDS,
     DOMAIN,
     EXCLUDED_FROM_ADVERT_POLICY,
     MAX_CONCURRENT_POLLS,
@@ -90,6 +92,7 @@ if TYPE_CHECKING:
 _LOGGER = logging.getLogger(__name__)
 
 _POLL_SEMAPHORE: HassKey[asyncio.Semaphore] = HassKey(f"{DOMAIN}_poll_semaphore")
+_COMMAND_BURST: HassKey[CommandBurst] = HassKey(f"{DOMAIN}_command_burst")
 
 _BASE_INTERVAL = timedelta(seconds=POLL_INTERVAL_SECONDS)
 _MAX_INTERVAL = timedelta(seconds=MAX_POLL_INTERVAL_SECONDS)
@@ -122,14 +125,214 @@ _UNPOLLED = frozenset({PollPolicy.OFF, PollPolicy.RELAY})
 def _poll_semaphore(hass: HomeAssistant) -> asyncio.Semaphore:
     """Return the domain-wide cap on simultaneous polls.
 
-    The HA Bluetooth manager already routes each connect to a scanner with a
-    free slot (and bleak-retry-connector backs off on out-of-slots); this only
-    keeps the integration's own background polling from launching a connect
-    storm.
+    The connect gate (connect_gate.py) keeps each connect off a radio without
+    room for it; this only keeps the integration's own background polling from
+    launching a connect storm.
     """
     if (semaphore := hass.data.get(_POLL_SEMAPHORE)) is None:
         semaphore = hass.data[_POLL_SEMAPHORE] = asyncio.Semaphore(MAX_CONCURRENT_POLLS)
     return semaphore
+
+
+class CommandBurst:
+    """Entity commands to several devices at once: every device's background polls wait.
+
+    A light group, an area or "turn off all the lights" sends one command per
+    device, all at the same time, and each needs one of the few connection
+    slots of the adapter or proxy that reaches its device (an ESPHome proxy
+    has three). A background poll of any other device takes a slot for its
+    connect and reads, and a command then waits behind it. So once commands
+    to two or more devices run at the same time, a burst starts: every
+    device's polls wait (``GoveeBleLocalCoordinator.commands_holding_off``)
+    until POLL_HOLDOFF_AFTER_COMMAND_SECONDS after the last command anywhere
+    ends. A command starting meanwhile, to any device, extends it: the tail
+    starts again when that one ends. Outside a burst, a command to one
+    device holds only that device's polls.
+
+    As the burst ends, each loaded entry's held poll runs, unless its
+    device's own hold-off still runs (which releases it as it ends). Each
+    held poll still runs after POLL_HOLDOFF_MAX_SECONDS at the latest, so an
+    entry that wasn't loaded as the burst ended (still setting up, or one
+    that failed to unload) waits that long at most. The released polls run
+    as any do, at most MAX_CONCURRENT_POLLS at a time.
+
+    A turn-off waiting in the deferral (``deferral.OffDeferral``: its device
+    already said it is off, so it lets the other devices go first) counts
+    toward starting and ending the burst, though it isn't a command yet: one
+    light on and the rest already off is still a command to several devices.
+    It isn't among ``commanding_devices``, so such turn-offs don't wait for each
+    other.
+
+    Entities can also ask which devices a command runs to now
+    (``commanding_devices``), or whether one runs to another device
+    (``other_devices_commanding``), and be told whenever one starts or ends
+    (``async_add_command_listener``). It is reached as ``command_burst(hass)``,
+    or from a coordinator as ``GoveeBleLocalCoordinator.command_burst``.
+
+    It also keeps each device's command window, which decides whether the
+    device's link is released after it (``GoveeBleLocalCoordinator``'s
+    ``_async_end_window``): open from a command's start until
+    COMMAND_RELEASE_DELAY_SECONDS after the device's last command ends. A
+    window during which another device's was open at some point is a burst,
+    though the commands themselves never overlapped (a script's steps), and
+    this one doesn't last the tail of POLL_HOLDOFF_AFTER_COMMAND_SECONDS.
+    """
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self._hass = hass
+        # Entity commands running now, per device address: a command still
+        # running on an entry that is reloading counts for the same device as
+        # the reloaded entry's.
+        self._running: dict[str, int] = {}
+        # Turn-offs waiting in the deferral, per device address.
+        self._deferred: dict[str, int] = {}
+        self.active = False
+        # The timer that ends the burst once no command runs.
+        self._unsub_end: CALLBACK_TYPE | None = None
+        # Called after each command starts or ends (``async_add_command_listener``).
+        self._listeners: list[CALLBACK_TYPE] = []
+        # The devices whose command window is open, per address: whether
+        # another device's window was open during it.
+        self._windows: dict[str, bool] = {}
+
+    @property
+    def commanding_devices(self) -> set[str]:
+        """Return the addresses of the devices an entity command is running to now."""
+        return set(self._running)
+
+    @callback
+    def other_devices_commanding(self, address: str) -> bool:
+        """Return whether an entity command to a device other than the one at ``address`` runs."""
+        return any(other != address for other in self._running)
+
+    @callback
+    def async_add_command_listener(self, update_callback: CALLBACK_TYPE) -> CALLBACK_TYPE:
+        """Call ``update_callback`` as any device's command starts or ends; return its unsubscribe.
+
+        It is called synchronously, once the counts (``other_devices_commanding``)
+        and the burst are up to date: it may wake a waiter or schedule work, but
+        must not start or end a command itself. One that raises is logged, and
+        the others are still called.
+        """
+        return _async_subscribe(self._listeners, update_callback)
+
+    @callback
+    def async_note_window_open(self, address: str) -> None:
+        """Open the command window of the device at ``address``, or keep it open.
+
+        With another device's window open too, every open window is a burst.
+        """
+        self._windows.setdefault(address, False)
+        if len(self._windows) > 1:
+            self._windows = dict.fromkeys(self._windows, True)
+
+    @callback
+    def async_close_window(self, address: str) -> bool:
+        """Close the device's command window; return whether it was a burst."""
+        return self._windows.pop(address, False)
+
+    @callback
+    def async_note_command_started(self, address: str) -> None:
+        """Count a command to the device at ``address``; a second device's starts a burst."""
+        self._running[address] = self._running.get(address, 0) + 1
+        self._async_cancel_end()  # the tail starts again when the last command ends
+        self._async_maybe_start()
+        self._async_notify()
+
+    @callback
+    def async_note_command_finished(self, address: str) -> None:
+        """Count a command to the device at ``address`` ending; the last one starts the tail."""
+        if (running := self._running.pop(address, 0) - 1) > 0:
+            self._running[address] = running
+        if self.active and not self._running and not self._deferred:
+            self._async_start_tail()
+        self._async_notify()
+
+    @callback
+    def async_note_deferred_started(self, address: str) -> None:
+        """Count a turn-off of the device at ``address`` waiting in the deferral.
+
+        It waits only while a command to another device runs, so a burst starts
+        with it: every device's polls wait.
+        """
+        self._deferred[address] = self._deferred.get(address, 0) + 1
+        self._async_cancel_end()
+        self._async_maybe_start()
+
+    @callback
+    def async_note_deferred_finished(self, address: str) -> None:
+        """Count such a turn-off no longer waiting (sent next, or dropped)."""
+        if (deferred := self._deferred.pop(address, 0) - 1) > 0:
+            self._deferred[address] = deferred
+        if self.active and not self._running and not self._deferred:
+            self._async_start_tail()
+
+    @callback
+    def _async_maybe_start(self) -> None:
+        """Start a burst once commands or waiting turn-offs involve two or more devices."""
+        devices = self._running.keys() | self._deferred.keys()
+        if not self.active and len(devices) > 1:
+            _LOGGER.debug("Commands to %d devices at once: every poll waits", len(devices))
+            self.active = True
+
+    @callback
+    def _async_notify(self) -> None:
+        """Call every command listener, logging one that raises."""
+        for update_callback in list(self._listeners):
+            try:
+                update_callback()
+            except Exception:
+                _LOGGER.exception("Unexpected error in command listener %s", update_callback)
+
+    @callback
+    def _async_start_tail(self) -> None:
+        """Start the tail that ends the burst, as the last command anywhere ends."""
+        self._async_cancel_end()  # one tail, even after an end it never saw start
+        if not self._hass.config_entries.async_loaded_entries(DOMAIN):
+            # The last entry unloaded while this command ran: no poll is left to
+            # hold, and a timer would outlive the integration.
+            self.active = False
+            return
+        self._unsub_end = async_call_later(
+            self._hass, POLL_HOLDOFF_AFTER_COMMAND_SECONDS, self._async_end_burst
+        )
+
+    @callback
+    def async_note_unload(self) -> None:
+        """End the burst once no entry is loaded: there is nothing left to hold.
+
+        Unless commands still run (HA doesn't cancel them on unload): an entry
+        set up again before they end (a reload) holds its polls until after
+        them, and the last one to end ends the burst if none is.
+        """
+        if not self._hass.config_entries.async_loaded_entries(DOMAIN):
+            self._async_cancel_end()
+            if not self._running and not self._deferred:
+                self.active = False
+
+    @callback
+    def _async_end_burst(self, _now: datetime) -> None:
+        """End the burst, and run the polls it held back."""
+        self._unsub_end = None
+        self.active = False
+        _LOGGER.debug("Commands to several devices done: held polls run")
+        for entry in self._hass.config_entries.async_loaded_entries(DOMAIN):
+            coordinator: GoveeBleLocalCoordinator = entry.runtime_data.coordinator
+            coordinator._async_release_held_poll()
+
+    @callback
+    def _async_cancel_end(self) -> None:
+        """Drop the timer that would end the burst, if any."""
+        if self._unsub_end is not None:
+            self._unsub_end()
+            self._unsub_end = None
+
+
+def command_burst(hass: HomeAssistant) -> CommandBurst:
+    """Return the domain-wide tracker of commands to several devices at once."""
+    if (burst := hass.data.get(_COMMAND_BURST)) is None:
+        burst = hass.data[_COMMAND_BURST] = CommandBurst(hass)
+    return burst
 
 
 def _polled_state(state: DeviceState) -> dict[str, Any]:
@@ -193,6 +396,8 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         # back. They answer different questions: reachability vs. successful control.
         self.last_seen: datetime | None = None
         self.last_connected: datetime | None = None
+        # last_connected on the Bluetooth monotonic clock (``power_confirmed_off``).
+        self._read_back_at: float | None = None
         self._diagnostic_listeners: list[CALLBACK_TYPE] = []
         self._state_listeners: list[CALLBACK_TYPE] = []
         # Receive time (monotonic) of the advertisement last_seen/RSSI came from.
@@ -206,8 +411,13 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         # Availability once it is gone counts from it (``device_available``).
         self._connectable_heard_at = bluetooth.MONOTONIC_TIME()
         # When an entity command last landed (monotonic): its link may still be
-        # open (``_async_link_held``).
+        # open (``_async_link_held``). When the last one that says something
+        # about the device's power landed (all but a zone's turn-off, which
+        # can't switch a fixture on), and whether it was a whole-device
+        # turn-off, whose ack says the device is off (``power_confirmed_off``).
         self._command_landed_at: float | None = None
+        self._power_landed_at: float | None = None
+        self._landed_off = False
         # Availability as last pushed to the entities (None = never pushed).
         self._published_available: bool | None = None
         # A poll was skipped because the device wasn't advertising; when it
@@ -241,21 +451,33 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         self._reoffered: dict[int, bytes] | None = None
         # Entity commands running now, and the timer that ends the hold-off
         # POLL_HOLDOFF_AFTER_COMMAND_SECONDS after the last one: background polls
-        # wait for both (``commands_holding_off``). Whether a scheduled poll, and
-        # the first poll after setup, are waiting for the hold-off (kept apart:
-        # a re-arm or a policy step that stops polls drops a held scheduled
-        # poll, never the first one), and the timer that runs the held poll
+        # wait for both, and for a burst of commands to several devices
+        # (``commands_holding_off``, ``CommandBurst``). Whether a scheduled poll, and
+        # the first poll after setup (or a return poll), are waiting for the hold-off
+        # (kept apart: a re-arm or a policy step that stops polls drops a held
+        # scheduled poll, never the first one), and the timer that runs the held poll
         # anyway once it has waited POLL_HOLDOFF_MAX_SECONDS. Set once the entry
         # is unloading.
         self._commands_running = 0
+        self._burst = command_burst(hass)
         self._unsub_holdoff_end: CALLBACK_TYPE | None = None
         self._poll_waiting = False
         self._first_poll_waiting = False
         self._unsub_holdoff_cap: CALLBACK_TYPE | None = None
         self._shutting_down = False
+        # The device's command window (``_async_end_window``): whether a command
+        # in it came from a person, and the timer that closes it.
+        self._window_person = False
+        self._unsub_window_end: CALLBACK_TYPE | None = None
         # A poll is running (``_async_update_data``): it uses up the polls held
         # meanwhile, so the hold-off ending doesn't release one alongside it.
         self._poll_running = False
+        # Home Assistant fired its stop event: its close stage refuses nothing,
+        # so no held poll is released any more (``_async_release_poll``).
+        self._ha_stopping = False
+        # Zone turn-offs of this device waiting in the deferral: any call to the
+        # device ends them (``GoveeBleLocalEntity.async_request_call``).
+        self._zone_off_hurries: set[CALLBACK_TYPE] = set()
         # Doublings of the poll interval for a slow-connecting or weak-signal
         # device, and how long the last successful poll took (diagnostics).
         self.slow_poll_steps = 0
@@ -295,6 +517,14 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
     def polls_scheduled(self) -> bool:
         """Return whether HA schedules background polls (see ``scheduled_interval``)."""
         return self.scheduled_interval is not None
+
+    @property
+    def commands_running(self) -> bool:
+        """Return whether an entity command to the device is running now.
+
+        Unlike ``commands_holding_off``, not the hold-off after one ended.
+        """
+        return bool(self._commands_running)
 
     @property
     def device_available(self) -> bool:
@@ -412,9 +642,7 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
             self._skipped_absent = False
             if self.poll_policy not in _UNPOLLED:
                 self._set_poll_interval(_BASE_INTERVAL)
-            self.config_entry.async_create_background_task(
-                self.hass, self.async_request_refresh(), name=f"{self.name}_return_poll"
-            )
+            self._async_request_poll("return_poll", keep=True)
             return_poll = True
 
         # Heard again after no scanner did: show it now, not at the next refresh.
@@ -476,14 +704,33 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         refused while stopping, so this would poll a link the stop listener is
         closing. Nor does it poll after a rejected secret or with polling
         disabled since (halted polls stay halted), or while no entity listens
-        (like HA's own timer).
+        (like HA's own timer). It runs as a scheduled poll would, and waits
+        while commands hold polls off (``_async_request_poll``).
         """
         self._unsub_flip_poll = None
         if not (self.hass.is_running and self._polls_enabled and self._listeners):
             return
-        self.config_entry.async_create_background_task(
-            self.hass, self.async_request_refresh(), name=f"{self.name}_turn_on_poll"
-        )
+        self._async_request_poll("turn_on_poll")
+
+    @callback
+    def _async_request_poll(self, name: str, *, keep: bool = False) -> None:
+        """Run a one-off background poll (the turn-on or return poll) as if HA's timer fired.
+
+        Like a scheduled poll (``_handle_refresh_interval``), it waits while
+        commands hold polls off (during a burst of commands to several devices
+        it would take a connection slot they need, ``CommandBurst``), a poll
+        running now uses it up, and otherwise it runs at once in place of HA's
+        next scheduled one. Not through HA's request debouncer: a request that
+        waits out its cooldown, or a running poll, runs later unchecked. Held,
+        it joins any poll already held; a re-arm or a policy step that stops
+        polls replaces it, unless ``keep`` holds it apart like the first poll
+        after setup, to run once whatever the schedule (the return poll: the
+        advertisement that brought the device back may stop its polls next).
+        """
+        if self.commands_holding_off or self._poll_running:
+            self._async_hold_poll(first=keep)
+            return
+        self._async_release_poll(name)
 
     @callback
     def _async_cancel_flip_poll(self) -> None:
@@ -493,11 +740,19 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
             self._unsub_flip_poll = None
 
     async def async_shutdown(self) -> None:
-        """Also drop a pending turn-on poll and hold-off (HA calls this on unload)."""
+        """Also drop a pending turn-on poll, hold-off and link release (HA calls this on unload).
+
+        The last entry to unload ends a burst too, once no command runs
+        (``CommandBurst``). The device's command window closes: ``device.stop()``
+        closes the link next.
+        """
         self._shutting_down = True
         self._async_cancel_flip_poll()
         self._async_cancel_holdoff_end()
+        self._async_cancel_window_end()
+        self._burst.async_close_window(self._address)
         self._async_drop_held_polls()
+        self._burst.async_note_unload()
         await super().async_shutdown()
 
     @callback
@@ -619,23 +874,50 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         self._reoffered = None
 
     @property
+    def command_burst(self) -> CommandBurst:
+        """The domain-wide tracker of entity commands to every device (``CommandBurst``)."""
+        return self._burst
+
+    @property
     def commands_holding_off(self) -> bool:
         """Whether background polls wait: a command is running, or one ended just now.
 
-        "Just now" is POLL_HOLDOFF_AFTER_COMMAND_SECONDS after the last one ended.
+        "Just now" is POLL_HOLDOFF_AFTER_COMMAND_SECONDS after the last one
+        ended: the last one to this device, or during a burst of commands to
+        several devices at once, the last one to any device (``CommandBurst``).
         """
-        return bool(self._commands_running) or self._unsub_holdoff_end is not None
+        return (
+            bool(self._commands_running)
+            or self._unsub_holdoff_end is not None
+            or self._burst.active
+        )
 
     @callback
-    def async_note_command_started(self) -> None:
-        """Note an entity command starting: background polls wait until it is done."""
+    def async_note_command_started(self, *, person: bool = False) -> None:
+        """Note an entity command starting: background polls wait until it is done.
+
+        It opens the device's command window, or keeps it open
+        (``_async_end_window``); ``person``: the command came from a person
+        (``helpers.async_context_is_person``).
+        """
         self._commands_running += 1
+        self._burst.async_note_command_started(self._address)
         self._async_cancel_holdoff_end()  # the hold-off restarts when the last one ends
+        self._async_cancel_window_end()  # and so does the window's settle
+        self._window_person = self._window_person or person
+        if not self._shutting_down:
+            # Once unloading, no settle would close it.
+            self._burst.async_note_window_open(self._address)
 
     @callback
     def async_note_command_finished(self) -> None:
-        """Note an entity command ending (landed or not): polls wait a little longer still."""
+        """Note an entity command ending (landed or not): polls wait a little longer still.
+
+        The last one running starts the settle that closes the command window.
+        """
         self._commands_running = max(0, self._commands_running - 1)
+        # Even once the entry is unloading: a burst ends only once every command has.
+        self._burst.async_note_command_finished(self._address)
         if self._commands_running or self._shutting_down:
             # Another command still runs (the hold-off starts when it ends), or the
             # entry is unloading: a timer armed now would outlive it.
@@ -644,6 +926,62 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         self._unsub_holdoff_end = async_call_later(
             self.hass, POLL_HOLDOFF_AFTER_COMMAND_SECONDS, self._async_end_holdoff
         )
+        self._async_cancel_window_end()  # one settle, even after an end it never saw start
+        self._unsub_window_end = async_call_later(
+            self.hass, COMMAND_RELEASE_DELAY_SECONDS, self._async_end_window
+        )
+
+    @callback
+    def _async_end_window(self, _now: datetime) -> None:
+        """Close the command window: release the link unless a person alone used it.
+
+        The library keeps a command's link up for its warm window (30 s), for a
+        person adjusting again: a second tap, a slider drag. A window in which
+        no command came from a person (a voice satellite, an automation; see
+        ``helpers.async_context_is_person``), or another device's window was
+        open (a burst, ``CommandBurst``), expects no such follow-up, so its
+        link is released now (``Device.release``), and the connection slot it
+        holds with it. A command after that connects again. The release waits
+        for any operation queued before it, and isn't cancelled by a command
+        starting meanwhile: that one queues behind it and reconnects.
+        """
+        self._unsub_window_end = None
+        burst = self._burst.async_close_window(self._address)
+        person, self._window_person = self._window_person, False
+        if person and not burst:
+            return
+        _LOGGER.debug(
+            "%s: releasing the link (%s)",
+            self.name,
+            "commands to other devices too" if burst else "no person's command",
+        )
+        self.config_entry.async_create_background_task(
+            self.hass, self._async_release_link(), name=f"{self.name}_release", eager_start=True
+        )
+
+    async def _async_release_link(self) -> None:
+        """Release the device's link; the library logs it (a guard only: it never raises).
+
+        Once it dropped the link, a poll no longer counts on it
+        (``_async_link_held``): a device that has stopped advertising is then
+        skipped as absent, as after an idle disconnect, instead of spending its
+        connect budget on it. A link the library kept (a newer write went out
+        on it) still counts.
+        """
+        try:
+            dropped = await self._device.release()
+        except BLE_ERRORS as err:
+            _LOGGER.debug("%s: releasing the link failed: %s", self.name, err)
+            return
+        if dropped:
+            self._command_landed_at = None
+
+    @callback
+    def _async_cancel_window_end(self) -> None:
+        """Drop the timer that would close the command window, if any."""
+        if self._unsub_window_end is not None:
+            self._unsub_window_end()
+            self._unsub_window_end = None
 
     @property
     def _poll_held(self) -> bool:
@@ -654,7 +992,17 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
     def _async_end_holdoff(self, _now: datetime) -> None:
         """End the hold-off, and run the background poll it held back, if any."""
         self._unsub_holdoff_end = None
-        if self._poll_held and not self._poll_running:
+        self._async_release_held_poll()
+
+    @callback
+    def _async_release_held_poll(self) -> None:
+        """Run the held background poll, if any, once no command holds polls off any more.
+
+        Called as this device's hold-off ends and as a burst of commands to
+        several devices ends (``CommandBurst``): whichever ends last releases
+        it. Not while a poll runs: that one uses up the held polls.
+        """
+        if self._poll_held and not self._poll_running and not self.commands_holding_off:
             self._async_release_poll()
 
     @callback
@@ -668,9 +1016,11 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
     def _async_hold_poll(self, *, first: bool = False) -> None:
         """Keep a background poll that came due until the hold-off ends, or for at most the cap.
 
-        ``first``: the first poll after setup, which a re-arm doesn't drop. The
-        first poll held arms the cap: later ones join it, and one poll runs
-        when the hold-off is released, however many came due.
+        ``first``: held apart, so a re-arm or a policy step that stops polls
+        doesn't drop it: the first poll after setup, or a return poll
+        (``_async_request_poll``). The first poll held arms the cap: later ones
+        join it, and one poll runs when the hold-off is released, however many
+        came due.
         """
         if first:
             self._first_poll_waiting = True
@@ -694,22 +1044,52 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
             self._async_release_poll()
 
     @callback
-    def _async_release_poll(self) -> None:
+    def _async_release_poll(self, name: str = "held_off_poll") -> None:
         """Run the held background poll in place of HA's armed timer, as that timer would have.
 
         HA's _handle_refresh_interval forgets its timer without cancelling it (it
         expects to be called by that timer firing). A held first poll ran with
         HA's first timer still armed, so it is cancelled here: two timers would
         otherwise poll for good. The poll then re-arms one timer as it ends.
+        ``name`` names its task (a one-off poll that runs at once, too).
+
+        Not once HA is stopping (``async_note_ha_stopping``): in its close stage
+        HA no longer refuses a scheduled refresh, and the stop listener has
+        closed the link (a burst's tail, the hold-off end and the cap can all
+        fire then). Bootstrap isn't refused, though HA isn't "running" yet then.
         """
         self._async_drop_held_polls()
+        if self._ha_stopping or self.hass.is_stopping:
+            return
         super()._async_unsub_refresh()
         self.config_entry.async_create_background_task(
             self.hass,
             super()._handle_refresh_interval(),
-            name=f"{self.name}_held_off_poll",
+            name=f"{self.name}_{name}",
             eager_start=True,
         )
+
+    @callback
+    def async_note_ha_stopping(self) -> None:
+        """Note Home Assistant's stop event: no held poll is released from now on."""
+        self._ha_stopping = True
+
+    @callback
+    def async_track_zone_off_wait(self, hurry: CALLBACK_TYPE) -> CALLBACK_TYPE:
+        """Track a zone turn-off waiting in the deferral; return the callback that stops it."""
+        self._zone_off_hurries.add(hurry)
+
+        @callback
+        def _async_untrack() -> None:
+            self._zone_off_hurries.discard(hurry)
+
+        return _async_untrack
+
+    @callback
+    def async_hurry_zone_offs(self) -> None:
+        """Send this device's waiting zone turn-offs now: a call to the device is queued."""
+        for hurry in list(self._zone_off_hurries):
+            hurry()
 
     @callback
     def _async_drop_held_polls(self) -> None:
@@ -747,7 +1127,9 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
 
         A poll then would take the device for its reads while the user is likely
         to follow up (a second tap, a slider drag), and HA already shows what the
-        command did. It is held until the hold-off ends (``_async_end_holdoff``),
+        command did; during a burst of commands to several devices, any device's
+        poll would take a connection slot they need (``CommandBurst``). It is
+        held until the hold-off and any burst end (``_async_release_held_poll``),
         or for at most POLL_HOLDOFF_MAX_SECONDS (``_async_holdoff_cap_reached``).
         Nor while a poll already runs: that poll re-arms the timer as it ends.
         Overrides DataUpdateCoordinator's scheduled-refresh entry point, which
@@ -780,8 +1162,14 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
             self._async_cancel_holdoff_cap()
 
     @callback
-    def async_handle_command_success(self) -> None:
+    def async_handle_command_success(
+        self, *, power_off: bool = False, keeps_power: bool = False
+    ) -> None:
         """Drop the poll backoff: an entity command just reached the device.
+
+        ``power_off``: it was a whole-device turn-off (``power_confirmed_off``).
+        ``keeps_power``: it says nothing about the device's power (a zone's
+        turn-off: it can't switch the fixture on), so the last power word stands.
 
         A command is a change, so a light that is on starts its on-backoff
         over. After failed polls the link demonstrably works again, so the next
@@ -800,7 +1188,11 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         if self._shutting_down:
             return
         # It answered: reachable, though it doesn't advertise while HA holds the link.
-        self._connectable_heard_at = self._command_landed_at = bluetooth.MONOTONIC_TIME()
+        now = bluetooth.MONOTONIC_TIME()
+        self._connectable_heard_at = self._command_landed_at = now
+        if not keeps_power:
+            self._power_landed_at = now
+            self._landed_off = power_off
         rescheduled = self._async_apply_policy()
         rescheduled = self._async_restart_on_backoff() or rescheduled
         interval = self.scheduled_interval
@@ -843,6 +1235,55 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
             and bluetooth.MONOTONIC_TIME() - info.time < ADVERT_POWER_FRESH_SECONDS
             and parse_broadcast_onoff(info.manufacturer_data) is not None
         )
+
+    @property
+    def power_confirmed_off(self) -> bool:
+        """Return whether the device itself said, recently, that it is off.
+
+        A turn-off of a device already off lets the other devices' commands of
+        a burst go first (``deferral``), so only what the device said counts,
+        never what HA assumed. Its newest word decides, and must be younger than
+        ADVERT_POWER_FRESH_SECONDS: its advertised on/off byte (decoded as the
+        library decodes it, with the profile's mask); a read-back, once the
+        library's state isn't optimistic (the on/off it left); or a command that
+        landed: a whole-device turn-off's ack says off, any other command (a
+        segment write can wake a fixture the library still holds off) leaves the
+        power unknown, except a zone's turn-off, which says nothing about it. On
+        a tie, HA's own I/O is the newer: the library ignores an advertisement
+        for a while after it. The library's on/off must say off as well, so an
+        unknown on/off never counts.
+
+        Not words from the device, so they don't count: a command that failed
+        (one that may have switched the device on leaves the off standing: the
+        library applies nothing), a poll whose reads all went unanswered (the
+        library returns the state it had), and an old byte HA keeps in a newer
+        merged advertisement (``_async_advert_power_fresh``). Each only delays
+        that device's turn-off, never drops it.
+        """
+        state = self._device.state
+        if state.is_on is not False:
+            return False
+        # (when, rank on a tie, whether it says off)
+        words: list[tuple[float, int, bool]] = []
+        info = self.async_last_service_info(connectable=False)
+        if (
+            info is not None
+            and (
+                on := parse_broadcast_onoff(
+                    info.manufacturer_data, on_mask=self._device.profile.advert_on_mask
+                )
+            )
+            is not None
+        ):
+            words.append((info.time, 0, not on))
+        if self._read_back_at is not None and not state.optimistic:
+            words.append((self._read_back_at, 1, True))
+        if self._power_landed_at is not None:
+            words.append((self._power_landed_at, 2, self._landed_off))
+        if not words:
+            return False
+        at, _rank, off = max(words)
+        return off and bluetooth.MONOTONIC_TIME() - at < ADVERT_POWER_FRESH_SECONDS
 
     @callback
     def _async_policy_step(self) -> PollPolicy:
@@ -990,7 +1431,11 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         if self._async_unreachable():
             raise self._async_skip_absent()
 
-        async with _poll_semaphore(self.hass):
+        async with (
+            _poll_semaphore(self.hass),
+            # Behind every waiting command: see connect_gate.py.
+            async_connect_slot(self.hass, self._address, poll=True),
+        ):
             # Again once it has a slot: the wait may have outlasted a held link.
             if self._async_unreachable():
                 raise self._async_skip_absent()
@@ -1045,7 +1490,7 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
                 self._io_at = bluetooth.MONOTONIC_TIME()
         if not data.optimistic:
             self.last_connected = dt_util.utcnow()
-            self._connectable_heard_at = bluetooth.MONOTONIC_TIME()
+            self._connectable_heard_at = self._read_back_at = bluetooth.MONOTONIC_TIME()
         self.consecutive_failures = 0
         self._backoff_failures = 0
         self._skipped_absent = False
@@ -1075,21 +1520,29 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
     def _async_link_held(self) -> bool:
         """Return whether a command landed within the library's warm window: its link may be up.
 
-        The library keeps a command's link open ACTIVE_IDLE_DELAY (30 s) after
-        each write starts (transport/connection.py ``_run``, and
-        ``_schedule_idle_timer`` waits it out). The device doesn't advertise
-        meanwhile, so HA may drop it from its history, yet a poll still reaches
-        it: update() reuses the open link (``_ensure_connected_locked`` returns
-        while ``is_connected``), with no BLEDevice lookup. So such a poll runs
-        instead of being skipped as absent, and its read resets the failures.
-        The stamp is taken as the command returns, after its last write
-        started, so the window can outlast the link by that write's time. A
-        poll in that gap connects afresh and fails within its connect budget,
-        counted as the skipped poll would have been. The window is longer than
+        The library keeps a command's link open up to ACTIVE_IDLE_DELAY (30 s)
+        after each write starts (transport/connection.py ``_run``, and
+        ``_schedule_idle_timer`` waits it out): the upper bound. Unless a person
+        alone used it, the integration releases it COMMAND_RELEASE_DELAY_SECONDS
+        after the last command (``_async_end_window``). The device doesn't
+        advertise while connected, so HA may drop it from its history, yet a
+        poll still reaches it: update() reuses the open link
+        (``_ensure_connected_locked`` returns while ``is_connected``), with no
+        BLEDevice lookup. So such a poll runs instead of being skipped as
+        absent, and its read resets the failures. Once the link is gone (the
+        device ended it, the integration released it, or the window outlasts
+        it by the last write's time: the stamp is taken as the command
+        returns), a poll in the window connects afresh within its connect
+        budget, and one that fails
+        counts as the skipped poll would have been. The window is longer than
         the hold-off (POLL_HOLDOFF_AFTER_COMMAND_SECONDS), so the poll the
-        hold-off releases still runs over the link. The poll checks it again
-        once it has a poll slot (the wait can outlast the window), and one that
-        fails because the link was gone counts as a skip.
+        hold-off releases isn't skipped as absent: it runs over the link while
+        it is up, and connects afresh once the device has ended it (it
+        advertises again then). A burst of commands to several devices can hold
+        it past the window (``CommandBurst``); by then the link is gone and the
+        device advertises again. The poll checks it again once it has a poll
+        slot (the wait can outlast the window), and one that fails because the
+        link was gone counts as a skip.
         """
         landed = self._command_landed_at
         return (

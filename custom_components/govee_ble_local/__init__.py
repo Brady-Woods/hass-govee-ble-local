@@ -38,6 +38,7 @@ from homeassistant.helpers.typing import UNDEFINED, ConfigType
 from homeassistant.util.hass_dict import HassKey
 
 from .capture import LogCapture, SelfTestReport
+from .connect_gate import async_release_waiters
 from .const import (
     CONF_ALLOW_MODELLED,
     CONF_SECRET,
@@ -226,7 +227,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: GoveeBleLocalConfigEntry
     # refresh or an overrunning self-test is not cancelled, and the close waits
     # for it: HA stops waiting after 10 s, logs that the task "did not complete
     # in time" and finishes the unload while the close completes in the
-    # background.
+    # background. A command still waiting at the connect gate is let through as
+    # the unload starts (async_unload_entry), so it reaches the link first.
     entry.async_on_unload(device.stop)
 
     # Load the (blocking, cached) scene catalog off the event loop, so the scene
@@ -309,6 +311,12 @@ def _async_close_on_stop(hass: HomeAssistant, entry: GoveeBleLocalConfigEntry) -
     data = entry.runtime_data
 
     async def _async_stop(_event: Event) -> None:
+        # No held poll is released from now on (HA's close stage refuses none).
+        data.coordinator.async_note_ha_stopping()
+        # A command still waiting at the connect gate goes ahead now, and gets a
+        # turn of the loop to reach the link before the close below takes it.
+        async_release_waiters(hass, entry.data[CONF_ADDRESS])
+        await asyncio.sleep(0)
         if (self_test := data.self_test) is not None and not self_test.done():
             await asyncio.wait({self_test}, timeout=SELF_TEST_STOP_TIMEOUT_SECONDS)
         # The close waits for an operation still using the link, up to the
@@ -469,6 +477,11 @@ async def async_unload_entry(hass: HomeAssistant, entry: GoveeBleLocalConfigEntr
     or a reload, has completed.
     """
     _LOGGER.debug("Unloading entry for %s", entry.data[CONF_ADDRESS])
+    # A command still waiting at the connect gate goes ahead now, and gets a
+    # turn of the loop to reach the link, so the close (an on-unload job) waits
+    # for it, as for one already using the link.
+    async_release_waiters(hass, entry.data[CONF_ADDRESS])
+    await asyncio.sleep(0)
     # The capture_session service is registered in async_setup (integration-wide),
     # so it is intentionally left in place across entry unloads.
     if not await hass.config_entries.async_unload_platforms(entry, PLATFORMS):

@@ -48,7 +48,15 @@ Treat their read-back values as provisional.
 ## 3. Per-segment light entities — behavioural note
 
 Segment lights (H60A6 / H6047 / H61A8 / H6641) model "off" as **setting the segment to black**
-(there is no per-segment power line in Govee's protocol). Entity count is the static
+(there is no per-segment power line in Govee's protocol). A segment shows off while its fixture is
+known off. On an H60A6 or H6047 that isn't known on, a segment's turn_off sends nothing: there a
+`33 05` colour frame switches the fixture on and lights every zone. The library's firmware
+analysis predicts that wake (`Device._wake_power`, govee-ble-local 1.5.0), and a bench check of one
+of each confirmed it on 2026-10-21. A black segment frame was sent 0.05 s or 1 s after the
+fixture's acked `33 01 00`, as one frame or one per segment, with or without the zone-offs between.
+Every time, the fixture came back on, both zones lit, read back 2 s and 12 s later. The H60A6
+pushed `ee 30` with every zone on about 45 ms after the frame; the H6047 answered `aa 01 01` and
+`aa 36 01 01`. With no segment frame it stayed off. Entity count is the static
 `profile.segments` width; for IC-driven SKUs (e.g. H6641) the true group count is read live, so
 some declared segment entities may never report state until read-back is confirmed (see §2).
 

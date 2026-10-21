@@ -69,10 +69,16 @@ class GoveeBleLocalZoneSwitch(GoveeBleLocalEntity, SwitchEntity):
             await self._run_client_command(self._device.set_zone_power(self._zone_name, True))
 
     async def async_turn_off(self, **kwargs: Any) -> None:
-        """Power the zone off."""
-        _LOGGER.debug("Turning zone %s off for %s", self._zone_name, self._address)
-        async with self._command():
-            await self._run_client_command(self._device.set_zone_power(self._zone_name, False))
+        """Power the zone off, unless the device has just confirmed it off.
+
+        See ``GoveeBleLocalEntity._async_turn_zone_off``: nothing is sent right
+        after the fixture's acked power-off, and a zone-off of a fixture already
+        off lets the other devices' commands go first.
+        This platform doesn't wait for the light platform's commands, so a
+        fixture turn-on still in flight is a real case here: the zone-off goes
+        out after it.
+        """
+        await self._async_turn_zone_off(self._zone_name)
 
 
 class GoveeBleLocalPowerSwitch(GoveeBleLocalEntity, SwitchEntity):
@@ -101,7 +107,6 @@ class GoveeBleLocalPowerSwitch(GoveeBleLocalEntity, SwitchEntity):
             await self._run_client_command(self._device.set_power(True))
 
     async def async_turn_off(self, **kwargs: Any) -> None:
-        """Switch the relay off."""
+        """Switch the relay off; one already off lets other devices go first."""
         _LOGGER.debug("Turning power off for %s", self._address)
-        async with self._command():
-            await self._run_client_command(self._device.set_power(False))
+        await self._async_turn_device_off(lambda: self._device.set_power(False))

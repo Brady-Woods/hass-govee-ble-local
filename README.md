@@ -54,6 +54,10 @@ deleting the entry withdraws it.
   none while a light is off or for a smart plug, one poll 5 s after a light is turned on outside
   Home Assistant, and every 2 min backing off to 15 min while it stays on unchanged. H60A6 / H60A1
   ceilings, and devices whose on/off broadcast Home Assistant doesn't hear, are polled every 2 min
+- Mass commands ("turn off all the lights") are queued per Bluetooth radio, so a proxy isn't
+  handed more connects than it reports slots for, a device whose good path is only busy waits for
+  it instead of going down a hopeless one, and lights already off go last; a call waits at most
+  12 s, then goes ahead as it would without the queue
 - Diagnostics: signal strength, connectivity (advertisement presence), last-seen / last-connected
   timestamps, poll interval, connection-failure count — plus a **self-test** button and a
   `capture_session` service that exercises the device and returns a captured BLE session
@@ -77,7 +81,7 @@ of the light.
 ### The `govee-ble-local` library dependency
 The BLE protocol library is published to PyPI as `govee-ble-local`, and Home Assistant installs it
 automatically, so no manual `pip install` is needed. `manifest.json` (`requirements`) accepts any
-release in the current major series (`>=1.5.0,<2`): the library follows semantic versioning,
+release in the current major series (`>=1.6.0,<2`): the library follows semantic versioning,
 so only a new major version can break the integration, and library fixes don't need an
 integration release. The library's own dependencies (e.g. `cryptography`) carry no upper bounds,
 so they always follow Home Assistant's pinned versions and won't disturb your install. Requires Home Assistant 2026.10 or newer.

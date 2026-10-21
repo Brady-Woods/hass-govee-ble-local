@@ -62,6 +62,7 @@ _WRAPPED_COMMANDS = (
     "set_scene_by_name",
     "set_gradual",
     "read_secret",
+    "release",
     "stop",
 )
 
@@ -291,6 +292,8 @@ def presence() -> Generator[SimpleNamespace]:
     any-scanner history. The connectable history holds the same entry unless
     ``connectable_service_info`` is set (to another entry, or None). The isolated
     test environment has no real scanners, which would otherwise read as "vanished".
+    The connect gate finds no connectable paths, so it lets every call through at once
+    (tests/test_connect_gate.py runs it on the real Bluetooth stack).
     """
     state = SimpleNamespace(
         connectable=True,
@@ -309,9 +312,14 @@ def presence() -> Generator[SimpleNamespace]:
             return state.connectable_service_info  # type: ignore[no-any-return]
         return state.service_info  # type: ignore[no-any-return]
 
+    def _no_paths(_hass: HomeAssistant, _address: str, connectable: bool = True) -> list[Any]:
+        assert connectable
+        return []
+
     with (
         patch.object(GoveeBleLocalCoordinator, "async_address_present", _present),
         patch.object(GoveeBleLocalCoordinator, "async_last_service_info", _last),
+        patch("homeassistant.components.bluetooth.async_scanner_devices_by_address", _no_paths),
     ):
         yield state
 
@@ -332,6 +340,24 @@ def monotonic(presence: SimpleNamespace, freezer: Any) -> Generator[SimpleNamesp
     presence.service_info = make_service_info(seen_at=start)
     clock = SimpleNamespace(now=start)
     with patch("homeassistant.components.bluetooth.MONOTONIC_TIME", lambda: clock.now):
+        yield clock
+
+
+@pytest.fixture
+def zone_clock() -> Generator[SimpleNamespace]:
+    """Control the clock ``helpers.zone_confirmed_off`` ages the zones' confirmations on.
+
+    The library stamps ``zone_power_confirmed`` on ``time.monotonic()``, which that check
+    reads; here it reads ``now`` instead, which starts at a whole second (as the
+    ``monotonic`` fixture's does, so the steps tests take add up exactly). A test moves
+    the stamps onto it, then moves ``now`` on. The library and the event loop keep the
+    real clock.
+    """
+    clock = SimpleNamespace(now=float(math.ceil(time.monotonic())))
+    with patch(
+        "custom_components.govee_ble_local.helpers.time",
+        SimpleNamespace(monotonic=lambda: clock.now),
+    ):
         yield clock
 
 

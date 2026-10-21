@@ -7,7 +7,97 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Lights already off go last in a burst:** when commands go to several devices at once ("turn
+  off all the lights", an area, a light group), turning off a light or smart plug that is already
+  off waits until the other devices' commands are done, or 10 s at most, and then goes out. The
+  devices that actually change get the scarce Bluetooth connection slots first. In real nightly
+  "all off" bursts about half the lights were already off, and the last light to go out waited
+  for the slot of one of them. The turn-off is still sent, so a light wrongly believed off still
+  goes off. Only the device's own report counts: an advertised on/off, or a read-back or
+  acknowledged turn-off, from the last 3 minutes. An unknown, assumed or older state goes out at
+  once, and so does a command to a single device. Lights already off don't wait for each other:
+  with every light already off, all go out at once, and so does the turn-off of a device whose
+  Bluetooth link is already up (waiting would save no connection slot). Another call to the same
+  light while its turn-off waits (a motion automation turning it back on, say) sends the turn-off
+  at once, so the newer call isn't held up behind it; for a zone's turn-off, a call to any of the
+  device's lights does. A waiting turn-off counts as one of the commands to
+  several devices (every device's polls wait for it), and at the connect gate it goes after the
+  other commands. A turn-off still waiting when Home Assistant stops or the device's entry unloads
+  is dropped. This covers the whole-fixture light, the plug's power switch and, while the whole
+  fixture is already off, a zone light's or zone switch's turn-off.
+
 ### Changed
+- **Requires `govee-ble-local` 1.6.0 or newer** (`>=1.6.0,<2`, was `>=1.5.0,<2`): the link release
+  below uses `Device.release()`, which 1.6.0 adds. Home Assistant installs the new library itself
+  on the next restart.
+- **Only a person's command keeps the Bluetooth link open.** After a command the library keeps the
+  light's Bluetooth link open for 30 s, so a second tap or a slider drag doesn't have to reconnect
+  (from `govee-ble-local` 1.6.0 its heartbeat also stops the light ending the link sooner). That
+  now happens only for a command from a person using Home Assistant: the dashboard, a more-info
+  dialog, the companion app. Half a second after a light's last command, the integration releases
+  its link instead when no command in that time came from a person (a voice satellite, an
+  automation, HomeKit, Alexa or Google Assistant through Home Assistant Cloud, a VoIP phone), or
+  when another device was commanded at about the same time ("turn off all the lights", an area, a
+  light group, a script's steps, from the dashboard too). The light's connection slot then frees
+  for the others: an ESPHome proxy has three, and held links made the last lights of "turn off all
+  the lights" wait 10-30 s for one. A light and its zone lights in one call still share one link.
+  The cost is a reconnect for a command that follows a released one (about 1-2 s, more through a
+  busy proxy). Typed or spoken Assist in the app, a client using a long-lived token (Node-RED) and
+  Alexa or Google Assistant linked without Home Assistant Cloud act as a logged-in user, so they
+  keep the link as the dashboard does. Once a link is released, polls no longer count on it: a
+  light that has stopped advertising is skipped as absent and goes unavailable, as after an idle
+  disconnect, instead of spending a connect on it. Turn on
+  `custom_components.govee_ble_local.coordinator` debug logging for a line per release and its
+  reason.
+- **Mass commands no longer overbook a Bluetooth proxy.** "Turn off all the lights" started every
+  light's connect within milliseconds, and Home Assistant's Bluetooth stack handed a 3-slot ESPHome
+  proxy five of them: it trusts the free-slot count the proxy last reported. The proxy refused the
+  extra ones, which then went down whatever path was left, even a local adapter at -96 dBm that
+  waited out a 20 s timeout: most lights were done in 5-7 s, the last at 27-34 s. Each command's
+  device call, and each background poll, now waits at an integration-wide connect gate until the
+  radio Home Assistant would pick has room: a free slot once our connects it hasn't reported yet
+  are counted, and for a proxy no other connect in progress through it (a proxy can jam on
+  concurrent connects; a local adapter connects several devices side by side). That path must also
+  suit the device (at or above -85 dBm, not failing again and again); if it doesn't, the device
+  waits only while a better path is busy and could be picked once free. A device heard well only
+  through the proxy waits for it and goes first. Commands go before polls. A radio that has heard
+  no advertisement for 10 s while not connecting normally stops counting as a usable path for 5
+  minutes, so it doesn't draw the devices whose better path is only busy: in a measured burst a
+  software proxy reporting every slot free hung both connects sent to it for 40 s, deaf all the
+  while. For 3 s after one of these calls through a radio ends, that radio isn't judged deaf (a
+  proxy pauses listening while it connects); one that failed has its radio judged once those 3 s
+  are over, and one that worked queues no such check. A call waits at most 12 s, then
+  goes ahead as before, one per radio at a time and not to a radio just given another connect.
+  When a device's entry unloads or Home Assistant stops, its calls still waiting go ahead at once,
+  so they reach the device before its link closes. If the gate can't read the Bluetooth scanners
+  it logs the error and lets the calls through. It can't
+  force Home Assistant's path choice, only predict it, and it doesn't cover the self-test. Turn on
+  `custom_components.govee_ble_local.connect_gate` debug logging for one line per call: how long it
+  waited, the radio expected, how long the call took after.
+- **No background polls while commands go to several devices at once.** While Home Assistant
+  sends commands to two or more Govee devices at the same time (a light group, an area, "turn off
+  all the lights"), every device's background poll that comes due waits until 25 s after the last
+  of those commands ends, instead of only the commanded devices' polls. A poll connects to its
+  device, so it would take one of the few Bluetooth connection slots those commands need (an
+  ESPHome proxy has three). A poll already running when the commands start still runs to its end.
+  A command that starts during those 25 s, to any device, starts them again when it ends; outside
+  that, a command to one device still holds only that device's polls. A poll still waits at most
+  2 minutes. The poll 5 s after a light is turned on outside Home Assistant, and the one when a
+  device is back in reach, now wait for commands the same way, also for a command to that device
+  itself; the one when a device is back in reach still runs if it came back switched off.
+- **Fewer frames when a fixture and its zones are turned off together.** A zone light's or zone
+  switch's turn-off sends nothing when the fixture isn't known to be on, no other command to the
+  device is running, and the device itself confirmed that zone off less than 5 seconds earlier:
+  by acknowledging the fixture's power-off (which switches every zone off), in a read-back, or by
+  acknowledging that zone's own turn-off. Before, "turn off all the lights" sent an H60A6 a
+  zone-off for each of its two zones after the power-off, and an H6047 two bar switches. The
+  saving is small: about 0.1 s of Bluetooth link time per H60A6 and 0.3 s per H6047 on each such
+  command. A zone-off still goes out for a zone turned off before its fixture in the same call
+  (Home Assistant runs a call that lists several lights in no fixed order), in a fixture known to
+  be on, confirmed off longer ago, or shown off only by an advertisement or an assumption. What the
+  next turn-on lights doesn't change: on both models it relights every zone either way (checked
+  on the devices).
 - Tests: the stand-in for the library's connection (`tests/conftest.py` `FakeConnection`) gains
   what `govee-ble-local` 1.6.0's `Device` uses (its BLE heartbeat and `Device.release()`):
   `hold_heartbeat()`, `disconnect(*, keep=None) -> bool`, `is_connected` and `link_number`, so
@@ -23,6 +113,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Tests and type checks run against Home Assistant 2026.10.2 (`homeassistant==2026.10.2`,
   `pytest-homeassistant-custom-component==0.13.373`), which pins it exactly, so the two move
   together. The minimum Home Assistant stays 2026.10.0.
+
+### Fixed
+- **"Turn off all the lights" no longer switches an H60A6 or H6047 back on when its segment
+  lights are enabled.** Each segment light's turn_off blacked its segment out with a colour frame,
+  sent after the fixture's power-off (13 on an H60A6, 10 on an H6047). On these two models a colour
+  frame switches a fixture that is off back on, lighting every zone, while Home Assistant showed
+  everything off (checked on both models: the fixture came back on every time). A segment light
+  of an H60A6 or H6047 that isn't known to be on now sends nothing on turn_off: the segment is
+  dark already, keeps its colour, and lights again with the fixture. With the fixture on, turn_off
+  still blacks the segment out. Segment lights are disabled by default.
+- **Segment lights follow the fixture's power.** A segment light now shows off while its fixture
+  is known to be off; before, it kept showing on in the colour the segment kept. Turning a segment
+  light on while its fixture isn't known to be on switches the fixture on first, which lights its
+  other segments in the colours they kept, then sets the segment. Before, a plain turn_on sent
+  nothing and the fixture stayed dark. This applies to every model with segment lights.
 
 ## [1.5.0] - 2026-10-20
 
