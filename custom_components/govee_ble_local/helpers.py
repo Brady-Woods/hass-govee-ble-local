@@ -10,13 +10,7 @@ from govee_ble_local import Capability, GoveeBleError
 from homeassistant.core import Context, HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 
-from .const import (
-    DEFAULT_MAX_KELVIN,
-    DEFAULT_MIN_KELVIN,
-    DOMAIN,
-    ZONE_OFF_FRESH_SECONDS,
-    ZONE_STATE_FRESH_SECONDS,
-)
+from .const import DEFAULT_MAX_KELVIN, DEFAULT_MIN_KELVIN, DOMAIN, ZONE_OFF_FRESH_SECONDS
 
 if TYPE_CHECKING:
     from govee_ble_local import Device, Zone
@@ -80,24 +74,6 @@ def zone_confirmed_off(device: Device, zone_name: str) -> bool:
     power_index = next(z.power_index for z in device.zones if z.name == zone_name)
     confirmed = device.state.zone_power_confirmed.get(power_index)
     return confirmed is not None and time.monotonic() - confirmed < ZONE_OFF_FRESH_SECONDS
-
-
-def zone_known_lit(device: Device, zone_name: str) -> bool:
-    """Return whether the zone is known to be on, by a confirmation recent enough to trust.
-
-    Not while the whole fixture is known off, and by a confirmation less than
-    ZONE_STATE_FRESH_SECONDS old: the library stamps a zone's power as confirmed
-    (``zone_power_confirmed``, on ``time.monotonic()``) only when the device
-    reported it or acked a write of that zone, and drops the stamp wherever it
-    forgets the zone's power. Advertisements carry only the whole fixture's
-    on/off: a zone switched off in the Govee app while the fixture stays on
-    reads "on" here until the next read-back.
-    """
-    if device.state.is_on is False or device.zone_is_on(zone_name) is not True:
-        return False
-    power_index = next(z.power_index for z in device.zones if z.name == zone_name)
-    confirmed = device.state.zone_power_confirmed.get(power_index)
-    return confirmed is not None and time.monotonic() - confirmed < ZONE_STATE_FRESH_SECONDS
 
 
 def kelvin_range(device: Device) -> tuple[int, int]:

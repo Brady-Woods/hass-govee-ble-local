@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import functools
 import logging
+import operator
 import time
 from types import SimpleNamespace
 from typing import Any
@@ -27,7 +29,7 @@ from govee_ble_local import (
     profile_for,
     supported_skus,
 )
-from govee_ble_local.wire import build
+from govee_ble_local.wire import build, parse
 from homeassistant.components.bluetooth import BluetoothChange
 from homeassistant.components.light import DATA_COMPONENT
 from homeassistant.config_entries import ConfigEntryState
@@ -1667,35 +1669,122 @@ async def test_a_segment_turned_on_switches_its_zone_on_first(
 
 
 @ZONED_SEGMENTED
+async def test_a_failed_zone_power_on_sends_no_segment_colour(
+    hass: HomeAssistant, enabled_entry: MockConfigEntry, mock_device: Device
+) -> None:
+    """The zone's power-on fails: the colour isn't sent (it would colour a segment that stays
+    dark), the call raises, and the segment still shows off with its zone."""
+    zone, other = _zones_of_seg(mock_device)
+    _seed(enabled_entry, segments=[Segment(index=SEG, rgb=RED, brightness=80)])
+    await _poll_back(enabled_entry, {zone.power_index: False, other.power_index: True})
+    seg = _segment(hass, SEG)
+    _fail(mock_device, GoveeBleConnectionError("dropped"))
+
+    with pytest.raises(HomeAssistantError):
+        await _call(hass, "turn_on", seg, rgb_color=GREEN)
+
+    mock_device.set_zone_power.assert_awaited_once_with(zone.name, True)
+    mock_device.set_segment_rgb.assert_not_awaited()
+    assert hass.states.get(seg).state == STATE_OFF
+
+
+@ZONED_SEGMENTED
 @pytest.mark.parametrize(
-    ("age", "zone_power_first"),
-    [(0, False), (ZONE_STATE_FRESH_SECONDS + 1, True)],
-    ids=["read_lit_just_now", "read_lit_long_ago"],
+    "age", [0, ZONE_STATE_FRESH_SECONDS + 1], ids=["read_lit_just_now", "read_lit_long_ago"]
 )
-async def test_a_segment_of_a_zone_known_lit_gets_no_zone_power(
+async def test_a_segment_of_a_zone_held_on_gets_no_zone_power(
+    hass: HomeAssistant, enabled_entry: MockConfigEntry, mock_device: Device, age: float
+) -> None:
+    """A colour for a segment whose zone is held on goes out alone, however long ago the zone
+    was read: a zone switched off in the Govee app since still gets its colour while dark, as
+    before. A redundant zone power would be no help: on an H6047 it reads both bars first
+    (aa 36, which can go unanswered) and may restart the running scene or mode."""
+    await _poll_back(enabled_entry, {0: True, 1: True})
+    _age_confirmations(enabled_entry, age)
+    conn = connection(mock_device)
+    conn.sent.clear()
+    conn.queries.clear()
+
+    await _call(hass, "turn_on", _segment(hass, SEG), rgb_color=GREEN)
+
+    mock_device.set_zone_power.assert_not_awaited()
+    assert len(conn.sent) == 1
+    assert _colour_frames(conn.sent) == conn.sent
+    assert conn.queries == []
+
+
+def _answer_bar_reads(device: Device, *, left: bool, right: bool) -> None:
+    """Make the fake link answer the H6047's bar read (aa 36) with the two bars' power."""
+    reply = bytes([0xAA, 0x36, int(left), int(right)]) + bytes(15)
+    reply += bytes([functools.reduce(operator.xor, reply)])
+    assert parse.parse_bar_switch(reply) == (left, right)
+    conn = connection(device)
+    query = conn.query
+
+    async def _query(*args: Any, **kwargs: Any) -> list[bytes]:
+        frames = await query(*args, **kwargs)
+        return [reply] if args and args[0] == build.bar_switch_query() else frames
+
+    conn.query = _query  # type: ignore[method-assign]
+
+
+@pytest.mark.parametrize("device_sku", ["H6047"])
+@pytest.mark.parametrize("answered", [False, True], ids=["read_unanswered", "read_answered"])
+@pytest.mark.parametrize("colour", [{}, {"rgb_color": GREEN}], ids=["plain", "colour"])
+async def test_an_h6047_segment_of_bars_never_read_gets_no_bar_switch(
     hass: HomeAssistant,
     enabled_entry: MockConfigEntry,
     mock_device: Device,
     *,
-    age: float,
-    zone_power_first: bool,
+    answered: bool,
+    colour: dict[str, Any],
 ) -> None:
-    """A colour for a segment whose zone was read back lit just now goes out alone; one read
-    lit long ago may be off by now (switched off in the Govee app): its power goes first."""
-    zone, _other = _zones_of_seg(mock_device)
+    """With the fixture on and its bars not known (an advertised on), a segment light sends
+    only its own change: no bar read (aa 36) and no bar switch, so an unanswered read can't
+    fail the call. A plain turn_on of a segment that kept its colour sends nothing."""
+    _seed(
+        enabled_entry,
+        is_on=True,
+        zone_power={},
+        segments=[Segment(index=SEG, rgb=RED, brightness=80)],
+    )
+    if answered:
+        _answer_bar_reads(mock_device, left=True, right=True)
+    seg = _segment(hass, SEG)
+    assert hass.states.get(seg).state == STATE_ON
+    conn = connection(mock_device)
+    conn.sent.clear()
+    conn.queries.clear()
+
+    await _call(hass, "turn_on", seg, **colour)
+
+    mock_device.set_zone_power.assert_not_awaited()
+    assert build.bar_switch_query() not in conn.queries
+    assert len(conn.sent) == len(colour)
+    assert _colour_frames(conn.sent) == conn.sent
+    assert hass.states.get(seg).state == STATE_ON
+
+
+@ZONED_SEGMENTED
+async def test_a_segment_colour_right_after_the_fixture_turned_on_goes_out_alone(
+    hass: HomeAssistant, enabled_entry: MockConfigEntry, mock_device: Device
+) -> None:
+    """ "Turn the light on, then colour some segments": the fixture's power-on lights every
+    zone (the firmware sets both of an H6047's bars, which the library forgets), so the
+    segment's colour goes out alone, with no bar read on an H6047."""
     await _poll_back(enabled_entry, {0: True, 1: True})
-    _age_confirmations(enabled_entry, age)
-    connection(mock_device).sent.clear()
+    await _call(hass, "turn_on", MAIN)
+    conn = connection(mock_device)
+    conn.sent.clear()
+    conn.queries.clear()
 
     await _call(hass, "turn_on", _segment(hass, SEG), rgb_color=GREEN)
 
-    sent = connection(mock_device).sent
-    assert _colour_frames(sent) == sent[int(zone_power_first) :]
-    if zone_power_first:
-        mock_device.set_zone_power.assert_awaited_once_with(zone.name, True)
-    else:
-        mock_device.set_zone_power.assert_not_awaited()
+    mock_device.set_zone_power.assert_not_awaited()
     mock_device.set_segment_rgb.assert_awaited_once_with([SEG], GREEN)
+    assert len(conn.sent) == 1
+    assert _colour_frames(conn.sent) == conn.sent
+    assert build.bar_switch_query() not in conn.queries
 
 
 # -- 9. zone lights -------------------------------------------------------------------

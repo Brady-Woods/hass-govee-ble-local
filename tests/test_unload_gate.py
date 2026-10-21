@@ -34,7 +34,7 @@ from custom_components.govee_ble_local.connect_gate import _GATE
 
 from .conftest import FakeConnection, connection
 from .const import ADDRESS
-from .test_connect_gate import ATHOM, MAIN, Radio
+from .test_connect_gate import ATHOM, MAIN, Radio, tick
 
 
 class ClosingConnection(FakeConnection):
@@ -171,6 +171,49 @@ async def test_a_poll_released_after_a_failed_one_logs_no_recovery(
     assert device.update.await_count == polls  # type: ignore[attr-defined]
     assert not coordinator.last_update_success
     assert "data recovered" not in caplog.text
+
+
+@pytest.mark.parametrize("failed_before", [False, True], ids=["after_a_poll", "after_a_failure"])
+async def test_a_poll_the_gate_admits_after_its_devices_command_started_is_held_again(
+    hass: HomeAssistant,
+    proxy: Radio,
+    entry: MockConfigEntry,
+    caplog: pytest.LogCaptureFixture,
+    failed_before: bool,
+) -> None:
+    """A background poll has its place but waits at the gate; a command to its device starts;
+    then the gate admits it. It reads nothing and is held again for that command. After a
+    failed poll it stays failed, raised once it has left the gate: the gate counts it as a
+    call that went through, not a failed connect."""
+    device = entry.runtime_data.device
+    coordinator = entry.runtime_data.coordinator
+    proxy.hear(ADDRESS, -70)
+    if failed_before:
+        device.update.side_effect = GoveeBleConnectionError("down")  # type: ignore[attr-defined]
+        await coordinator.async_refresh()
+        assert not coordinator.last_update_success
+    for slot in range(3):
+        proxy.take(f"11:22:33:44:55:{slot:02X}")
+    polls = device.update.await_count  # type: ignore[attr-defined]
+    coordinator._async_release_poll("test_poll", apart=False)
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert [waiter.poll for waiter in hass.data[_GATE]._waiters] == [True]
+
+    coordinator.async_note_command_started()
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG, logger=connect_gate.__name__):
+        proxy.give_back("11:22:33:44:55:00")
+        await tick(hass)
+        await hass.async_block_till_done(wait_background_tasks=True)
+    assert not coordinator._poll_running
+    assert device.update.await_count == polls  # type: ignore[attr-defined]
+    assert coordinator._poll_waiting
+    assert coordinator.last_update_success is not failed_before
+    [line] = [r.getMessage() for r in caplog.records if " by the connect gate after " in r.message]
+    assert f"{ADDRESS}: poll " in line
+    assert "; done " in line
+    coordinator.async_note_command_finished()
 
 
 @pytest.mark.parametrize("close", [_unload, _stop], ids=["unload", "home_assistant_stop"])

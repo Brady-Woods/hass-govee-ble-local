@@ -345,11 +345,10 @@ def monotonic(presence: SimpleNamespace, freezer: Any) -> Generator[SimpleNamesp
 
 @pytest.fixture
 def zone_clock() -> Generator[SimpleNamespace]:
-    """Control the clock ``helpers.zone_confirmed_off`` (and ``zone_known_lit``) ages the
-    zones' confirmations on.
+    """Control the clock ``helpers.zone_confirmed_off`` ages the zones' confirmations on.
 
-    The library stamps ``zone_power_confirmed`` on ``time.monotonic()``, which those checks
-    read; here they read ``now`` instead, which starts at a whole second (as the
+    The library stamps ``zone_power_confirmed`` on ``time.monotonic()``, which that check
+    reads; here it reads ``now`` instead, which starts at a whole second (as the
     ``monotonic`` fixture's does, so the steps tests take add up exactly). A test moves
     the stamps onto it, then moves ``now`` on. The library and the event loop keep the
     real clock.

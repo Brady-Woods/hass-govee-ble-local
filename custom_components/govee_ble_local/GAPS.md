@@ -56,7 +56,15 @@ of each confirmed it on 2026-10-21. A black segment frame was sent 0.05 s or 1 s
 fixture's acked `33 01 00`, as one frame or one per segment, with or without the zone-offs between.
 Every time, the fixture came back on, both zones lit, read back 2 s and 12 s later. The H60A6
 pushed `ee 30` with every zone on about 45 ms after the frame; the H6047 answered `aa 01 01` and
-`aa 36 01 01`. With no segment frame it stayed off. Entity count is the static
+`aa 36 01 01`. With no segment frame it stayed off.
+
+On a fixture known on, a segment also shows off while its zone is known off (an H60A6's main panel
+or ring, an H6047 bar), and its turn_on switches that zone on first. That rests on a premise
+**modelled from the firmware, not checked on the bench**: with the fixture on, a `33 05` lights no
+zone (`Device._wake_power` models the wake only while the fixture isn't known on). A zone whose
+power is unknown or held on gets no zone power from a segment: on an H6047 a bar switch reads
+both bars first (`aa 36`, which can go unanswered), and its `33 36` handler re-runs the power-on
+tail, which may restart a running scene or mode. Entity count is the static
 `profile.segments` width; for IC-driven SKUs (e.g. H6641) the true group count is read live, so
 some declared segment entities may never report state until read-back is confirmed (see §2).
 

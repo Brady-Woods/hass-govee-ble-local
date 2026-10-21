@@ -1,4 +1,4 @@
-"""A turn-off of a device already off waits for the other commands of a burst.
+"""A turn-off of a device already off waits for the commands already running to others.
 
 "Turn off all the lights" sends one command per device at the same time, and
 each takes one of the few connection slots of the adapter or proxy that
@@ -14,14 +14,15 @@ believed off still goes off, only later. A command to one device alone never
 waits, and such turn-offs don't wait for each other: while one is sent, its
 device doesn't count as commanding.
 
-It waits only for the commands of its burst: those running as it starts (the
-ones started with it, and any still under way from before). A device it waits
-for is done once no command to it runs: a command that starts after that (to
-it, or to a device it doesn't wait for: another automation, a slider
-elsewhere) doesn't hold the turn-off back, so a lone one doesn't wait out the
-cap behind them. A device's commands queued behind its first in the same call
-(a fixture's zone or segment lights) go out over the link that one opened:
-they need no new slot.
+It waits only for the commands already running as it starts (the ones started
+with it, and any still under way from before). A device it waits for is done
+once no command to it runs: a command that starts after that (to it, or to a
+device it doesn't wait for: another automation, a slider elsewhere) doesn't
+hold the turn-off back, so a lone one doesn't wait out the cap behind them.
+Nor does a command of the same call that starts later than it looks
+(``_START_STEPS``). A device's commands queued behind its first in the same
+call (a fixture's zone or segment lights) go out over the link that one
+opened, if it connected: they need no new slot then.
 
 The wait runs in the entity's service call, before its command starts, so
 COMMAND_TIMEOUT_SECONDS doesn't count it. Home Assistant has already taken the
@@ -76,7 +77,10 @@ _CONFIRMED_OFFS: HassKey[set[str]] = HassKey(f"{DOMAIN}_confirmed_offs")
 # each layer above it: homeassistant.turn_off's call per domain, or a light
 # group's call for its members. Three steps cover an "all lights" group of room
 # groups next to a light called on its own (Assist calls each entity on its
-# own); a light that looks too early just goes out at once, as before.
+# own); a light that looks too early just goes out at once, as before. A
+# command of the same call that starts after it looked isn't waited for (one
+# only waits for the commands already running as it looks), not even while it
+# still waits for others.
 _START_STEPS = 3
 
 
@@ -166,13 +170,13 @@ class OffDeferral:
             offs.discard(self._address)
 
     async def _async_wait(self, hass: HomeAssistant) -> bool:
-        """Wait while the other devices' commands of its burst run; return whether to send it.
+        """Wait while the other devices' commands running as it starts go on.
 
-        True once no command runs to any of the other devices that had one as
-        it started (at once if none did, or if the device's link is already
-        up: waiting would save no connection slot), or after
-        DEFER_OFF_MAX_SECONDS; False if HA stops or the entity is removed
-        meanwhile (``async_drop``).
+        Return whether to send the turn-off: True once no command runs to any of
+        the other devices that had one as it started (at once if none did, or if
+        the device's link is already up: waiting would save no connection slot),
+        or after DEFER_OFF_MAX_SECONDS; False if HA stops or the entity is
+        removed meanwhile (``async_drop``).
         """
         removals = self._removals
         for _ in range(_START_STEPS):

@@ -21,7 +21,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
-from govee_ble_local import Device
+from govee_ble_local import Device, GoveeBleConnectionError
 from homeassistant.const import EVENT_HOMEASSISTANT_STOP
 from homeassistant.core import CoreState, HomeAssistant
 from homeassistant.util import dt as dt_util, slugify
@@ -660,6 +660,11 @@ async def take_every_poll_place(hass: HomeAssistant) -> Callable[[], None]:
     return _give_back
 
 
+def polls_done(*members: Member) -> Callable[[], bool]:
+    """Whether none of the members' polls runs (each read, or was held again)."""
+    return lambda: not any(member.coordinator._poll_running for member in members)
+
+
 @pytest.mark.parametrize("return_poll", [False, True], ids=["scheduled", "with_a_return_poll"])
 async def test_a_released_poll_still_waiting_for_its_place_waits_for_the_next_burst(
     hass: HomeAssistant, clock: Clock, fleet: list[Member], burst: CommandBurst, return_poll: bool
@@ -687,7 +692,8 @@ async def test_a_released_poll_still_waiting_for_its_place_waits_for_the_next_bu
     first.start()  # the next burst
     second.start()
     give_back()
-    await hass.async_block_till_done()
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert polls_done(*fleet)()
     assert [clock.since(m) for m in fleet] == [[0.0]] * 3
     assert hall.coordinator._first_poll_waiting is return_poll
     assert hall.coordinator._poll_waiting is not return_poll
@@ -701,6 +707,124 @@ async def test_a_released_poll_still_waiting_for_its_place_waits_for_the_next_bu
         assert clock.since(member) == [0.0, near(end + HOLDOFF)]
         assert len(poll_timers(hass, member)) == 1
         assert holding_timers(hass, member) == []
+
+
+@pytest.mark.parametrize("stop_polls", [False, True], ids=["held", "policy_stops_polls"])
+async def test_a_scheduled_poll_waiting_for_its_place_as_a_burst_starts_is_held_again(
+    hass: HomeAssistant, clock: Clock, fleet: list[Member], burst: CommandBurst, stop_polls: bool
+) -> None:
+    """HA's own timer starts the polls at about 120 s with nothing holding them; they wait for
+    a poll place, and a burst starts meanwhile. Once they have one they read nothing, held
+    again as scheduled polls: they run once 25 s after the burst, and a policy step that stops
+    polls meanwhile drops the held one, as it would any held scheduled poll."""
+    first, second, hall = fleet
+    give_back = await take_every_poll_place(hass)
+    await clock.run_to(122)
+    for member in fleet:
+        assert member.coordinator._poll_running  # came due unheld, waiting for a place
+        assert not member.coordinator._poll_held
+    first.start()
+    second.start()
+    give_back()
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert polls_done(*fleet)()
+    assert [clock.since(m) for m in fleet] == [[0.0]] * 3
+    assert hall.coordinator._poll_waiting
+    assert not hall.coordinator._first_poll_waiting
+    if stop_polls:
+        hall.coordinator._async_clear_poll_interval()  # as the policy does for a light turned off
+
+    first.finish()
+    second.finish()
+    end = clock.now
+    await clock.run(HOLDOFF + 1)
+    assert clock.since(hall) == ([0.0] if stop_polls else [0.0, near(end + HOLDOFF)])
+    for member in (first, second):
+        assert clock.since(member) == [0.0, near(end + HOLDOFF)]
+
+
+async def test_a_scheduled_poll_waiting_for_its_place_as_its_own_command_starts_is_held_again(
+    hass: HomeAssistant, clock: Clock, fleet: list[Member], burst: CommandBurst
+) -> None:
+    """No burst: a command to the poll's own device starts while it waits for a place. Once it
+    has one it reads nothing and runs 25 s after that command; the other devices' polls run."""
+    first, second, hall = fleet
+    give_back = await take_every_poll_place(hass)
+    await clock.run_to(122)
+    assert hall.coordinator._poll_running
+    hall.start()
+    assert not burst.active
+    give_back()
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert polls_done(*fleet)()
+    assert clock.since(hall) == [0.0]
+    assert hall.coordinator._poll_waiting
+    assert clock.since(first) == clock.since(second) == [0.0, near(122)]
+
+    hall.finish()
+    end = clock.now
+    await clock.run(HOLDOFF + 1)
+    assert clock.since(hall) == [0.0, near(end + HOLDOFF)]
+
+
+async def test_a_held_first_poll_released_into_a_wait_for_its_place_stays_apart(
+    hass: HomeAssistant, clock: Clock, mock_bluetooth: SimpleNamespace, burst: CommandBurst
+) -> None:
+    """A first poll held by a burst, released as it ends, waits for a poll place; the next
+    burst holds it again apart: a policy step that stops polls doesn't drop it."""
+    first = await add_member(hass, *FLEET[0])
+    second = await add_member(hass, *FLEET[1])
+    first.start()
+    second.start()
+    hall = await add_member(hass, *FLEET[2], stagger=10)
+    await clock.run_to(12)
+    assert hall.coordinator._first_poll_waiting  # held by the burst
+    give_back = await take_every_poll_place(hass)
+    first.finish()
+    second.finish()
+    await clock.run(HOLDOFF + 1)
+    assert not burst.active
+    assert hall.coordinator._poll_running  # released, waiting for a place
+    first.start()
+    second.start()
+    give_back()
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert polls_done(first, second, hall)()
+    assert hall.polls == []
+    assert hall.coordinator._first_poll_waiting
+    hall.coordinator._async_clear_poll_interval()  # as the policy does for a light turned off
+
+    first.finish()
+    second.finish()
+    end = clock.now
+    await clock.run(HOLDOFF + 1)
+    assert clock.since(hall) == [near(end + HOLDOFF)]
+
+
+async def test_a_return_poll_waiting_for_its_place_as_a_burst_starts_stays_apart(
+    hass: HomeAssistant, clock: Clock, fleet: list[Member], burst: CommandBurst
+) -> None:
+    """A return poll that ran at once (nothing held polls off) waits for a poll place; a burst
+    starting meanwhile holds it again apart: a policy step that stops polls doesn't drop it."""
+    first, second, hall = fleet
+    await clock.run_to(30)
+    give_back = await take_every_poll_place(hass)
+    hall.coordinator._async_request_poll("return_poll", keep=True)
+    assert hall.coordinator._poll_running
+    first.start()
+    second.start()
+    give_back()
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert polls_done(hall)()
+    assert clock.since(hall) == [0.0]
+    assert hall.coordinator._first_poll_waiting
+    hall.coordinator._async_clear_poll_interval()  # as the policy does for a light turned off
+
+    first.finish()
+    second.finish()
+    end = clock.now
+    await clock.run(HOLDOFF + 1)
+    assert clock.since(hall) == [0.0, near(end + HOLDOFF)]
 
 
 async def test_a_first_poll_still_waiting_for_its_place_as_a_burst_starts_is_held_apart(
@@ -718,7 +842,8 @@ async def test_a_first_poll_still_waiting_for_its_place_as_a_burst_starts_is_hel
     first.start()
     second.start()
     give_back()
-    await hass.async_block_till_done()
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert polls_done(first, second, hall)()
     assert hall.polls == []
     assert hall.coordinator._first_poll_waiting
     hall.coordinator._async_clear_poll_interval()  # as the policy does for a light turned off
@@ -730,6 +855,119 @@ async def test_a_first_poll_still_waiting_for_its_place_as_a_burst_starts_is_hel
     assert clock.since(hall) == [near(15 + HOLDOFF)]
     assert len(poll_timers(hass, hall)) == 1  # the poll set the fixed cadence again
     assert holding_timers(hass, hall) == []
+
+
+async def test_a_poll_held_again_after_a_failed_one_stays_failed(
+    hass: HomeAssistant, clock: Clock, fleet: list[Member], burst: CommandBurst
+) -> None:
+    """After a failed poll, one held again reads nothing: it stays failed (no "recovered"),
+    and nothing counts toward the backoff or the poll interval. It runs after the burst."""
+    first, second, hall = fleet
+    coordinator = hall.coordinator
+    read = hall.device.update.side_effect  # type: ignore[attr-defined]
+    hall.device.update.side_effect = GoveeBleConnectionError("down")  # type: ignore[attr-defined]
+    await clock.run_to(122)
+    assert not coordinator.last_update_success
+    hall.device.update.side_effect = read  # type: ignore[attr-defined]
+
+    def backoff() -> tuple[Any, ...]:
+        return (
+            coordinator._backoff_failures,
+            coordinator.consecutive_failures,
+            coordinator.update_interval,
+            coordinator._on_backoff_steps,
+            coordinator._last_polled,
+        )
+
+    before = backoff()
+    give_back = await take_every_poll_place(hass)
+    await clock.run_to(244)  # due again at about 240 s
+    assert coordinator._poll_running
+    first.start()
+    second.start()
+    give_back()
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert polls_done(*fleet)()
+    assert not coordinator.last_update_success
+    assert backoff() == before
+    assert coordinator._poll_waiting
+
+    first.finish()
+    second.finish()
+    await clock.run(HOLDOFF + 1)
+    assert coordinator.last_update_success
+
+
+async def test_a_poll_held_again_still_runs_at_the_cap_from_when_it_came_due(
+    hass: HomeAssistant, clock: Clock, fleet: list[Member], burst: CommandBurst
+) -> None:
+    """Held again, a poll keeps its first hold's cap: due at about 120 s and held by a burst,
+    released as it ends, it waits for a place while the next burst starts and is held again.
+    That burst keeps going: the poll runs at the cap counted from 120 s, not 2 min after it
+    was held again."""
+    first, second, hall = fleet
+    await clock.run_to(100)
+    first.start()
+    second.start()
+    await clock.run_to(122)
+    assert hall.coordinator._poll_waiting  # due at about 120 s
+    [cap] = timers(hass, "_async_holdoff_cap_reached", hall.coordinator)
+    cap_due = due(clock, cap)
+    give_back = await take_every_poll_place(hass)
+    first.finish()
+    second.finish()
+    await clock.run(HOLDOFF + 1)
+    assert hall.coordinator._poll_running  # released, waiting for a place
+    first.start()
+    second.start()
+    give_back()
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert polls_done(*fleet)()
+    assert clock.since(hall) == [0.0]
+    [again] = timers(hass, "_async_holdoff_cap_reached", hall.coordinator)
+    assert due(clock, again) == pytest.approx(cap_due, abs=1)
+
+    while clock.now < cap_due + 10:  # one command after another to the first device
+        await clock.run(5)
+        first.finish()
+        first.start()
+        assert burst.active
+    assert clock.since(hall) == [0.0, near(cap_due)]
+    first.finish()
+    second.finish()
+
+
+async def test_a_manual_refresh_holding_the_lock_doesnt_take_a_background_polls_hold(
+    hass: HomeAssistant, clock: Clock, fleet: list[Member], burst: CommandBurst
+) -> None:
+    """The debouncer runs a manual refresh (update_entity) in a task of its own, which takes
+    HA's refresh lock a moment before it reads. A background poll released meanwhile waits for
+    the lock; during a burst the manual refresh still reads first (it doesn't wait for
+    commands), and the background poll after it is held again."""
+    first, second, hall = fleet
+    coordinator = hall.coordinator
+    first.start()
+    second.start()
+    locked, read = asyncio.Event(), asyncio.Event()
+
+    async def _manual() -> None:
+        async with coordinator._debounced_refresh.async_lock():
+            locked.set()
+            await read.wait()
+            await coordinator._async_refresh(log_failures=True)
+
+    manual = asyncio.create_task(_manual())
+    await locked.wait()
+    coordinator._async_release_poll("test_poll", apart=False)  # waits for the lock
+    read.set()
+    await manual
+    assert len(hall.polls) == 2  # the manual refresh read, during the burst
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert polls_done(hall)()
+    assert len(hall.polls) == 2  # the background poll read nothing
+    assert coordinator._poll_waiting
+    first.finish()
+    second.finish()
 
 
 # -- a poll that runs meanwhile, the one-off polls ---------------------------------------------

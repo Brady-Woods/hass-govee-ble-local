@@ -118,11 +118,14 @@ profile's capabilities:
   polls wait, until 25 s after the last command to any device ends; a command
   starting meanwhile, to any device, extends it. A turn-off waiting in the
   deferral (below) counts toward it as a command, so one light on and the rest
-  already off is a burst too. A poll already running isn't stopped, but one
-  still waiting for its place (`MAX_CONCURRENT_POLLS`, the connect gate) as
-  commands start is held again once it has one. One poll runs when the wait ends, however many came due (a poll
+  already off is a burst too. A poll already reading isn't stopped, but a
+  background poll still waiting for its place (`MAX_CONCURRENT_POLLS`, the
+  connect gate) while such commands start is held again once it has one, and
+  runs 25 s after they end; a manual refresh, and a poll the cap released,
+  aren't. One poll runs when the wait ends, however many came due (a poll
   that runs meanwhile counts), and a poll waits at most
-  `POLL_HOLDOFF_MAX_SECONDS` (2 min). A policy step that stops polls drops a
+  `POLL_HOLDOFF_MAX_SECONDS` (2 min) from when it came due, held again or
+  not. A policy step that stops polls drops a
   held scheduled or turn-on poll, never the first poll or the return poll.
 - **Availability = reachability**: an entity stays available while the device
   is advertising, regardless of poll failures (commands can still reach it).
@@ -183,12 +186,13 @@ profile's capabilities:
   that itself said it is off (`coordinator.power_confirmed_off`: an advertised
   on/off, a read-back or an acked turn-off within `ADVERT_POWER_FRESH_SECONDS`)
   waits until they are done, or `DEFER_OFF_MAX_SECONDS` (10 s), then goes out,
-  served after the other commands at the connect gate. Only the commands
-  running as it starts count (its burst): a device it waits for is done once no
-  command to it runs, and a command that starts later (another automation, a
-  slider elsewhere) doesn't hold it back. So does a zone's
+  served after the other commands at the connect gate. So does a zone's
   turn-off while its whole fixture is already off (and it is skipped if the
-  fixture's own turn-off confirmed the zone off meanwhile). The wait runs inside
+  fixture's own turn-off confirmed the zone off meanwhile). Only the commands
+  already running as it starts count: a device it waits for is done once no
+  command to it runs, and a command that starts later (another automation, a
+  slider elsewhere, or one of the same call that started after it looked)
+  doesn't hold it back. The wait runs inside
   the service call before the command starts, holding the entity's
   PARALLEL_UPDATES slot, so a later command to the same light can't be undone by
   it; another call queued for that same entity meanwhile sends the turn-off at
@@ -278,9 +282,12 @@ verified on hardware.
 - Segment lights model "off" as black (the protocol has no per-segment power).
   A segment shows off while its fixture is known off, and turning it on then
   switches the fixture on first. On a lit H60A6 or H6047 it likewise follows
-  its zone (the ring, a bar): it shows off while that zone is known off, and
-  turning it on switches the zone on first, unless the zone was confirmed lit
-  in the last 2 min. On an H60A6 or H6047 that isn't known on, a
+  its zone (an H60A6's main panel or ring, an H6047 bar): it shows off while
+  that zone is known off, and turning it on then switches the zone on first.
+  A zone whose power isn't known, or that is held on, gets the segment's change
+  alone, as before: a zone switched off in the Govee app while the fixture
+  stays on shows on, with its segments, until the next read-back, and a
+  segment's colour then goes to a dark zone. On an H60A6 or H6047 that isn't known on, a
   segment's turn_off sends nothing, because a colour frame there switches the
   fixture on: the segment comes back in its old colour with the fixture. On
   other models it is blacked out; whether that colour frame wakes a fixture that
