@@ -6,13 +6,13 @@ library behaviour, or an integration change that should be written against the r
 The library is in the middle of a refactor, so none of these are fixed in the next release. Review
 them after that release is cut. The integration-side fixes wait for the refactored library API.
 
-> **Floor now 1.5.0 (integration 1.5.1).** The manifest requires `govee-ble-local>=1.5.0,<2` and
+> **Floor now 1.6.0 (integration 1.6.0).** The manifest requires `govee-ble-local>=1.6.0,<2` and
 > Home Assistant 2026.10.0. The integration's guards for older libraries are gone (the
 > `GoveeCloudAuthError` stand-in, the `segment_count` and `ADVERT_SUPPRESS_SECONDS` fallbacks,
-> `has_app_advert_parser`), removed with the 1.5.1 compatibility cleanup (CHANGELOG
-> `[Unreleased]`). Where an item below says to guard newer API with `getattr` so the floor can
+> `has_app_advert_parser`), removed with the compatibility cleanup that shipped in 1.6.0 (CHANGELOG
+> `[1.6.0]`). Where an item below says to guard newer API with `getattr` so the floor can
 > stay at 1.2.1, use the API directly instead, and raise the floor (CLAUDE.md rule 2) for anything
-> newer than 1.5.0. The item text still describes the 1.2.1 / `c823fc5` state it was written
+> newer than 1.6.0. The item text still describes the 1.2.1 / `c823fc5` state it was written
 > against.
 
 **Versions referenced**
@@ -75,7 +75,7 @@ for a library change. Item details further down still describe the 1.2.1 / `c823
 | 3.1 | not library-dependent | Only message text changed | Integration: typed report |
 | 3.2 | still open | Field names unchanged | Integration: typed accessors |
 | 3.3 | not library-dependent | Unchanged | Integration: stable `reason` code |
-| 4.1 | done in the integration | Segment lights show off with the fixture known off, power it on first, and send no black-out to an H60A6 / H6047 not known on ([Unreleased]) | None |
+| 4.1 | done in the integration | Segment lights show off with the fixture known off, power it on first, and send no black-out to an H60A6 / H6047 not known on (1.6.0) | None |
 | 4.2 | still open | No `Segment.kelvin`; per-bar Kelvin is still H6047-only | Integration (floor) stopgap; Library for `Segment.kelvin` |
 | 4.3 | still open | Unchanged | Integration (floor): remember the Kelvin across off |
 | 4.4 | still open | Unchanged | Library: fold whole-device writes into `state.segments` |
@@ -649,7 +649,7 @@ types are written once.
   `is_on=False, segments=[Segment(rgb=RED)]` shows off; `turn_on` with the fixture off sends power.
 - **Verification:** confirmed by 1 verifier, who made the power-first step part of the fix rather than
   optional.
-- **Decision:** done in the integration ([Unreleased]). A segment light shows off while
+- **Decision:** done in the integration (1.6.0). A segment light shows off while
   `coordinator.data.is_on is False`, and `async_turn_on` sends `set_power(True)` first while the
   fixture isn't known on. `_is_dark()` stays on `_attr_is_on`. On a zoned fixture (H60A6, H6047) that
   isn't known on, `async_turn_off` sends nothing: library 1.5.0 models a `33 05` there as waking the
