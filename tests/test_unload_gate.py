@@ -129,7 +129,7 @@ async def test_a_poll_waiting_at_the_gate_reads_nothing_as_its_entry_unloads(
     polls = device.update.await_count  # type: ignore[attr-defined]
     refresh = None
     if background:
-        coordinator._async_release_poll("test_poll")
+        coordinator._async_release_poll("test_poll", apart=False)
     else:
         refresh = asyncio.create_task(coordinator.async_refresh())
     for _ in range(5):

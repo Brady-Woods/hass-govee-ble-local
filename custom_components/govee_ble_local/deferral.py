@@ -7,11 +7,21 @@ takes its slot like one that changes, and in real nightly bursts about half of
 them were: the last light to go out waited behind one.
 
 So a turn-off of a device that already said it is off
-(``GoveeBleLocalCoordinator.power_confirmed_off``) waits while commands to
-other devices run, for at most DEFER_OFF_MAX_SECONDS, then goes out. It is
-still sent: a light wrongly believed off still goes off, only later. A
-command to one device alone never waits, and such turn-offs don't wait for
-each other: while one is sent, its device doesn't count as commanding.
+(``GoveeBleLocalCoordinator.power_confirmed_off``) waits while the commands
+to other devices that run as it starts go on, for at most
+DEFER_OFF_MAX_SECONDS, then goes out. It is still sent: a light wrongly
+believed off still goes off, only later. A command to one device alone never
+waits, and such turn-offs don't wait for each other: while one is sent, its
+device doesn't count as commanding.
+
+It waits only for the commands of its burst: those running as it starts (the
+ones started with it, and any still under way from before). A device it waits
+for is done once no command to it runs: a command that starts after that (to
+it, or to a device it doesn't wait for: another automation, a slider
+elsewhere) doesn't hold the turn-off back, so a lone one doesn't wait out the
+cap behind them. A device's commands queued behind its first in the same call
+(a fixture's zone or segment lights) go out over the link that one opened:
+they need no new slot.
 
 The wait runs in the entity's service call, before its command starts, so
 COMMAND_TIMEOUT_SECONDS doesn't count it. Home Assistant has already taken the
@@ -122,9 +132,9 @@ def _confirmed_offs(hass: HomeAssistant) -> set[str]:
 
 
 @callback
-def _others_commanding(hass: HomeAssistant, address: str) -> bool:
-    """Return whether a command to another device runs, other than such a turn-off."""
-    return bool(commanding_devices(hass) - {address} - _confirmed_offs(hass))
+def _other_devices_commanding(hass: HomeAssistant, address: str) -> set[str]:
+    """Return the other devices a command runs to now, other than such a turn-off."""
+    return commanding_devices(hass) - {address} - _confirmed_offs(hass)
 
 
 class OffDeferral:
@@ -156,12 +166,13 @@ class OffDeferral:
             offs.discard(self._address)
 
     async def _async_wait(self, hass: HomeAssistant) -> bool:
-        """Wait while commands to other devices run; return whether to send the turn-off.
+        """Wait while the other devices' commands of its burst run; return whether to send it.
 
-        True once no other device's command runs (at once if none does, or if
-        the device's link is already up: waiting would save no connection slot),
-        or after DEFER_OFF_MAX_SECONDS; False if HA stops or the entity is
-        removed meanwhile (``async_drop``).
+        True once no command runs to any of the other devices that had one as
+        it started (at once if none did, or if the device's link is already
+        up: waiting would save no connection slot), or after
+        DEFER_OFF_MAX_SECONDS; False if HA stops or the entity is removed
+        meanwhile (``async_drop``).
         """
         removals = self._removals
         for _ in range(_START_STEPS):
@@ -170,7 +181,7 @@ class OffDeferral:
             return False
         if (
             hass.is_stopping
-            or not _others_commanding(hass, self._address)
+            or not (burst := _other_devices_commanding(hass, self._address))
             # Its link is up (a command to it just landed): waiting saves no slot.
             or async_link_up(hass, self._address)
         ):
@@ -179,7 +190,10 @@ class OffDeferral:
 
         @callback
         def _async_commands_changed() -> None:
-            if not _others_commanding(hass, self._address):
+            # A device drops out once its commands have ended: one that starts
+            # after that isn't of this burst.
+            burst.intersection_update(_other_devices_commanding(hass, self._address))
+            if not burst:
                 self._async_end(outcome, True, "the other devices' commands are done")
 
         @callback

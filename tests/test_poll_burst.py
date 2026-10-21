@@ -34,6 +34,7 @@ from pytest_homeassistant_custom_component.common import (
 from custom_components.govee_ble_local.const import (
     CONF_SKU,
     DOMAIN,
+    MAX_CONCURRENT_POLLS,
     POLL_HOLDOFF_AFTER_COMMAND_SECONDS,
     POLL_HOLDOFF_MAX_SECONDS,
     POLL_INTERVAL_SECONDS,
@@ -41,6 +42,7 @@ from custom_components.govee_ble_local.const import (
 from custom_components.govee_ble_local.coordinator import (
     CommandBurst,
     GoveeBleLocalCoordinator,
+    _poll_semaphore,
     command_burst,
 )
 
@@ -642,6 +644,91 @@ async def test_the_cap_runs_a_poll_a_long_burst_holds(
     await clock.run(HOLDOFF + 1)
     assert clock.since(hall) == [0.0, near(cap_due), near(end + HOLDOFF)]
     assert len(poll_timers(hass, hall)) == 1
+    assert holding_timers(hass, hall) == []
+
+
+async def take_every_poll_place(hass: HomeAssistant) -> Callable[[], None]:
+    """Take every MAX_CONCURRENT_POLLS place (other devices' polls); return what gives them back."""
+    semaphore = _poll_semaphore(hass)
+    for _ in range(MAX_CONCURRENT_POLLS):
+        await semaphore.acquire()
+
+    def _give_back() -> None:
+        for _ in range(MAX_CONCURRENT_POLLS):
+            semaphore.release()
+
+    return _give_back
+
+
+@pytest.mark.parametrize("return_poll", [False, True], ids=["scheduled", "with_a_return_poll"])
+async def test_a_released_poll_still_waiting_for_its_place_waits_for_the_next_burst(
+    hass: HomeAssistant, clock: Clock, fleet: list[Member], burst: CommandBurst, return_poll: bool
+) -> None:
+    """The polls a burst's end released wait for a poll place; a burst starting meanwhile holds
+    them again once they have one: they read nothing until 25 s after it, then run once.
+
+    A return poll held meanwhile (it joins the running poll) keeps the poll held apart.
+    """
+    first, second, hall = fleet
+    await clock.run_to(100)
+    first.start()
+    second.start()
+    await clock.run_to(122)
+    assert hall.coordinator._poll_waiting  # due at about 120 s
+    give_back = await take_every_poll_place(hass)
+    first.finish()
+    second.finish()
+    await clock.run(HOLDOFF + 1)
+    assert not burst.active
+    assert hall.coordinator._poll_running  # released, waiting for a place
+    if return_poll:
+        hall.coordinator._async_request_poll("return_poll", keep=True)
+
+    first.start()  # the next burst
+    second.start()
+    give_back()
+    await hass.async_block_till_done()
+    assert [clock.since(m) for m in fleet] == [[0.0]] * 3
+    assert hall.coordinator._first_poll_waiting is return_poll
+    assert hall.coordinator._poll_waiting is not return_poll
+    assert len(poll_timers(hass, hall)) == 1
+
+    first.finish()
+    second.finish()
+    end = clock.now
+    await clock.run(HOLDOFF + 1)
+    for member in fleet:
+        assert clock.since(member) == [0.0, near(end + HOLDOFF)]
+        assert len(poll_timers(hass, member)) == 1
+        assert holding_timers(hass, member) == []
+
+
+async def test_a_first_poll_still_waiting_for_its_place_as_a_burst_starts_is_held_apart(
+    hass: HomeAssistant, clock: Clock, mock_bluetooth: SimpleNamespace, burst: CommandBurst
+) -> None:
+    """A first poll that came due with no command running but waits for a poll place is held
+    apart once it has one, if a burst started meanwhile: a policy step that stops polls
+    doesn't drop it, and it runs once as the burst ends."""
+    first = await add_member(hass, *FLEET[0])
+    second = await add_member(hass, *FLEET[1])
+    give_back = await take_every_poll_place(hass)
+    hall = await add_member(hass, *FLEET[2], stagger=10)
+    await clock.run_to(15)  # its first poll came due at 10 s
+    assert hall.coordinator._poll_running
+    first.start()
+    second.start()
+    give_back()
+    await hass.async_block_till_done()
+    assert hall.polls == []
+    assert hall.coordinator._first_poll_waiting
+    hall.coordinator._async_clear_poll_interval()  # as the policy does for a light turned off
+    assert hall.coordinator._first_poll_waiting
+
+    first.finish()
+    second.finish()
+    await clock.run_to(15 + HOLDOFF + 1)
+    assert clock.since(hall) == [near(15 + HOLDOFF)]
+    assert len(poll_timers(hass, hall)) == 1  # the poll set the fixed cadence again
     assert holding_timers(hass, hall) == []
 
 

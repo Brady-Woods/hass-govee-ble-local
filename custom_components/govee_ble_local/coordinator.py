@@ -37,6 +37,7 @@ advertisement callback only fires when an advertisement's content changes.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Coroutine
 from dataclasses import asdict
 from datetime import datetime, timedelta
 from enum import StrEnum
@@ -154,7 +155,9 @@ class CommandBurst:
     held poll still runs after POLL_HOLDOFF_MAX_SECONDS at the latest, so an
     entry that wasn't loaded as the burst ended (still setting up, or one
     that failed to unload) waits that long at most. The released polls run
-    as any do, at most MAX_CONCURRENT_POLLS at a time.
+    as any do, at most MAX_CONCURRENT_POLLS at a time; one that is still
+    waiting for its place (or at the connect gate) as the next burst starts
+    is held again for that one (``GoveeBleLocalCoordinator._async_poll``).
 
     A turn-off waiting in the deferral (``deferral.OffDeferral``: its device
     already said it is off, so it lets the other devices go first) counts
@@ -477,6 +480,15 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         # A poll is running (``_async_update_data``): it uses up the polls held
         # meanwhile, so the hold-off ending doesn't release one alongside it.
         self._poll_running = False
+        # The poll starting now is a background poll that commands hold off
+        # (``_async_background_refresh``): whether it is held again apart (True)
+        # or not should they hold polls off once it has its place. Taken as it
+        # starts (``_async_update_data``); None for any other poll (a manual
+        # refresh, or the one the hold-off cap released).
+        self._starting_poll_apart: bool | None = None
+        # The poll that just ended was held again so (``_async_poll``): held
+        # once more as its refresh ends (``_async_refresh_finished``).
+        self._poll_held_again: bool | None = None
         # Home Assistant fired its stop event: its close stage refuses nothing,
         # so no held poll is released any more (``_async_release_poll``).
         self._ha_stopping = False
@@ -735,7 +747,7 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         if self.commands_holding_off or self._poll_running:
             self._async_hold_poll(first=keep)
             return
-        self._async_release_poll(name)
+        self._async_release_poll(name, apart=keep)
 
     @callback
     def _async_cancel_flip_poll(self) -> None:
@@ -1045,7 +1057,7 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         it. Not while a poll runs: that one uses up the held polls.
         """
         if self._poll_held and not self._poll_running and not self.commands_holding_off:
-            self._async_release_poll()
+            self._async_release_poll(apart=self._first_poll_waiting)
 
     @callback
     def _async_cancel_holdoff_end(self) -> None:
@@ -1079,14 +1091,14 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
 
         It can then run while one long command is still under way (a zone
         light's several calls on a failing link): it waits for the device lock
-        like any other operation.
+        like any other operation. Nor is it held again once it has its place.
         """
         self._unsub_holdoff_cap = None
         if self._poll_held and not self._poll_running:
-            self._async_release_poll()
+            self._async_release_poll(apart=None)
 
     @callback
-    def _async_release_poll(self, name: str = "held_off_poll") -> None:
+    def _async_release_poll(self, name: str = "held_off_poll", *, apart: bool | None) -> None:
         """Run the held background poll in place of HA's armed timer, as that timer would have.
 
         HA's _handle_refresh_interval forgets its timer without cancelling it (it
@@ -1094,6 +1106,9 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         HA's first timer still armed, so it is cancelled here: two timers would
         otherwise poll for good. The poll then re-arms one timer as it ends.
         ``name`` names its task (a one-off poll that runs at once, too).
+        ``apart``: how it is held again should commands hold polls off once it
+        has its place (``_async_background_refresh``); None for the poll the
+        cap released, which runs whatever holds polls off.
 
         Not once HA is stopping (``async_note_ha_stopping``): in its close stage
         HA no longer refuses a scheduled refresh, and the stop listener has
@@ -1106,10 +1121,36 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         super()._async_unsub_refresh()
         self.config_entry.async_create_background_task(
             self.hass,
-            super()._handle_refresh_interval(),
+            self._async_background_refresh(super()._handle_refresh_interval(), apart=apart),
             name=f"{self.name}_{name}",
             eager_start=True,
         )
+
+    async def _async_background_refresh(
+        self, refresh: Coroutine[Any, Any, None], *, apart: bool | None
+    ) -> None:
+        """Run ``refresh``, a background poll; ``apart``: how commands hold it off once more.
+
+        Such a poll is held while commands hold polls off as it comes due, but
+        it can then wait a while for its place (MAX_CONCURRENT_POLLS, and the
+        connect gate) as the commands of a new burst start, or a command to its
+        device. So it looks again once it has its place (``_async_poll``): held
+        again, apart (``apart`` True: the first poll, or a return poll) or not,
+        it reads nothing now, and runs once they are done. ``apart`` None: it
+        runs whatever holds polls off (the poll the hold-off cap released). A
+        manual refresh doesn't wait for commands either.
+
+        ``refresh`` reaches ``_async_update_data``, which takes ``apart``, without
+        a pause: HA's refresh lock is free while no poll runs (each poll takes it
+        and sets ``_poll_running`` in one step), and a background poll doesn't
+        start while one does.
+        """
+        self._starting_poll_apart = apart
+        try:
+            await refresh
+        finally:
+            # Taken by now, unless the refresh read nothing at all (HA stopping).
+            self._starting_poll_apart = None
 
     @callback
     def async_note_ha_stopping(self) -> None:
@@ -1162,7 +1203,7 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         if self.commands_holding_off:
             self._async_hold_poll(first=True)
             return
-        await self.async_refresh()
+        await self._async_background_refresh(self.async_refresh(), apart=True)
 
     async def _handle_refresh_interval(self, _now: datetime | None = None) -> None:
         """Run a scheduled poll, unless an entity command is running or just ran.
@@ -1172,10 +1213,11 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         command did; during a burst of commands to several devices, any device's
         poll would take a connection slot they need (``CommandBurst``). It is
         held until the hold-off and any burst end (``_async_release_held_poll``),
-        or for at most POLL_HOLDOFF_MAX_SECONDS (``_async_holdoff_cap_reached``).
-        Nor while a poll already runs: that poll re-arms the timer as it ends.
-        Overrides DataUpdateCoordinator's scheduled-refresh entry point, which
-        takes the debouncer's lock.
+        or for at most POLL_HOLDOFF_MAX_SECONDS (``_async_holdoff_cap_reached``);
+        and held again if they start while it waits for its place
+        (``_async_background_refresh``). Nor while a poll already runs: that
+        poll re-arms the timer as it ends. Overrides DataUpdateCoordinator's
+        scheduled-refresh entry point, which takes the debouncer's lock.
         """
         if self._poll_running:
             # A refresh started meanwhile reads the device now, and HA re-arms
@@ -1187,7 +1229,7 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
             self._unsub_refresh = None  # the timer that just fired
             self._async_hold_poll()
             return
-        await super()._handle_refresh_interval(_now)
+        await self._async_background_refresh(super()._handle_refresh_interval(_now), apart=False)
 
     def _async_unsub_refresh(self) -> None:
         """Cancel the scheduled poll, a held scheduled one included.
@@ -1463,14 +1505,32 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         # poll held for the hold-off, the first one after setup included: it
         # reads the device as they would. Held ones wait while it runs (the
         # hold-off end and the cap don't release them, ``_poll_running``), and
-        # are dropped as it ends, however it ends.
+        # are dropped as it ends, however it ends. Unless it read nothing, held
+        # again for commands (``_async_poll``): it is held once more, as the
+        # refresh ends, apart if one held meanwhile was (a return poll).
+        apart, self._starting_poll_apart = self._starting_poll_apart, None
         self._poll_running = True
         try:
-            return await self._async_poll()
+            return await self._async_poll(apart)
         finally:
             self._poll_running = False
+            if self._poll_held_again is not None:
+                self._poll_held_again = self._poll_held_again or self._first_poll_waiting
             self._async_drop_held_polls()
             self._async_release_after_poll()
+
+    @callback
+    def _async_refresh_finished(self) -> None:
+        """Hold the background poll again that commands held off once it had its place.
+
+        Only now: HA re-arms its poll timer as the refresh ends, which drops a
+        held scheduled poll (``_async_unsub_refresh``). Releasing it cancels that
+        timer again, as for any held poll.
+        """
+        super()._async_refresh_finished()
+        if (apart := self._poll_held_again) is not None:
+            self._poll_held_again = None
+            self._async_hold_poll(first=apart)
 
     @callback
     def _async_release_after_poll(self) -> None:
@@ -1487,8 +1547,14 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         _LOGGER.debug("%s: the poll ended: releasing the link", self.name)
         self._async_start_release()
 
-    async def _async_poll(self) -> DeviceState:
-        """Read the device (``_async_update_data``), counting the outcome for the backoff."""
+    async def _async_poll(self, apart: bool | None) -> DeviceState:
+        """Read the device (``_async_update_data``), counting the outcome for the backoff.
+
+        ``apart``: how a background poll is held again if commands hold polls
+        off once it has its place (``_async_background_refresh``); None if it
+        isn't.
+        """
+        self._poll_held_again = None
         # Any poll that runs (a manual refresh after an auth failure included)
         # means polling is scheduled again.
         self._auth_failed = False
@@ -1503,11 +1569,14 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
             if admission.outcome is Outcome.RELEASED:
                 # Its entry is unloading (or HA stopping) and the link closes next:
                 # no new connect. HA cancels a background poll right after anyway.
-                if not self.last_update_success:
-                    # Returning would read as a recovery ("data recovered") with
-                    # nothing read: stay failed, which HA doesn't log again.
-                    raise self._update_failed("poll_failed", error="its entry is unloading")
-                return self._device.state
+                return self._async_read_nothing("its entry is unloading")
+            # Again once it has its place: commands may hold polls off by now (a
+            # burst started while it waited for the place another burst's end
+            # released it into). Held again, it reads nothing now.
+            if apart is not None and self.commands_holding_off:
+                _LOGGER.debug("%s: commands hold polls off again: the poll waits", self.name)
+                self._poll_held_again = apart
+                return self._async_read_nothing("commands hold polls off")
             # Again once it has a slot: the wait may have outlasted a held link.
             if self._async_unreachable():
                 raise self._async_skip_absent()
@@ -1575,6 +1644,18 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         self._note_poll_speed(bluetooth.MONOTONIC_TIME() - started)
         self._async_note_success(data)
         return data
+
+    @callback
+    def _async_read_nothing(self, why: str) -> DeviceState:
+        """Return what a poll that read nothing (``why``) gives HA: the state, unless failed.
+
+        After a failed poll, returning would read as a recovery ("data
+        recovered") with nothing read: it stays failed, which HA doesn't log
+        again. Nothing counts toward the backoff.
+        """
+        if not self.last_update_success:
+            raise self._update_failed("poll_failed", error=why)
+        return self._device.state
 
     @callback
     def _async_unreachable(self) -> bool:

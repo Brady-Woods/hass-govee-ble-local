@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **A segment light follows its zone's power** (H60A6, H6047). With the fixture on but the
+  segment's zone off (the H60A6's ring, an H6047 bar), a segment light showed on, and turning it
+  on sent the colour to a segment that stayed dark: with the fixture on, a colour frame lights no
+  zone. Now the segment shows off while its zone is known off, and turning it on switches that
+  zone on first, then sends any colour, as a zone light does. The zone's other segments light too,
+  in the colours they kept. A zone not confirmed lit in the last 2 minutes (it may have been
+  switched off in the Govee app) also gets its power first; that frame does nothing if it is on.
+  This matches how a segment light already follows the whole fixture's power.
+- **A turn-off of a light already off waits only for its own burst.** It waited while a command
+  to any other device ran, so a lone turn-off (a script step) could wait the full 10 s behind
+  unrelated commands that kept starting: another automation, a slider elsewhere. Now it waits only
+  for the commands that were running as it started, and a device it waits for is done once no
+  command to it runs. A command that starts later doesn't hold it back.
+- **A poll released at the end of a burst no longer runs in the middle of the next one.** Polls
+  released as commands to several devices end wait for one of the two poll places (and at the
+  connect gate). One still waiting there as a new burst starts, or as a command to its own device
+  starts, now looks again once it has its place: it is held, reads nothing, and runs once those
+  commands are done (or at the 2-minute cap). The first poll after setup and the return poll stay
+  held apart, as before. A manual refresh, and a poll the cap released, still run anyway.
+- Tests: a context without a user is checked to be no person's without the user store being
+  asked. Home Assistant answers "no user" for no id today, so dropping that check in
+  `helpers.async_context_is_person` passed every test. No change to the integration itself.
+
 ## [1.6.0] - 2026-10-21
 
 Requires `govee-ble-local` 1.6.0 or newer (any 1.x) **from PyPI** and Home Assistant 2026.10+.
