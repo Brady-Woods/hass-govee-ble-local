@@ -712,15 +712,22 @@ def _fake_transport() -> Any:
 
 
 @pytest.mark.parametrize(
-    ("pact", "state"),
-    [((1, 1), ConfigEntryState.LOADED), ((2, 3), ConfigEntryState.SETUP_RETRY)],
-    ids=["accepted_pact", "refused_pact"],
+    ("pact", "name", "state"),
+    [
+        ((1, 1), "GVH6009ABCD", ConfigEntryState.LOADED),
+        ((2, 3), "GVH6009ABCD", ConfigEntryState.SETUP_RETRY),
+        ((1, 1), "5134P0098101970F", ConfigEntryState.LOADED),
+        ((2, 3), "5134P0098101970F", ConfigEntryState.SETUP_RETRY),
+    ],
+    ids=["accepted_pact", "refused_pact", "accepted_pact_renamed", "refused_pact_renamed"],
 )
 async def test_setup_with_the_real_library_routes_by_the_advertised_pact(
     hass: HomeAssistant,
     presence: SimpleNamespace,
     mock_bluetooth: SimpleNamespace,
+    *,
     pact: tuple[int, int],
+    name: str,
     state: ConfigEntryState,
 ) -> None:
     """The real create_device builds the H6009 at its advertised pact, or setup retries.
@@ -728,11 +735,11 @@ async def test_setup_with_the_real_library_routes_by_the_advertised_pact(
     Only the BLE transport is faked, so the keyword arguments setup passes and the
     library's pact routing both run for real. The H6009 is served only at its row's
     pacts: at another one the model is supported but refused, which can change with a
-    later advert, so setup retries instead of failing for good.
+    later advert, so setup retries instead of failing for good. That holds when Home
+    Assistant's record shows another name (another device's advertisement merged in):
+    the entry's model and its Govee manufacturer data decide, not the name.
     """
-    info = make_service_info(
-        name="GVH6009ABCD", manufacturer_data=pact_mfg(*pact), advertisement=True
-    )
+    info = make_service_info(name=name, manufacturer_data=pact_mfg(*pact), advertisement=True)
     presence.service_info = mock_bluetooth.last_info.return_value = info
     entry = MockConfigEntry(
         domain=DOMAIN, title=TITLE, unique_id=ADDRESS, data={"address": ADDRESS, CONF_SKU: "H6009"}

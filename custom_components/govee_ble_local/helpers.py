@@ -1,4 +1,4 @@
-"""Small shared helpers: entity partition, zone state, device info, unit conversion, secrets."""
+"""Small shared helpers: entity partition, zone state, device info, units, secrets, pacts."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 from bleak.exc import BleakError
 from govee_ble_local import Capability, GoveeBleError
+from govee_ble_local.identify import identify, parse_manufacturer_data
 from homeassistant.core import Context, HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 
@@ -31,6 +32,24 @@ SECRET_BYTES = 8
 _FIXTURE_LIGHT_CAPABILITIES = frozenset(
     {Capability.BRIGHTNESS, Capability.RGB, Capability.COLOR_TEMP}
 )
+
+
+def advertised_pact(
+    name: str | None, manufacturer_data: dict[int, bytes]
+) -> tuple[int, int] | None:
+    """Return the ``(pact_type, pact_code)`` a set-up device's advertisement carries, or None.
+
+    ``identify`` keys on a Govee-style local name, as the Govee app's add-device scan does.
+    A device already set up may show any name in Home Assistant's merged record (another
+    device's advertisement merged in, say), so then its Govee manufacturer data decides, as
+    the app's control screen reads a bound device found by its stored address.
+    """
+    if (adv := identify(name, manufacturer_data)) is not None:
+        return adv.pact
+    if (fields := parse_manufacturer_data(manufacturer_data)) is not None:
+        _encrypted, _version, pact_type, pact_code = fields
+        return pact_type, pact_code
+    return None
 
 
 def has_fixture_light(device: Device) -> bool:

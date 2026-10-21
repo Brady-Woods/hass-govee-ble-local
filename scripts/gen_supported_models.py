@@ -91,6 +91,9 @@ def render() -> str:
         " code, and it hasn't been tested on a real device here.",
         "- **Opt-in:** support is inferred, not traced in the app; setting one up asks you first.",
         "",
+        "Colour-temperature ranges are each model's base range: some hardware versions of a model"
+        " reach further.",
+        "",
         "<details>",
         f"<summary>All {len(every)} models</summary>",
         "",

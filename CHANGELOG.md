@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Requires `govee-ble-local` 1.6.1 or newer** (`>=1.6.1,<2`, was `>=1.6.0,<2`), which Home Assistant
+  installs on its next restart. 1.6.1 fixes a light that ignored every command when Home
+  Assistant's Bluetooth record for it showed another device's name: the library took the light for
+  an unencrypted one and talked to it in plain text. It now takes encryption and the protocol
+  version from the light's own Govee manufacturer data, whatever the name, as the Govee app does
+  for a light already added. Seen on the lab's H6008, whose record had a nearby device's name
+  merged in through an ESPHome proxy; reloading the light's entry was the workaround.
+- The README's list of supported models is generated from `govee-ble-local` 1.6.1 (unchanged: 98,
+  plus 6 opt-in), and notes that its colour-temperature ranges are each model's base range (some
+  hardware versions reach further, such as the H61F2's 1000-10000 K).
+
 ### Fixed
 - **A segment light follows its zone's power** (H60A6, H6047). With the fixture on but the
   segment's zone off (an H60A6's main panel or ring, an H6047 bar), a segment light showed on,
@@ -35,6 +47,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the 2-minute cap, which still counts from when it came due. The first poll after setup and the
   return poll stay held apart, as before. A manual refresh, and a poll the cap released, still
   run anyway.
+- **A light whose record shows another device's name no longer fails setup for good when its
+  protocol version isn't served.** Setup read the version from the name-gated advertisement check,
+  found nothing, and reported the model as unsupported (a permanent error). It now reads the
+  light's Govee manufacturer data, so setup retries ("protocol not supported") as for any light,
+  and the same holds for the protocol check during setup in the config flow.
 - Tests: a context without a user is checked to be no person's without the user store being
   asked. Home Assistant answers "no user" for no id today, so dropping that check in
   `helpers.async_context_is_person` passed every test. No change to the integration itself.

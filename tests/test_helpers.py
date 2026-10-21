@@ -12,6 +12,7 @@ from pytest_homeassistant_custom_component.common import MockUser
 
 from custom_components.govee_ble_local.helpers import (
     BLE_ERRORS,
+    advertised_pact,
     async_context_is_person,
     brightness_to_pct,
     clean_mac,
@@ -20,7 +21,7 @@ from custom_components.govee_ble_local.helpers import (
     pct_to_brightness,
 )
 
-from .const import SECRET_HEX
+from .const import SECRET_HEX, pact_mfg
 
 
 @pytest.mark.parametrize(
@@ -162,3 +163,23 @@ async def test_a_context_without_a_user_is_never_looked_up(
     ) as get_user:
         assert not await async_context_is_person(hass, Context())
     get_user.assert_not_awaited()
+
+
+def test_advertised_pact_from_a_govee_name() -> None:
+    assert advertised_pact("GVH6009ABCD", pact_mfg(2, 3)) == (2, 3)
+
+
+def test_advertised_pact_under_another_name_comes_from_the_govee_block() -> None:
+    """Another device's name merged into the record: the Govee manufacturer data decides."""
+    assert advertised_pact(
+        "5134P0098101970F", {11816: bytes.fromhex("89304dad0000"), **pact_mfg(1, 1)}
+    ) == (1, 1)
+
+
+def test_advertised_pact_is_none_without_a_govee_block() -> None:
+    assert advertised_pact("5134P0098101970F", {11816: bytes.fromhex("89304dad0000")}) is None
+    assert advertised_pact(None, {}) is None
+
+
+def test_advertised_pact_is_none_for_a_govee_name_without_a_pact() -> None:
+    assert advertised_pact("GVH6009ABCD", {}) is None
