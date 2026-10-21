@@ -32,6 +32,12 @@ Requires `govee-ble-local` 1.6.0 or newer (any 1.x) **from PyPI** and Home Assis
   fixture is already off, a zone light's or zone switch's turn-off.
 
 ### Changed
+- **The README lists every supported model:** 98 with `govee-ble-local` 1.6.0, plus 6 you can
+  opt in to, each with its type, features and whether it is in the real-hardware test set. The
+  list is generated from the library (`scripts/gen_supported_models.py`), and a test fails when
+  it no longer matches. Before, the README showed only the test set and a plug family. The test
+  set's table now gives the H61A8 its colour temperature (added in 1.5.0) and lists only the
+  H5083 among the plugs, the one plug tested here.
 - **Requires `govee-ble-local` 1.6.0 or newer** (`>=1.6.0,<2`, was `>=1.5.0,<2`): the link release
   below uses `Device.release()`, which 1.6.0 adds. Home Assistant installs the new library itself
   on the next restart.
