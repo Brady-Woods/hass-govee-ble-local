@@ -50,7 +50,7 @@ With `govee-ble-local` 1.6.1, the integration supports **98 models**, plus **6**
 - **Supported:** set up like any other model; its support comes from the Govee app's own code, and it hasn't been tested on a real device here.
 - **Opt-in:** support is inferred, not traced in the app; setting one up asks you first.
 
-Colour-temperature ranges are each model's base range: some hardware versions of a model reach further.
+A colour-temperature range is the model's base range; where the range in use depends on the light's hardware or software version, or on the protocol it advertises, its row says so.
 
 <details>
 <summary>All 104 models</summary>
@@ -60,7 +60,7 @@ Colour-temperature ranges are each model's base range: some hardware versions of
 | B7080 | Light | on/off, brightness, RGB, colour temp 2000-9000 K, up to 4 segments | Supported |
 | B7081 | Light | on/off, brightness, RGB, colour temp 2000-9000 K, up to 8 segments | Supported |
 | B7082 | Light | on/off, brightness, RGB, colour temp 2000-9000 K, up to 6 segments | Supported |
-| H1401 | Light | on/off, brightness, RGB, colour temp 2700-6500 K, scenes | Supported |
+| H1401 | Light | on/off, brightness, RGB, colour temp 2700-6500 K (1000-10000 K from software 1.00.15), scenes | Supported |
 | H14B1 | Light | on/off, brightness, RGB, colour temp 2700-6500 K, scenes | Supported |
 | H1501 | Light | on/off, brightness, RGB, colour temp 2700-6500 K | Supported |
 | H1630 | Light | on/off, brightness, RGB, colour temp 1000-10000 K | Supported |
@@ -117,7 +117,7 @@ Colour-temperature ranges are each model's base range: some hardware versions of
 | H618A | Light | on/off, brightness, RGB, colour temp 2000-9000 K, up to 15 segments | Supported |
 | H619A | Light | on/off, brightness, RGB, colour temp 2000-9000 K, up to 10 segments | Supported |
 | H619Z | Light | on/off, brightness, RGB, colour temp 2000-9000 K, up to 12 segments | Supported |
-| H61A8 | Light | on/off, brightness, RGB, colour temp 2000-9000 K, scenes, up to 15 segments | ✅ Tested |
+| H61A8 | Light | on/off, brightness, RGB, colour temp 2000-9000 K (2700-6500 K from hardware 3.08.01), scenes, up to 15 segments | ✅ Tested |
 | H61B3 | Light | on/off, brightness, RGB, colour temp 2000-9000 K, up to 15 segments | Supported |
 | H61B6 | Light | on/off, brightness, RGB, colour temp 2000-9000 K, up to 15 segments | Supported |
 | H61B8 | Light | on/off, brightness, RGB, colour temp 2700-6500 K, up to 56 segments | Opt-in |
@@ -125,9 +125,9 @@ Colour-temperature ranges are each model's base range: some hardware versions of
 | H61BA | Light | on/off, brightness, RGB, colour temp 2000-9000 K, up to 15 segments | Supported |
 | H61BC | Light | on/off, brightness, RGB, colour temp 2000-9000 K, up to 15 segments | Supported |
 | H61BE | Light | on/off, brightness, RGB, colour temp 2000-9000 K, up to 20 segments | Supported |
-| H61F2 | Light | on/off, brightness, RGB, colour temp 2700-6500 K, up to 56 segments | Opt-in |
-| H61F5 | Light | on/off, brightness, RGB, colour temp 2700-6500 K, up to 56 segments | Opt-in |
-| H61F6 | Light | on/off, brightness, RGB, colour temp 2700-6500 K, up to 56 segments | Opt-in |
+| H61F2 | Light | on/off, brightness, RGB, colour temp 2700-6500 K (1000-10000 K on protocol 4,1), up to 56 segments | Opt-in |
+| H61F5 | Light | on/off, brightness, RGB, colour temp 2700-6500 K (1000-10000 K on protocol 4,1), up to 56 segments | Opt-in |
+| H61F6 | Light | on/off, brightness, RGB, colour temp 2700-6500 K (1000-10000 K on protocol 4,1), up to 56 segments | Opt-in |
 | H6640 | Light | on/off, brightness, RGB, colour temp 2000-9000 K, up to 14 segments | Supported |
 | H6641 | Light | on/off, brightness, RGB, colour temp 2000-9000 K, scenes, up to 16 segments | ✅ Tested |
 | H6690 | Light | on/off, brightness, RGB, colour temp 2000-9000 K, up to 14 segments | Supported |
@@ -150,7 +150,7 @@ Colour-temperature ranges are each model's base range: some hardware versions of
 | H801D | Light | on/off, brightness, RGB, colour temp 2700-6500 K | Supported |
 | H802A | Light | on/off, brightness, RGB, colour temp 2000-9000 K, up to 15 segments | Supported |
 | H8098 | Light | on/off, brightness, RGB, colour temp 2000-9000 K, up to 14 segments | Supported |
-| R1401 | Light | on/off, brightness, RGB, colour temp 2700-6500 K, scenes | Supported |
+| R1401 | Light | on/off, brightness, RGB, colour temp 2700-6500 K (1000-10000 K from software 1.00.15), scenes | Supported |
 | R14B1 | Light | on/off, brightness, RGB, colour temp 2700-6500 K | Supported |
 | R1501 | Light | on/off, brightness, RGB, colour temp 2700-6500 K | Supported |
 | R1630 | Light | on/off, brightness, RGB, colour temp 1000-10000 K | Supported |
@@ -212,9 +212,10 @@ of the light.
 ### The `govee-ble-local` library dependency
 The BLE protocol library is published to PyPI as `govee-ble-local`, and Home Assistant installs it
 automatically, so no manual `pip install` is needed. `manifest.json` (`requirements`) accepts any
-release in the current major series (`>=1.6.0,<2`): the library follows semantic versioning,
-so only a new major version can break the integration, and library fixes don't need an
-integration release. The library's own dependencies (e.g. `cryptography`) carry no upper bounds,
+release in the current major series (`>=1.6.1,<2`): the library follows semantic versioning,
+so only a new major version can break the integration. A new install gets the newest 1.x, but
+Home Assistant doesn't upgrade a library that still satisfies the range, so a library fix
+reaches an existing install with the integration release that raises the floor to it. The library's own dependencies (e.g. `cryptography`) carry no upper bounds,
 so they always follow Home Assistant's pinned versions and won't disturb your install. Requires Home Assistant 2026.10 or newer.
 
 ### Upgrading

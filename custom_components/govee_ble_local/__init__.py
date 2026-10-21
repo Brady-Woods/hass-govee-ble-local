@@ -200,11 +200,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: GoveeBleLocalConfigEntry
             allow_modelled=allow_modelled,
         )
     except GoveeBleNotSupported as err:
-        pact = (
-            advertised_pact(service_info.name, service_info.manufacturer_data)
-            if service_info
-            else None
-        )
+        pact = advertised_pact(service_info, sku)
         if pact is not None and is_supported_sku(sku, allow_modelled=allow_modelled):
             # The library serves the model, only not at the pact the device advertises now.
             # A later advert can carry another, so retry instead of giving up for good.

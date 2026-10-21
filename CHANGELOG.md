@@ -16,8 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for a light already added. Seen on the lab's H6008, whose record had a nearby device's name
   merged in through an ESPHome proxy; reloading the light's entry was the workaround.
 - The README's list of supported models is generated from `govee-ble-local` 1.6.1 (unchanged: 98,
-  plus 6 opt-in), and notes that its colour-temperature ranges are each model's base range (some
-  hardware versions reach further, such as the H61F2's 1000-10000 K).
+  plus 6 opt-in), and shows where a model's colour-temperature range depends on its hardware or
+  software version or its protocol (the H61A8 narrows to 2700-6500 K from hardware 3.08.01; the
+  H1401 widens to 1000-10000 K from software 1.00.15; the H61F2 does on protocol 4,1).
 
 ### Fixed
 - **A segment light follows its zone's power** (H60A6, H6047). With the fixture on but the

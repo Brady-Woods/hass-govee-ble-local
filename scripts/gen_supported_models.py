@@ -52,7 +52,22 @@ def _features(sku: str) -> tuple[str, str]:
     ]
     if "color_temp" in caps:
         if profile.min_kelvin and profile.max_kelvin:
-            features.append(f"colour temp {profile.min_kelvin}-{profile.max_kelvin} K")
+            overrides = [
+                *(
+                    f"{low}-{high} K from hardware {v}"
+                    for v, low, high in profile.kelvin_by_hardware
+                ),
+                *(
+                    f"{low}-{high} K from software {v}"
+                    for v, low, high in profile.kelvin_by_software
+                ),
+                *(
+                    f"{low}-{high} K on protocol {pact[0]},{pact[1]}"
+                    for pact, low, high in profile.kelvin_by_pact
+                ),
+            ]
+            note = f" ({'; '.join(overrides)})" if overrides else ""
+            features.append(f"colour temp {profile.min_kelvin}-{profile.max_kelvin} K{note}")
         else:
             features.append("colour temp")
     if "scenes" in caps:
@@ -91,8 +106,9 @@ def render() -> str:
         " code, and it hasn't been tested on a real device here.",
         "- **Opt-in:** support is inferred, not traced in the app; setting one up asks you first.",
         "",
-        "Colour-temperature ranges are each model's base range: some hardware versions of a model"
-        " reach further.",
+        "A colour-temperature range is the model's base range; where the range in use depends on"
+        " the light's hardware or software version, or on the protocol it advertises, its row"
+        " says so.",
         "",
         "<details>",
         f"<summary>All {len(every)} models</summary>",

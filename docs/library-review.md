@@ -6,13 +6,13 @@ library behaviour, or an integration change that should be written against the r
 The library is in the middle of a refactor, so none of these are fixed in the next release. Review
 them after that release is cut. The integration-side fixes wait for the refactored library API.
 
-> **Floor now 1.6.0 (integration 1.6.0).** The manifest requires `govee-ble-local>=1.6.0,<2` and
+> **Floor now 1.6.1 (integration 1.6.1).** The manifest requires `govee-ble-local>=1.6.1,<2` and
 > Home Assistant 2026.10.0. The integration's guards for older libraries are gone (the
 > `GoveeCloudAuthError` stand-in, the `segment_count` and `ADVERT_SUPPRESS_SECONDS` fallbacks,
 > `has_app_advert_parser`), removed with the compatibility cleanup that shipped in 1.6.0 (CHANGELOG
 > `[1.6.0]`). Where an item below says to guard newer API with `getattr` so the floor can
 > stay at 1.2.1, use the API directly instead, and raise the floor (CLAUDE.md rule 2) for anything
-> newer than 1.6.0. The item text still describes the 1.2.1 / `c823fc5` state it was written
+> newer than 1.6.1. The item text still describes the 1.2.1 / `c823fc5` state it was written
 > against.
 
 **Versions referenced**
