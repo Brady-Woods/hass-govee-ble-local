@@ -6,7 +6,6 @@ import time
 from typing import TYPE_CHECKING
 
 from bleak.exc import BleakError
-import govee_ble_local
 from govee_ble_local import Capability, GoveeBleError
 from govee_ble_local.identify import parse_manufacturer_data
 from homeassistant.core import Context, HomeAssistant, callback
@@ -36,27 +35,20 @@ _FIXTURE_LIGHT_CAPABILITIES = frozenset(
 )
 
 
-def advertised_pact(
-    service_info: BluetoothServiceInfoBleak | None, sku: str
-) -> tuple[int, int] | None:
-    """Return the ``(pact_type, pact_code)`` a set-up ``sku`` device's advertisement carries.
+def advertised_pact(service_info: BluetoothServiceInfoBleak | None) -> tuple[int, int] | None:
+    """Return the ``(pact_type, pact_code)`` a set-up device's advertisement carries, or None.
 
-    None when it carries none. The name plays no part: a device already set up may show
-    any name in Home Assistant's merged record (another device's advertisement merged in,
-    say), and its Govee manufacturer data decides, as the app's control screen reads a bound
-    device found by its stored address and as ``create_device`` reads it. (``identify``,
-    which keys on a Govee-style name as the app's add-device scan does, takes its pact from
-    the same parse, so it would add nothing here.)
+    The name plays no part: a device already set up may show any name in Home Assistant's
+    merged record (another device's advertisement merged in, say), and its Govee
+    manufacturer data decides, as the app's control screen reads a bound device found by its
+    stored address and as ``create_device`` reads it (``parse_manufacturer_data`` keeps its
+    signature and results through govee-ble-local 1.x). ``identify``, which keys on a
+    Govee-style name as the app's add-device scan does, takes its pact from the same parse.
+    The library's public ``bound_advertisement`` replaces this once the floor reaches the
+    release that ships it.
     """
     if service_info is None:
         return None
-    # govee-ble-local 1.7.0 and later: create_device's own read of the advertisement, public
-    # API. Before it, the same parse from the released 1.6.x's identify module (drop this
-    # fallback once the floor reaches the release with bound_advertisement).
-    if (bound := getattr(govee_ble_local, "bound_advertisement", None)) is not None:
-        found = bound(service_info.advertisement, sku)
-        pact: tuple[int, int] | None = found.pact if found is not None else None
-        return pact
     if (fields := parse_manufacturer_data(service_info.manufacturer_data)) is not None:
         _encrypted, _version, pact_type, pact_code = fields
         return pact_type, pact_code

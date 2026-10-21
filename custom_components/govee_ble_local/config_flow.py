@@ -214,9 +214,7 @@ class GoveeBleLocalConfigFlow(ConfigFlow, domain=DOMAIN):
 
     async def _finish(self, device: _PendingDevice) -> ConfigFlowResult:
         """Create the entry, or first collect the secret key if the device needs one."""
-        if (
-            pact := self._setup_pact(device.address, device.sku)
-        ) is not None and pact != device.pact:
+        if (pact := self._setup_pact(device.address)) is not None and pact != device.pact:
             # Setup routes by the latest connectable advert, whose pact can differ from the
             # flow's (which may have had none: any pact), so don't create an entry it would
             # refuse. Without one, setup waits for the device and the flow's pact stands.
@@ -228,9 +226,9 @@ class GoveeBleLocalConfigFlow(ConfigFlow, domain=DOMAIN):
             return await self.async_step_secret()
         return self._create_entry(device)
 
-    def _setup_pact(self, address: str, sku: str) -> tuple[int, int] | None:
+    def _setup_pact(self, address: str) -> tuple[int, int] | None:
         """Return the pact of the advert setup will route by (the latest connectable one)."""
-        return advertised_pact(async_last_service_info(self.hass, address, connectable=True), sku)
+        return advertised_pact(async_last_service_info(self.hass, address, connectable=True))
 
     def _create_entry(self, device: _PendingDevice, secret: str | None = None) -> ConfigFlowResult:
         """Create the entry for ``device``, with its secret key if it has one."""

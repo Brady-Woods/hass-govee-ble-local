@@ -7,7 +7,6 @@ from unittest.mock import AsyncMock, patch
 
 from bleak.exc import BleakError
 from govee_ble_local import GoveeBleConnectionError, GoveeBleError
-from govee_ble_local.identify import GoveeAdvertisement
 from homeassistant.core import Context, HomeAssistant
 import pytest
 from pytest_homeassistant_custom_component.common import MockUser
@@ -176,28 +175,16 @@ FOREIGN = {11816: bytes.fromhex("89304dad0000")}  # another device's block, merg
 
 
 def test_advertised_pact_from_a_govee_name() -> None:
-    assert advertised_pact(_info("GVH6009ABCD", pact_mfg(2, 3)), "H6009") == (2, 3)
+    assert advertised_pact(_info("GVH6009ABCD", pact_mfg(2, 3))) == (2, 3)
 
 
 def test_advertised_pact_under_another_name_comes_from_the_govee_block() -> None:
     """Another device's name merged into the record: the Govee manufacturer data decides."""
     info = _info("5134P0098101970F", {**FOREIGN, **pact_mfg(1, 1)})
-    assert advertised_pact(info, "H6008") == (1, 1)
+    assert advertised_pact(info) == (1, 1)
 
 
 def test_advertised_pact_is_none_without_a_govee_block_or_record() -> None:
-    assert advertised_pact(_info("5134P0098101970F", FOREIGN), "H6008") is None
-    assert advertised_pact(_info("GVH6009ABCD", {}), "H6009") is None  # a Govee name, no pact
-    assert advertised_pact(None, "H6009") is None
-
-
-def test_advertised_pact_prefers_the_librarys_bound_advertisement() -> None:
-    """From the library release that has it, its public bound_advertisement decides: the
-    same read create_device makes. A record it can't read gives no pact."""
-    info = _info("5134P0098101970F", {**FOREIGN, **pact_mfg(1, 1)})
-    found = GoveeAdvertisement("H6008", "5134P0098101970F", True, 3, 9, 9)
-    with patch("govee_ble_local.bound_advertisement", create=True, return_value=found) as bound:
-        assert advertised_pact(info, "H6008") == (9, 9)
-    bound.assert_called_once_with(info.advertisement, "H6008")
-    with patch("govee_ble_local.bound_advertisement", create=True, return_value=None):
-        assert advertised_pact(info, "H6008") is None
+    assert advertised_pact(_info("5134P0098101970F", FOREIGN)) is None
+    assert advertised_pact(_info("GVH6009ABCD", {})) is None  # a Govee name, no pact
+    assert advertised_pact(None) is None
