@@ -34,6 +34,6 @@
   "issue_tracker": "https://github.com/Brady-Woods/hass-govee-ble-local/issues",
   "loggers": ["bleak", "bleak_retry_connector", "govee_ble_local"],
   "quality_scale": "gold",
-  "requirements": ["govee-ble-local>=1.5.0,<2"],
-  "version": "1.5.1"
+  "requirements": ["govee-ble-local>=1.6.0,<2"],
+  "version": "1.6.1"
 }

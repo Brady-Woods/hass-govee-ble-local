@@ -786,7 +786,8 @@ async def test_scheduled_poll_waits_for_a_running_command_and_the_hold_off(
 
 
 def test_hold_off_ends_while_the_command_link_is_still_up() -> None:
-    """The held poll runs a few seconds before the library drops a command's link."""
+    """The held poll runs a few seconds before the library drops a command's link (its 30 s upper
+    bound; without the library's keepalive heartbeat, many models end it sooner)."""
     assert lib_const.ACTIVE_IDLE_DELAY - 10 <= HOLDOFF < lib_const.ACTIVE_IDLE_DELAY
 
 

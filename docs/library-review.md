@@ -6,13 +6,13 @@ library behaviour, or an integration change that should be written against the r
 The library is in the middle of a refactor, so none of these are fixed in the next release. Review
 them after that release is cut. The integration-side fixes wait for the refactored library API.
 
-> **Floor now 1.5.0 (integration 1.5.1).** The manifest requires `govee-ble-local>=1.5.0,<2` and
+> **Floor now 1.6.0 (integration 1.6.0).** The manifest requires `govee-ble-local>=1.6.0,<2` and
 > Home Assistant 2026.10.0. The integration's guards for older libraries are gone (the
 > `GoveeCloudAuthError` stand-in, the `segment_count` and `ADVERT_SUPPRESS_SECONDS` fallbacks,
-> `has_app_advert_parser`), removed with the 1.5.1 compatibility cleanup (CHANGELOG
-> `[Unreleased]`). Where an item below says to guard newer API with `getattr` so the floor can
+> `has_app_advert_parser`), removed with the compatibility cleanup that shipped in 1.6.0 (CHANGELOG
+> `[1.6.0]`). Where an item below says to guard newer API with `getattr` so the floor can
 > stay at 1.2.1, use the API directly instead, and raise the floor (CLAUDE.md rule 2) for anything
-> newer than 1.5.0. The item text still describes the 1.2.1 / `c823fc5` state it was written
+> newer than 1.6.0. The item text still describes the 1.2.1 / `c823fc5` state it was written
 > against.
 
 **Versions referenced**
@@ -75,7 +75,7 @@ for a library change. Item details further down still describe the 1.2.1 / `c823
 | 3.1 | not library-dependent | Only message text changed | Integration: typed report |
 | 3.2 | still open | Field names unchanged | Integration: typed accessors |
 | 3.3 | not library-dependent | Unchanged | Integration: stable `reason` code |
-| 4.1 | still open | Unchanged | Integration (floor): fixture-off gate plus power-on |
+| 4.1 | done in the integration | Segment lights show off with the fixture known off, power it on first, and send no black-out to an H60A6 / H6047 not known on (1.6.0) | None |
 | 4.2 | still open | No `Segment.kelvin`; per-bar Kelvin is still H6047-only | Integration (floor) stopgap; Library for `Segment.kelvin` |
 | 4.3 | still open | Unchanged | Integration (floor): remember the Kelvin across off |
 | 4.4 | still open | Unchanged | Library: fold whole-device writes into `state.segments` |
@@ -87,7 +87,7 @@ for a library change. Item details further down still describe the 1.2.1 / `c823
 | 5.2 | decided from the app | Zone power first when the zone isn't known to be on, the Govee app's order (release/device-list) | None |
 | 5.3 | still open | No batched zone/segment write | Library: batched API |
 | 6.1 | still open | Polls still hold the link 8 s; `idle_disconnect` works at both ends | Integration (floor): short `idle_disconnect` |
-| 6.2 | still open | No public non-terminal disconnect | Library: `Device.disconnect()` |
+| 6.2 | library API in 1.6.0 | `Device.release()` drops the link and keeps the `Device` usable; the integration uses it for command windows, not yet after a self-test | Integration: release after each self-test |
 | 6.3 | still open | `close()` still waits up to 45 s behind an in-flight operation | Library: cancel-aware close |
 | 6.4 | still open | `stop()` unchanged | Integration (floor): HA-stop listener |
 | 7.1 | still open | The builder raises `GoveeBleNotSupported` itself; no capability flag | Integration (floor): cached fallback; Library for a flag |
@@ -128,7 +128,7 @@ for a library change. Item details further down still describe the 1.2.1 / `c823
 | 5.2 | `zone-power-sent-after-colour` | Zone command batching & ordering | low (uncertain) | hardware check (H60A6, H6047) | still present |
 | 5.3 | `batched-sub-light-writes` | Zone command batching & ordering | unrated | library API addition | still absent |
 | 6.1 | `poll-semaphore-released-while-link-held` | Connection & slot usage | low | integration change (possible at the floor); re-check after refactor | still present |
-| 6.2 | `no-nonterminal-disconnect` | Connection & slot usage | unrated | library API addition | still absent |
+| 6.2 | `no-nonterminal-disconnect` | Connection & slot usage | unrated | library API addition | added in 1.6.0 (`Device.release()`) |
 | 6.3 | `close-waits-for-inflight-op` | Connection & slot usage | unrated | library change | still present |
 | 6.4 | `no-ha-stop-disconnect` | Connection & slot usage | unrated | library change (document the `Device.stop()` contract; 6.3); integration change | still present (no library change yet; integration has no stop listener) |
 | 7.1 | `h61a8-segment-brightness-always-fails` | Capability / feature flags | medium | library API addition; integration change | still present (left to the builder by design) |
@@ -649,7 +649,11 @@ types are written once.
   `is_on=False, segments=[Segment(rgb=RED)]` shows off; `turn_on` with the fixture off sends power.
 - **Verification:** confirmed by 1 verifier, who made the power-first step part of the fix rather than
   optional.
-- **Decision:** open
+- **Decision:** done in the integration (1.6.0). A segment light shows off while
+  `coordinator.data.is_on is False`, and `async_turn_on` sends `set_power(True)` first while the
+  fixture isn't known on. `_is_dark()` stays on `_attr_is_on`. On a zoned fixture (H60A6, H6047) that
+  isn't known on, `async_turn_off` sends nothing: library 1.5.0 models a `33 05` there as waking the
+  fixture (`Device._wake_power`), so "turn off all the lights" relit it.
 
 ### 4.2 `sublight-cct-mode-never-reconciles`
 
@@ -944,7 +948,9 @@ types are written once.
 - **Integration change and test:** call `await device.disconnect()` at the end of each self-test,
   after the restore, in `async_self_test_entry`. Test: `disconnect` is awaited after the restore.
 - **Verification:** review note, not verified.
-- **Decision:** open
+- **Decision:** the library API landed in 1.6.0 as `Device.release() -> bool` (drop the current
+  link, keep the `Device` usable; the next operation reconnects). The integration uses it for its
+  command windows (1.6.0); calling it after each self-test's restore is still open.
 
 ### 6.3 `close-waits-for-inflight-op`
 

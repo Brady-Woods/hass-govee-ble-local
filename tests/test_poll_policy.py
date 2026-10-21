@@ -24,12 +24,13 @@ from homeassistant.components.bluetooth.const import (
     CONNECTABLE_FALLBACK_MAXIMUM_STALE_ADVERTISEMENT_SECONDS,
 )
 from homeassistant.const import STATE_UNAVAILABLE, STATE_UNKNOWN
-from homeassistant.core import CoreState, HomeAssistant
+from homeassistant.core import Context, CoreState, HomeAssistant
 from homeassistant.helpers import entity_registry as er
 from homeassistant.util import dt as dt_util
 import pytest
 from pytest_homeassistant_custom_component.common import (
     MockConfigEntry,
+    MockUser,
     async_fire_time_changed,
     get_scheduled_timer_handles,
 )
@@ -44,13 +45,18 @@ from custom_components.govee_ble_local.const import (
     MAX_POLL_INTERVAL_SECONDS,
     ON_POLL_MAX_INTERVAL_SECONDS,
     POLL_CONNECT_TIMEOUT_SECONDS,
+    POLL_HOLDOFF_AFTER_COMMAND_SECONDS,
     POLL_INTERVAL_SECONDS,
     SLOW_POLL_MAX_STEPS,
     SLOW_POLL_SECONDS,
     UNAVAILABLE_AFTER_FAILURES,
     UNAVAILABLE_AFTER_UNHEARD_SECONDS,
 )
-from custom_components.govee_ble_local.coordinator import GoveeBleLocalCoordinator, PollPolicy
+from custom_components.govee_ble_local.coordinator import (
+    GoveeBleLocalCoordinator,
+    PollPolicy,
+    command_burst,
+)
 from custom_components.govee_ble_local.diagnostics import async_get_config_entry_diagnostics
 
 from .conftest import (
@@ -66,6 +72,7 @@ from .const import ADDRESS, TITLE, govee_mfg
 COORDINATOR = "custom_components.govee_ble_local.coordinator"
 BASE = POLL_INTERVAL_SECONDS
 DELAY = ADVERT_FLIP_POLL_DELAY_SECONDS
+HOLDOFF = POLL_HOLDOFF_AFTER_COMMAND_SECONDS
 FRESH = ADVERT_POWER_FRESH_SECONDS
 MAIN_LIGHT = "light.test_ceiling"
 PLUG = "switch.test_ceiling"
@@ -222,10 +229,12 @@ async def turned_on_outside_ha(air: Air) -> None:
     await air.wait(DELAY + SLACK)
 
 
-async def light_service(hass: HomeAssistant, service: str, **data: Any) -> None:
-    """Call a light service on the main light."""
+async def light_service(
+    hass: HomeAssistant, service: str, *, context: Context | None = None, **data: Any
+) -> None:
+    """Call a light service on the main light (with no user, as an automation does)."""
     await hass.services.async_call(
-        "light", service, {"entity_id": MAIN_LIGHT, **data}, blocking=True
+        "light", service, {"entity_id": MAIN_LIGHT, **data}, blocking=True, context=context
     )
 
 
@@ -391,6 +400,168 @@ async def test_a_newer_flip_replaces_the_pending_turn_on_poll(
     assert polls(mock_device) == before
     await air.wait(1)
     assert polls(mock_device) == before + 1
+
+
+async def test_turn_on_poll_waits_for_a_burst_of_commands_to_other_devices(
+    hass: HomeAssistant, air: Air, coordinator: GoveeBleLocalCoordinator, mock_device: Device
+) -> None:
+    """Commands to two other devices at once (a light group) hold every poll: the turn-on poll
+    due meanwhile runs once the burst is over, in place of the next scheduled poll."""
+    burst = command_burst(hass)
+    others = ("AA:BB:CC:DD:EE:0A", "AA:BB:CC:DD:EE:0B")
+    air.advertise(on=False)
+    before = polls(mock_device)
+    for address in others:
+        burst.async_note_command_started(address)
+    air.advertise(on=True)
+    await air.wait(DELAY)
+    assert polls(mock_device) == before  # due, and held
+    assert coordinator._poll_waiting
+    assert not turn_on_poll_pending(hass, coordinator)
+
+    await air.wait(5)
+    for address in others:
+        burst.async_note_command_finished(address)
+    await air.wait(HOLDOFF - SLACK)
+    assert polls(mock_device) == before
+    await air.wait(2 * SLACK)
+    assert polls(mock_device) == before + 1
+    await air.wait(BASE - 2 * SLACK)  # one poll; the next comes a base interval after it
+    assert polls(mock_device) == before + 1
+    await air.wait(2 * SLACK)
+    assert polls(mock_device) == before + 2
+
+
+async def test_turn_on_poll_waits_for_the_devices_own_hold_off(
+    hass: HomeAssistant, air: Air, coordinator: GoveeBleLocalCoordinator, mock_device: Device
+) -> None:
+    """A light turned on outside HA just after an HA command to it is polled once the
+    command's hold-off is over, like any background poll."""
+    air.advertise(on=True)
+    await air.wait(LAST_SEEN_RESOLUTION_SECONDS)
+    await light_service(hass, "turn_off")
+    air.advertise(on=False)
+    before = polls(mock_device)
+    # Turned on again outside HA once the library takes advertisements again.
+    await air.wait(lib_const.ADVERT_SUPPRESS_SECONDS + 1)
+    air.advertise(on=True)
+    assert turn_on_poll_pending(hass, coordinator)
+    await air.wait(DELAY)  # due 21 s after the command: held
+    assert polls(mock_device) == before
+    assert coordinator._poll_waiting
+    await air.wait(HOLDOFF - lib_const.ADVERT_SUPPRESS_SECONDS - 1 - DELAY - SLACK)
+    assert polls(mock_device) == before
+    await air.wait(2 * SLACK)
+    assert polls(mock_device) == before + 1
+
+
+async def test_turn_on_poll_waits_for_a_burst_that_starts_before_it_is_due(
+    hass: HomeAssistant, air: Air, coordinator: GoveeBleLocalCoordinator, mock_device: Device
+) -> None:
+    """Whether the turn-on poll waits is decided when it comes due, not at the turn-on."""
+    burst = command_burst(hass)
+    others = ("AA:BB:CC:DD:EE:0A", "AA:BB:CC:DD:EE:0B")
+    air.advertise(on=False)
+    before = polls(mock_device)
+    air.advertise(on=True)
+    await air.wait(2)
+    for address in others:  # a group command 2 s later
+        burst.async_note_command_started(address)
+    await air.wait(DELAY - 2)
+    assert polls(mock_device) == before
+    assert coordinator._poll_waiting
+    for address in others:
+        burst.async_note_command_finished(address)
+    await air.wait(HOLDOFF - SLACK)
+    assert polls(mock_device) == before
+    await air.wait(2 * SLACK)
+    assert polls(mock_device) == before + 1
+
+
+async def test_a_return_poll_held_by_a_burst_runs_although_the_light_came_back_off(
+    hass: HomeAssistant,
+    air: Air,
+    coordinator: GoveeBleLocalCoordinator,
+    mock_device: Device,
+    presence: SimpleNamespace,
+) -> None:
+    """The advertisement that brings a light back may show it off, which stops its background
+    polls in the same callback: the held return poll still runs once as the burst ends, and
+    starts no background polls."""
+    burst = command_burst(hass)
+    others = ("AA:BB:CC:DD:EE:0A", "AA:BB:CC:DD:EE:0B")
+    air.advertise(on=True)
+    presence.connectable = False
+    await coordinator.async_refresh()  # skipped: no connectable scanner sees it
+    for address in others:
+        burst.async_note_command_started(address)
+    presence.connectable = True
+    before = polls(mock_device)
+    air.advertise(on=False)  # back in reach, and off
+    assert coordinator.poll_policy is PollPolicy.OFF
+    assert polls(mock_device) == before
+    await air.wait(5)
+    for address in others:
+        burst.async_note_command_finished(address)
+    await air.wait(HOLDOFF - SLACK)
+    assert polls(mock_device) == before
+    await air.wait(2 * SLACK)
+    assert polls(mock_device) == before + 1
+    assert coordinator.update_interval is None
+    await air.wait(3 * BASE)
+    assert polls(mock_device) == before + 1
+
+
+async def test_turn_on_poll_due_while_a_poll_runs_is_that_poll(
+    hass: HomeAssistant, air: Air, coordinator: GoveeBleLocalCoordinator, mock_device: Device
+) -> None:
+    """A poll running as the turn-on poll comes due reads the device as it would: no second
+    poll queues behind it, as HA's own timer firing then wouldn't add one."""
+    air.advertise(on=False)
+    air.advertise(on=True)
+    before = polls(mock_device)
+    gate = asyncio.Event()
+    read = mock_device.update.side_effect  # type: ignore[attr-defined]
+
+    async def _held(**kwargs: Any) -> Any:
+        await gate.wait()
+        return await read(**kwargs)
+
+    mock_device.update.side_effect = _held  # type: ignore[attr-defined]
+    # Not a Home Assistant task: async_block_till_done would wait for the held poll.
+    refresh = asyncio.create_task(coordinator.async_refresh())
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert coordinator._poll_running
+    await air.wait(DELAY, settle=False)  # the turn-on poll comes due while it reads
+    assert not turn_on_poll_pending(hass, coordinator)
+    gate.set()
+    await refresh
+    await air.wait(BASE - 2 * SLACK)
+    assert polls(mock_device) == before + 1
+
+
+async def test_turn_on_poll_in_the_debouncers_cooldown_runs_when_due(
+    hass: HomeAssistant, air: Air, coordinator: GoveeBleLocalCoordinator, mock_device: Device
+) -> None:
+    """A turn-on poll coming due within 10 s of a requested refresh (update_entity) runs then:
+    HA's debouncer would run it at the end of its cooldown, unchecked, into a burst that
+    started meanwhile."""
+    burst = command_burst(hass)
+    others = ("AA:BB:CC:DD:EE:0A", "AA:BB:CC:DD:EE:0B")
+    air.advertise(on=False)
+    before = polls(mock_device)
+    air.advertise(on=True)
+    await coordinator.async_request_refresh()  # an update_entity: its cooldown starts
+    assert polls(mock_device) == before + 1
+    await air.wait(DELAY)
+    assert polls(mock_device) == before + 2  # the turn-on poll, on time
+    for address in others:
+        burst.async_note_command_started(address)
+    await air.wait(10)  # past the debouncer's cooldown, inside the burst
+    assert polls(mock_device) == before + 2
+    for address in others:
+        burst.async_note_command_finished(address)
 
 
 async def test_first_on_off_from_unknown_is_not_a_turn_on(
@@ -1360,9 +1531,11 @@ async def test_a_device_commanded_over_a_held_link_stays_available(
     *,
     mock_bluetooth: SimpleNamespace,
     presence: SimpleNamespace,
+    hass_admin_user: MockUser,
 ) -> None:
-    """A device doesn't advertise while HA holds its link, so commands under 30 s apart
-    outlast HA's history of it. Each command that lands shows it reachable, and its polls run
+    """A device doesn't advertise while HA holds its link, so a person's commands under 30 s
+    apart (a voice or automation command releases the link: test_link_release) outlast HA's
+    history of it. Each command that lands shows it reachable, and its polls run
     over the held link instead of being skipped as absent: it stays available for 40 minutes
     and no command is skipped (HA skips an unavailable entity's commands). Once its power is
     cut, it goes unavailable within UNAVAILABLE_AFTER_UNHEARD_SECONDS (plus a presence tick)
@@ -1377,7 +1550,9 @@ async def test_a_device_commanded_over_a_held_link_stays_available(
     dropped = False
     for step in range(120):  # a command every 20 s for 40 minutes
         sent = len(connection(mock_device).sent)
-        await light_service(hass, "turn_on", brightness=10 + step % 80)
+        await light_service(
+            hass, "turn_on", context=Context(user_id=hass_admin_user.id), brightness=10 + step % 80
+        )
         assert len(connection(mock_device).sent) > sent, step  # it went out
         assert hass.states.get(MAIN_LIGHT).state == "on", step
         await air.wait(20, heard=False)
