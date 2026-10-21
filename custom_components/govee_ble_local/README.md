@@ -163,7 +163,9 @@ profile's capabilities:
   Alexa/Google, VoIP and add-ons that reach HA through the Supervisor (the
   Node-RED and AppDaemon add-ons as set up by default: a system user) release
   it. A release waits for the device's operations queued before it, and a
-  command started after it queues behind it and reconnects. While a poll is
+  command started after it queues behind it and reconnects, unless it reaches
+  the link first: the library then keeps the link and drops nothing. While a
+  poll is
   reading the device, the release is put off until the poll ends (released
   between the poll's reads, the rest of the poll would connect again); a
   command that starts meanwhile drops the put-off release, and its own window
@@ -274,7 +276,8 @@ verified on hardware.
   switches the fixture on first. On an H60A6 or H6047 that isn't known on, a
   segment's turn_off sends nothing, because a colour frame there switches the
   fixture on: the segment comes back in its old colour with the fixture. On
-  other models it is blacked out and stays dark.
+  other models it is blacked out; whether that colour frame wakes a fixture that
+  is off (an H61A8 or H6641, say) hasn't been checked on the devices.
 - A device can wedge its BLE stack so only a mains power-cycle recovers it;
   that looks like an integration fault but isn't.
 

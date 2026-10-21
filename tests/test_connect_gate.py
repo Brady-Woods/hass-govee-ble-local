@@ -49,6 +49,7 @@ from custom_components.govee_ble_local.connect_gate import (
     async_connect_slot,
     async_link_up,
     async_note_deferred_off,
+    async_note_releasing,
     async_release_waiters,
 )
 from custom_components.govee_ble_local.const import (
@@ -1979,6 +1980,65 @@ async def test_polls_go_through_the_gate_behind_commands(
     device.update.assert_awaited_once()  # type: ignore[attr-defined]
     await holder.finish()
     await command.finish()
+
+
+async def test_a_link_being_released_counts_as_down(
+    hass: HomeAssistant, radios: SimpleNamespace
+) -> None:
+    """While the integration releases a device's link, the radio still lists it, but it's going.
+
+    A call to the device connects again (judged, with a ticket), so another device's connect
+    through the same proxy waits for it, as without a link: two pending connects would break
+    the proxy's one-at-a-time limit. Its link isn't up either, so a turn-off of it already off
+    still waits its turn (``async_link_up``). Once the release ends, the gate judges again.
+    """
+    radios.athom.hear(NIGHTSTAND, -70)
+    radios.athom.hear(BULB, -70)
+    radios.athom.take(NIGHTSTAND)  # the old link, listed while it's torn down
+    end = async_note_releasing(hass, NIGHTSTAND)
+    assert not async_link_up(hass, NIGHTSTAND)
+
+    again = Call(hass, NIGHTSTAND)
+    await tick(hass)
+    assert again.outcome == "admitted"  # a new connect, not the old link
+    other = Call(hass, BULB)
+    await tick(hass)
+    assert not other.admitted  # behind the device's connect on the same proxy
+
+    end()
+    end()  # twice is harmless
+    assert async_link_up(hass, NIGHTSTAND)  # listed, and no longer being released
+    await tick(hass)
+    assert other.admitted  # the device's ticket now shows its link up
+    await again.finish()
+    await other.finish()
+
+
+async def test_overlapping_releases_of_a_link_end_with_the_last(
+    hass: HomeAssistant, radios: SimpleNamespace
+) -> None:
+    """Two releases of one device's link (a window's, then a put-off one): it counts as being
+    released until both have ended."""
+    radios.athom.hear(NIGHTSTAND, -70)
+    radios.athom.take(NIGHTSTAND)
+    first, second = async_note_releasing(hass, NIGHTSTAND), async_note_releasing(hass, NIGHTSTAND)
+    first()
+    assert not async_link_up(hass, NIGHTSTAND)
+    second()
+    assert async_link_up(hass, NIGHTSTAND)
+
+
+async def test_a_listed_link_not_being_released_is_used(
+    hass: HomeAssistant, radios: SimpleNamespace
+) -> None:
+    """The same listed link with no release running: a call to the device uses it (linked)."""
+    radios.athom.hear(NIGHTSTAND, -70)
+    radios.athom.take(NIGHTSTAND)
+    assert async_link_up(hass, NIGHTSTAND)
+    call = Call(hass, NIGHTSTAND)
+    await tick(hass)
+    assert call.outcome == "linked"
+    await call.finish()
 
 
 async def test_the_gate_is_one_per_home_assistant(hass: HomeAssistant) -> None:

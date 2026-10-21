@@ -12,24 +12,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Requires `govee-ble-local` 1.6.0 or newer (any 1.x) **from PyPI** and Home Assistant 2026.10+.
 
 ### Added
-- **Lights already off go last in a burst:** when commands go to several devices at once ("turn
-  off all the lights", an area, a light group), turning off a light or smart plug that is already
-  off waits until the other devices' commands are done, or 10 s at most, and then goes out. The
-  devices that actually change get the scarce Bluetooth connection slots first. In real nightly
-  "all off" bursts about half the lights were already off, and the last light to go out waited
-  for the slot of one of them. The turn-off is still sent, so a light wrongly believed off still
-  goes off. Only the device's own report counts: an advertised on/off, or a read-back or
-  acknowledged turn-off, from the last 3 minutes. An unknown, assumed or older state goes out at
-  once, and so does a command to a single device. Lights already off don't wait for each other:
-  with every light already off, all go out at once, and so does the turn-off of a device whose
-  Bluetooth link is already up (waiting would save no connection slot). Another call to the same
-  light while its turn-off waits (a motion automation turning it back on, say) sends the turn-off
-  at once, so the newer call isn't held up behind it; for a zone's turn-off, a call to any of the
-  device's lights does. A waiting turn-off counts as one of the commands to
-  several devices (every device's polls wait for it), and at the connect gate it goes after the
-  other commands. A turn-off still waiting when Home Assistant stops or the device's entry unloads
-  is dropped. This covers the whole-fixture light, the plug's power switch and, while the whole
-  fixture is already off, a zone light's or zone switch's turn-off.
+- **Lights already off go last in a burst:** when commands go to several devices at once ("turn off
+  all the lights", an area, a light group), turning off a light or smart plug that is already off
+  waits until the other devices' commands are done, or 10 s at most, and then goes out. The devices
+  that actually change get the scarce Bluetooth connection slots first. In real nightly "all off"
+  bursts about half the lights were already off, and the last light to go out waited for the slot of
+  one of them. The turn-off is still sent, so a light wrongly believed off still goes off. Only the
+  device's own report counts: an advertised on/off, an acknowledged turn-off, or a poll once one of
+  the device's reads has answered since setup, from the last 3 minutes (with `govee-ble-local` 1.6.0
+  a later poll whose reads went unanswered also counts, as the library doesn't say; that delays such
+  a turn-off by 10 s at most). An unknown, assumed or older state goes out at once, and so does a
+  command to a single device. Lights already off don't wait for each other: with every light already
+  off, all go out at once, and so does the turn-off of a device whose Bluetooth link is already up
+  (waiting would save no connection slot). Another call to the same light while its turn-off waits
+  (a motion automation turning it back on, say) sends the turn-off at once, so the newer call isn't
+  held up behind it; for a zone's turn-off, a call to any of the device's lights does. A waiting
+  turn-off counts as one of the commands to several devices (every device's polls wait for it), and
+  at the connect gate it goes after the other commands. A turn-off still waiting when Home Assistant
+  stops or the device's entry unloads is dropped. This covers the whole-fixture light, the plug's
+  power switch and, while the whole fixture is already off, a zone light's or zone switch's
+  turn-off.
 
 ### Changed
 - **The README lists every supported model:** 98 with `govee-ble-local` 1.6.0, plus 6 you can
@@ -43,25 +45,26 @@ Requires `govee-ble-local` 1.6.0 or newer (any 1.x) **from PyPI** and Home Assis
   on the next restart.
 - **Only a person's command keeps the Bluetooth link open.** After a command the library keeps the
   light's Bluetooth link open for 30 s, so a second tap or a slider drag doesn't have to reconnect
-  (from `govee-ble-local` 1.6.0 its heartbeat also stops the light ending the link sooner). That
-  now happens only for a command from a person using Home Assistant: the dashboard, a more-info
-  dialog, the companion app. Half a second after a light's last command, the integration releases
-  its link instead when no command in that time came from a person (a voice satellite, an
-  automation, HomeKit, Alexa or Google Assistant through Home Assistant Cloud, a VoIP phone), or
-  when another device was commanded at about the same time ("turn off all the lights", an area, a
-  light group, a script's steps, from the dashboard too). The light's connection slot then frees
-  for the others: an ESPHome proxy has three, and held links made the last lights of "turn off all
-  the lights" wait 10-30 s for one. A light and its zone lights in one call still share one link.
-  The cost is a reconnect for a command that follows a released one (about 1-2 s, more through a
-  busy proxy). Typed or spoken Assist in the app, a client using your own long-lived token (a
-  standalone Node-RED, say) and Alexa or Google Assistant linked without Home Assistant Cloud act
-  as a logged-in user, so they keep the link as the dashboard does. Add-ons that reach Home
-  Assistant through the Supervisor, such as the Node-RED and AppDaemon add-ons as set up by
-  default, act as its system user, so their commands release the link as an automation's do. A
-  release that falls while a poll is reading the device waits for the poll to end, so the poll's
-  remaining reads don't have to connect again. Once a link is released, polls no longer count on
-  it: a light that has stopped advertising is skipped as absent and goes unavailable, as after an
-  idle disconnect, instead of spending a connect on it. Turn on
+  (from `govee-ble-local` 1.6.0 its heartbeat also stops the light ending the link sooner). That now
+  happens only for a command from a person using Home Assistant: the dashboard, a more-info dialog,
+  the companion app. Half a second after a light's last command, the integration releases its link
+  instead when no command in that time came from a person (a voice satellite, an automation,
+  HomeKit, Alexa or Google Assistant through Home Assistant Cloud, a VoIP phone), or when another
+  device was commanded at about the same time ("turn off all the lights", an area, a light group, a
+  script's steps, from the dashboard too). The light's connection slot then frees for the others: an
+  ESPHome proxy has three, and held links made the last lights of "turn off all the lights" wait
+  10-30 s for one. A light and its zone lights in one call still share one link. The cost is a
+  reconnect for a command that follows a released one (about 1-2 s, more through a busy proxy).
+  Typed or spoken Assist in the app, a client using your own long-lived token (a standalone
+  Node-RED, say) and Alexa or Google Assistant linked without Home Assistant Cloud act as a
+  logged-in user, so they keep the link as the dashboard does. Add-ons that reach Home Assistant
+  through the Supervisor, such as the Node-RED and AppDaemon add-ons as set up by default, act as
+  its system user, so their commands release the link as an automation's do. A release that falls
+  while a poll is reading the device waits for the poll to end, so the poll's remaining reads don't
+  have to connect again. While a link is being released, the connect gate (below) counts it as down,
+  so a new command to that light connects through the queue like any other. Once a link is released,
+  polls no longer count on it: a light that has stopped advertising is skipped as absent and goes
+  unavailable, as after an idle disconnect, instead of spending a connect on it. Turn on
   `custom_components.govee_ble_local.coordinator` debug logging for a line per release and its
   reason.
 - **Mass commands no longer overbook a Bluetooth proxy.** "Turn off all the lights" started every

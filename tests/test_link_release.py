@@ -13,13 +13,14 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+import contextlib
 from datetime import timedelta
 import logging
 from typing import Any
 from unittest.mock import patch
 
 from bleak.exc import BleakError
-from govee_ble_local import Device
+from govee_ble_local import Device, GoveeBleConnectionError
 from homeassistant.auth.const import GROUP_ID_ADMIN
 from homeassistant.core import Context, HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
@@ -32,6 +33,7 @@ from pytest_homeassistant_custom_component.common import (
     async_fire_time_changed_exact,
 )
 
+from custom_components.govee_ble_local import connect_gate
 from custom_components.govee_ble_local.const import CONF_SKU, DOMAIN
 from custom_components.govee_ble_local.coordinator import (
     CommandBurst,
@@ -409,13 +411,43 @@ async def test_a_link_the_library_kept_still_counts_for_a_poll(
     assert coordinator._async_link_held()
 
 
-def hold_poll(device: Device) -> tuple[asyncio.Event, asyncio.Event]:
-    """Make the device's poll read until the second event is set; the first is set as it reads."""
+async def test_the_gate_counts_the_link_down_while_it_is_released(
+    freezer: Any, hass: HomeAssistant, device: Device
+) -> None:
+    """From the release's start to its end the connect gate counts the link as being released:
+    a radio still lists the old link while it's torn down (connect_gate.async_note_releasing)."""
+    gate = connect_gate._gate(hass)
+    teardown = asyncio.Event()
+
+    async def _slow_release() -> bool:
+        assert gate._releasing[ADDRESS] == 1
+        await teardown.wait()
+        return True
+
+    device.release.side_effect = _slow_release  # type: ignore[attr-defined]
+    await turn_on(hass, MAIN, Context())
+    await run(hass, freezer, PAST)
+    assert releases(device) == 1
+    assert gate._releasing[ADDRESS] == 1
+    teardown.set()
+    await hass.async_block_till_done()
+    assert gate._releasing[ADDRESS] == 0
+
+
+def hold_poll(
+    device: Device, *, error: Exception | None = None
+) -> tuple[asyncio.Event, asyncio.Event]:
+    """Make the device's poll read until the second event is set; the first is set as it reads.
+
+    ``error``: the poll then fails with it.
+    """
     reading, finish = asyncio.Event(), asyncio.Event()
 
     async def _held(**_kwargs: Any) -> Any:
         reading.set()
         await finish.wait()
+        if error is not None:
+            raise error
         device.state.optimistic = False
         return device.state
 
@@ -475,6 +507,51 @@ async def test_a_persons_command_during_the_poll_keeps_the_link(
     assert releases(device) == 0
     assert "not releasing the link after the poll: a new command's window decides" in caplog.text
     assert "the poll ended: releasing the link" not in caplog.text
+
+
+async def test_a_release_put_off_by_a_failing_poll_still_happens(
+    freezer: Any, hass: HomeAssistant, entry: MockConfigEntry, device: Device
+) -> None:
+    """A poll that fails still ends its reading: the release it put off runs, and the next
+    window isn't put off too."""
+    coordinator = coordinator_of(entry)
+    reading, finish = hold_poll(device, error=GoveeBleConnectionError("link lost"))
+    poll = asyncio.create_task(coordinator.async_refresh())
+    await reading.wait()
+    await turn_on(hass, MAIN, Context())
+    await run(hass, freezer, PAST)
+    assert releases(device) == 0  # put off
+
+    finish.set()
+    await poll
+    await hass.async_block_till_done()
+    assert not coordinator.last_update_success
+    assert not coordinator._poll_reading
+    assert releases(device) == 1
+
+    await turn_on(hass, MAIN, Context())  # no poll reads now: released after the settle
+    await run(hass, freezer, PAST)
+    assert releases(device) == 2
+
+
+async def test_a_release_put_off_by_a_cancelled_poll_still_happens(
+    freezer: Any, hass: HomeAssistant, entry: MockConfigEntry, device: Device
+) -> None:
+    """A poll cancelled mid-read (its refresh is cancelled) ends its reading the same way."""
+    coordinator = coordinator_of(entry)
+    reading, _finish = hold_poll(device)
+    poll = asyncio.create_task(coordinator.async_refresh())
+    await reading.wait()
+    await turn_on(hass, MAIN, Context())
+    await run(hass, freezer, PAST)
+    assert releases(device) == 0
+
+    poll.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await poll
+    await hass.async_block_till_done()
+    assert not coordinator._poll_reading
+    assert releases(device) == 1
 
 
 async def test_a_release_that_raises_is_logged_not_raised(

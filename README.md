@@ -181,7 +181,12 @@ entry, and deleting the entry withdraws it.
 - Mass commands ("turn off all the lights") are queued per Bluetooth radio, so a proxy isn't
   handed more connects than it reports slots for, a device whose good path is only busy waits for
   it instead of going down a hopeless one, and lights already off go last; a call waits at most
-  12 s, then goes ahead as it would without the queue
+  12 s in the queue, then goes ahead as it would without it (a turn-off of a light already off
+  first waits up to 10 s for the other lights, so about 22 s in all)
+- A light's Bluetooth link stays open for 30 s after a command only when a person sent it (the
+  dashboard, the app), for a quick follow-up; a voice assistant's, an automation's or a
+  multi-device command releases it half a second after it lands, freeing the connection slot, and
+  the next command reconnects (about 1-2 s)
 - Diagnostics: signal strength, connectivity (advertisement presence), last-seen / last-connected
   timestamps, poll interval, connection-failure count — plus a **self-test** button and a
   `capture_session` service that exercises the device and returns a captured BLE session

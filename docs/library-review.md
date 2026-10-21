@@ -87,7 +87,7 @@ for a library change. Item details further down still describe the 1.2.1 / `c823
 | 5.2 | decided from the app | Zone power first when the zone isn't known to be on, the Govee app's order (release/device-list) | None |
 | 5.3 | still open | No batched zone/segment write | Library: batched API |
 | 6.1 | still open | Polls still hold the link 8 s; `idle_disconnect` works at both ends | Integration (floor): short `idle_disconnect` |
-| 6.2 | still open | No public non-terminal disconnect | Library: `Device.disconnect()` |
+| 6.2 | library API in 1.6.0 | `Device.release()` drops the link and keeps the `Device` usable; the integration uses it for command windows, not yet after a self-test | Integration: release after each self-test |
 | 6.3 | still open | `close()` still waits up to 45 s behind an in-flight operation | Library: cancel-aware close |
 | 6.4 | still open | `stop()` unchanged | Integration (floor): HA-stop listener |
 | 7.1 | still open | The builder raises `GoveeBleNotSupported` itself; no capability flag | Integration (floor): cached fallback; Library for a flag |
@@ -128,7 +128,7 @@ for a library change. Item details further down still describe the 1.2.1 / `c823
 | 5.2 | `zone-power-sent-after-colour` | Zone command batching & ordering | low (uncertain) | hardware check (H60A6, H6047) | still present |
 | 5.3 | `batched-sub-light-writes` | Zone command batching & ordering | unrated | library API addition | still absent |
 | 6.1 | `poll-semaphore-released-while-link-held` | Connection & slot usage | low | integration change (possible at the floor); re-check after refactor | still present |
-| 6.2 | `no-nonterminal-disconnect` | Connection & slot usage | unrated | library API addition | still absent |
+| 6.2 | `no-nonterminal-disconnect` | Connection & slot usage | unrated | library API addition | added in 1.6.0 (`Device.release()`) |
 | 6.3 | `close-waits-for-inflight-op` | Connection & slot usage | unrated | library change | still present |
 | 6.4 | `no-ha-stop-disconnect` | Connection & slot usage | unrated | library change (document the `Device.stop()` contract; 6.3); integration change | still present (no library change yet; integration has no stop listener) |
 | 7.1 | `h61a8-segment-brightness-always-fails` | Capability / feature flags | medium | library API addition; integration change | still present (left to the builder by design) |
@@ -948,7 +948,9 @@ types are written once.
 - **Integration change and test:** call `await device.disconnect()` at the end of each self-test,
   after the restore, in `async_self_test_entry`. Test: `disconnect` is awaited after the restore.
 - **Verification:** review note, not verified.
-- **Decision:** open
+- **Decision:** the library API landed in 1.6.0 as `Device.release() -> bool` (drop the current
+  link, keep the `Device` usable; the next operation reconnects). The integration uses it for its
+  command windows (1.6.0); calling it after each self-test's restore is still open.
 
 ### 6.3 `close-waits-for-inflight-op`
 

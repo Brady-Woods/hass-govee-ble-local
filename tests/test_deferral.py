@@ -32,7 +32,7 @@ from pytest_homeassistant_custom_component.common import (
     async_fire_time_changed,
 )
 
-from custom_components.govee_ble_local import deferral
+from custom_components.govee_ble_local import connect_gate, deferral
 from custom_components.govee_ble_local.connect_gate import _GATE
 from custom_components.govee_ble_local.const import (
     ADVERT_POWER_FRESH_SECONDS,
@@ -318,6 +318,45 @@ async def test_a_failed_scanner_read_doesnt_fail_the_deferred_off(
     assert lit.sent
     assert off.sent
     assert "couldn't read the Bluetooth scanners" in caplog.text
+
+
+@pytest.mark.parametrize("target", ["device", "zone"])
+async def test_a_deferred_off_goes_to_the_gate_last(
+    hass: HomeAssistant,
+    add_device: Callable[..., Any],
+    tracker: CommandTracker,
+    clock: Clock,
+    target: str,
+) -> None:
+    """Once its wait ends, a deferred whole-device or zone turn-off is served last at the
+    connect gate (after the other commands, still before polls), not as a plain command."""
+    rig = await add_device(is_on=False, sku="H60A6")
+    entity_id = rig.entity_id
+    if target == "zone":
+        entity_id = next(
+            entry.entity_id
+            for entry in er.async_entries_for_config_entry(er.async_get(hass), rig.entry.entry_id)
+            if entry.unique_id.startswith(f"{rig.device.address}_zone_") and entry.domain == "light"
+        )
+    seen: list[tuple[str, bool]] = []
+    real = connect_gate.async_connect_slot
+
+    def _spy(hass: HomeAssistant, address: str, *, last: bool = False, **kwargs: Any) -> Any:
+        seen.append((address, last))
+        return real(hass, address, last=last, **kwargs)
+
+    tracker.start(ELSEWHERE)  # another device's command keeps running: the wait runs to its cap
+    with patch(f"{PACKAGE}.entity.async_connect_slot", _spy):
+        call = asyncio.create_task(
+            hass.services.async_call("light", "turn_off", {"entity_id": entity_id}, blocking=True)
+        )
+        await settle()
+        assert rig.sent == []  # waiting
+        await clock.wait(CAP)
+        await call
+    tracker.finish(ELSEWHERE)
+    assert rig.sent
+    assert seen == [(rig.device.address, True)]
 
 
 def commanding(tracker: CommandTracker, *rigs: Rig) -> bool:
@@ -756,6 +795,8 @@ def _unknown(rig: Rig, clock: Clock) -> None:
 
 
 def _optimistic(rig: Rig, clock: Clock) -> None:
+    # No read has answered since setup: the library keeps the state optimistic until one does
+    # (and govee-ble-local 1.6.0 never sets it back), whatever its polls returned meanwhile.
     rig.device.state.optimistic = True
 
 
@@ -772,7 +813,7 @@ async def test_an_off_the_device_didnt_confirm_is_never_deferred(
     clock: Clock,
     make_unsure: Callable[[Rig, Clock], None],
 ) -> None:
-    """Unknown, optimistic or stale state: the turn-off goes out at once, burst or not."""
+    """Unknown, never answered or stale state: the turn-off goes out at once, burst or not."""
     off = await add_device(is_on=False)
     make_unsure(off, clock)
     tracker.start(ELSEWHERE)
@@ -1292,6 +1333,8 @@ async def test_a_read_back_confirms_off_for_a_while(
 
     await rig.coordinator.async_refresh()  # read back again: still off
     assert rig.coordinator.power_confirmed_off
+    # The guard on its own (the library never sets optimistic again once a read answered):
+    # an optimistic state's polls don't count.
     rig.device.state.optimistic = True
     assert not rig.coordinator.power_confirmed_off
 
@@ -1363,6 +1406,8 @@ async def test_the_newest_advertisement_decides(
     advertise(presence, read_at - 1, govee_mfg(on=True))
     assert rig.coordinator.power_confirmed_off  # the read-back is newer
 
+    # The guard on its own (the library never sets optimistic again once a read answered):
+    # with the poll not counting, the advertisement still does.
     rig.device.state.optimistic = True
     advertise(presence, clock.bluetooth.now, govee_mfg(on=False))
     assert rig.coordinator.power_confirmed_off  # the device's own word

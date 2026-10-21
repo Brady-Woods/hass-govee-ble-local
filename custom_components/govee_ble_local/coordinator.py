@@ -62,7 +62,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from homeassistant.util import dt as dt_util
 from homeassistant.util.hass_dict import HassKey
 
-from .connect_gate import Outcome, async_connect_slot
+from .connect_gate import Outcome, async_connect_slot, async_note_releasing
 from .const import (
     ADVERT_FLIP_POLL_DELAY_SECONDS,
     ADVERT_POWER_FRESH_SECONDS,
@@ -957,7 +957,9 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         link is released now (``Device.release``), and the connection slot it
         holds with it. A command after that connects again. The release waits
         for any operation queued before it, and isn't cancelled by a command
-        starting meanwhile: that one queues behind it and reconnects. While a
+        starting meanwhile: that one queues behind it and reconnects, unless it
+        reaches the link first, when the library keeps the link
+        (``Device.release`` returns False and drops nothing). While a
         poll is reading the device, the release is put off until the poll ends
         (``_async_update_data``): released between its reads, the rest of the
         poll would connect again. A command starting before then drops the
@@ -982,11 +984,21 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
             self.name,
             "commands to other devices too" if burst else "no person's command",
         )
+        self._async_start_release()
+
+    @callback
+    def _async_start_release(self) -> None:
+        """Start releasing the device's link (``_async_release_link``).
+
+        The connect gate counts the link as down from now until the release
+        ends: a radio keeps listing it while it's torn down.
+        """
+        end = async_note_releasing(self.hass, self._address)
         self.config_entry.async_create_background_task(
-            self.hass, self._async_release_link(), name=f"{self.name}_release", eager_start=True
+            self.hass, self._async_release_link(end), name=f"{self.name}_release", eager_start=True
         )
 
-    async def _async_release_link(self) -> None:
+    async def _async_release_link(self, end: CALLBACK_TYPE) -> None:
         """Release the device's link; the library logs it (a guard only: it never raises).
 
         Once it dropped the link, a poll no longer counts on it
@@ -996,12 +1008,15 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         on it) still counts.
         """
         try:
-            dropped = await self._device.release()
-        except BLE_ERRORS as err:
-            _LOGGER.debug("%s: releasing the link failed: %s", self.name, err)
-            return
-        if dropped:
-            self._command_landed_at = None
+            try:
+                dropped = await self._device.release()
+            except BLE_ERRORS as err:
+                _LOGGER.debug("%s: releasing the link failed: %s", self.name, err)
+                return
+            if dropped:
+                self._command_landed_at = None
+        finally:
+            end()
 
     @callback
     def _async_cancel_window_end(self) -> None:
@@ -1271,8 +1286,8 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         a burst go first (``deferral``), so only what the device said counts,
         never what HA assumed. Its newest word decides, and must be younger than
         ADVERT_POWER_FRESH_SECONDS: its advertised on/off byte (decoded as the
-        library decodes it, with the profile's mask); a read-back, once the
-        library's state isn't optimistic (the on/off it left); or a command that
+        library decodes it, with the profile's mask); a poll, once the library's
+        state isn't optimistic (the on/off it left); or a command that
         landed: a whole-device turn-off's ack says off, any other command (a
         segment write can wake a fixture the library still holds off) leaves the
         power unknown, except a zone's turn-off, which says nothing about it. On
@@ -1280,12 +1295,17 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         for a while after it. The library's on/off must say off as well, so an
         unknown on/off never counts.
 
+        A poll counts once any read since setup has answered: govee-ble-local
+        1.6.0 clears ``optimistic`` on the first answered read and never sets it
+        again, and doesn't say whether a later poll's reads answered, so a poll
+        whose reads all went unanswered (the library returns the state it had)
+        counts too. Before the first answered read, no poll counts.
+
         Not words from the device, so they don't count: a command that failed
         (one that may have switched the device on leaves the off standing: the
-        library applies nothing), a poll whose reads all went unanswered (the
-        library returns the state it had), and an old byte HA keeps in a newer
-        merged advertisement (``_async_advert_power_fresh``). Each only delays
-        that device's turn-off, never drops it.
+        library applies nothing), and an old byte HA keeps in a newer merged
+        advertisement (``_async_advert_power_fresh``). A wrong word only delays
+        that device's turn-off (DEFER_OFF_MAX_SECONDS at most), never drops it.
         """
         state = self._device.state
         if state.is_on is not False:
@@ -1464,9 +1484,7 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         if self._commands_running or self._unsub_window_end is not None or self._shutting_down:
             return
         _LOGGER.debug("%s: the poll ended: releasing the link", self.name)
-        self.config_entry.async_create_background_task(
-            self.hass, self._async_release_link(), name=f"{self.name}_release", eager_start=True
-        )
+        self._async_start_release()
 
     async def _async_poll(self) -> DeviceState:
         """Read the device (``_async_update_data``), counting the outcome for the backoff."""

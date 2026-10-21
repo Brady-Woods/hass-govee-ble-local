@@ -84,6 +84,7 @@ isn't gated.
 from __future__ import annotations
 
 import asyncio
+from collections import Counter
 from collections.abc import AsyncIterator
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
@@ -248,6 +249,10 @@ class ConnectGate:
         # judges them stuck (a proxy that paused scanning for the connect hasn't
         # heard anything yet; the release check, if due, still runs after).
         self._released: dict[str, float] = {}
+        # Devices whose link the integration is releasing (``async_note_releasing``):
+        # a radio still lists the old link while it's torn down, so it counts as
+        # down, not as a link a call can use.
+        self._releasing: Counter[str] = Counter()
 
     @asynccontextmanager
     async def async_slot(
@@ -343,12 +348,40 @@ class ConnectGate:
         return _async_end
 
     @callback
+    def async_note_releasing(self, address: str) -> CALLBACK_TYPE:
+        """Count ``address``'s link as being released; return the callback that ends it.
+
+        While its teardown runs, a radio still lists the device, but that link
+        is going: a call to it needs a new connect (it is judged and gets a
+        ticket, not admitted as linked), and its link doesn't count as up
+        (``async_link_up``). The end lets the waiting calls be judged again.
+        """
+        self._releasing[address] += 1
+        ended = False
+
+        @callback
+        def _async_end() -> None:
+            nonlocal ended
+            if ended:
+                return
+            ended = True
+            self._releasing[address] -= 1
+            if not self._releasing[address]:
+                del self._releasing[address]
+            self._async_pump()
+
+        return _async_end
+
+    @callback
     def async_link_up(self, address: str) -> bool:
         """Whether a radio lists ``address`` as holding a slot: its link is up (or coming up).
 
+        Not while the integration is releasing it (``async_note_releasing``).
         False if the scanners can't be read, as the gate's own passes treat a
         failure (logged in full once): a broken gate must not hold up a call.
         """
+        if self._releasing[address]:
+            return False
         radios: dict[str, _Radio] = {}
         try:
             return any(
@@ -511,7 +544,8 @@ class ConnectGate:
                 ticket.connected = False
                 continue
             ticket.scanner = radio.scanner
-            ticket.connected = not radio.in_progress
+            # Listed while its old link is torn down: the new one isn't up yet.
+            ticket.connected = not radio.in_progress and not self._releasing[ticket.address]
             if ticket.connected:
                 self._avoided.pop(radio.scanner.source, None)
 
@@ -628,6 +662,8 @@ class ConnectGate:
             return Admission(Outcome.JOINED, waited, ticket.scanner.name, now, ticket)
         if not view.paths:
             return Admission(Outcome.UNSEEN, waited, None, now, None)
+        if self._releasing[waiter.address]:
+            return None  # the link a radio lists is going: this call connects again
         for path in view.paths:
             if self._radio(path.scanner, radios).lists(waiter.address):
                 return Admission(Outcome.LINKED, waited, path.scanner.name, now, None)
@@ -707,6 +743,12 @@ def async_connect_slot(
 def async_note_deferred_off(hass: HomeAssistant) -> CALLBACK_TYPE:
     """Count a turn-off waiting in the deferral (polls wait for it); return its end."""
     return _gate(hass).async_note_deferred_off()
+
+
+@callback
+def async_note_releasing(hass: HomeAssistant, address: str) -> CALLBACK_TYPE:
+    """Count the link to ``address`` as being released until the returned callback runs."""
+    return _gate(hass).async_note_releasing(address)
 
 
 @callback
