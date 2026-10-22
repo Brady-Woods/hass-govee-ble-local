@@ -234,10 +234,10 @@ Per device (depending on its capabilities):
 
 | Platform | Entity | Notes |
 | --- | --- | --- |
-| `light` | Main light | Whole-fixture power/brightness/RGB/color-temp/effects |
+| `light` | Main light | Whole-fixture power/brightness/RGB/color-temp/effects (on/off only for a lamp with nothing else) |
 | `light` | Zone light(s) | One per colour-controllable zone (RGB + kelvin); on/off-only zones become switches |
 | `light` | Segment light(s) | One per addressable segment (RGB + kelvin); **disabled by default** |
-| `switch` | Power / zone switch | Smart plugs, and on/off-only zones |
+| `switch` | Power / zone switch | Smart plugs (the H5083 family), and on/off-only zones |
 | `sensor` | Signal strength, poll interval, connection failures, **last seen**, **last connected**, **connection source** | Diagnostic; signal strength, poll interval, last seen and last connected are **disabled by default** |
 | `binary_sensor` | Connectivity | Advertisement presence (reachable), not connect-poll success |
 | `button` | Run self-test | Runs the full-capability self-test and stores the capture |

@@ -55,7 +55,7 @@ from .const import (
     STOP_CLOSE_TIMEOUT_SECONDS,
 )
 from .coordinator import GoveeBleLocalCoordinator
-from .helpers import clean_mac, clean_text, is_colour_zone, parse_secret
+from .helpers import clean_mac, clean_text, has_fixture_light, is_colour_zone, parse_secret
 from .services import async_register_services
 
 _LOGGER = logging.getLogger(__name__)
@@ -244,7 +244,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: GoveeBleLocalConfigEntry
             scene_store_error = str(err)
             _async_report_scene_store(hass, err)
 
-    _async_remove_legacy_zone_entities(hass, address, device)
+    _async_remove_legacy_switches(hass, address, device)
 
     # Always-on WARNING+ capture so unrecognised frames / rejections surface in the
     # downloadable diagnostics without the user having to enable debug logging.
@@ -443,25 +443,33 @@ def _async_track_bluetooth(hass: HomeAssistant, entry: GoveeBleLocalConfigEntry)
 
 
 @callback
-def _async_remove_legacy_zone_entities(hass: HomeAssistant, address: str, device: Device) -> None:
-    """Remove orphaned zone-switch entities left by earlier entity schemes.
+def _async_remove_legacy_switches(hass: HomeAssistant, address: str, device: Device) -> None:
+    """Remove orphaned switch entities left by earlier entity schemes.
 
     1. Pre-v0.11 zone switches were keyed by integer index ({address}_zone_0 /
        _zone_1); they are now keyed by zone name (_zone_main / _zone_background).
     2. A colour-controllable zone (one with segments) is now a light, not a
        switch, so its old switch entity ({address}_zone_{name}) is orphaned.
+    3. A power-only light (power alone, not a relay plug) is now a light, not a
+       power switch, so its old switch entity ({address}_power) is orphaned.
+       Earlier versions made one for such a model wherever they got a library
+       that has one (from govee-ble-local 1.7.0: H1162 / H1163 / H1167 / H1168),
+       as their ``<2`` range allows. An entity can't move to another domain, so
+       the light starts afresh.
 
-    Drop both so only the current entities remain.
+    Drop them so only the current entities remain.
     """
     registry = er.async_get(hass)
     stale_unique_ids = [f"{address}_zone_{i}" for i in ("0", "1")]
     stale_unique_ids += [
         f"{address}_zone_{zone.name}" for zone in device.zones if is_colour_zone(zone)
     ]
+    if has_fixture_light(device):
+        stale_unique_ids.append(f"{address}_power")
     for unique_id in stale_unique_ids:
         entity_id = registry.async_get_entity_id(Platform.SWITCH, DOMAIN, unique_id)
         if entity_id is not None:
-            _LOGGER.debug("Removing orphaned zone switch %s", entity_id)
+            _LOGGER.debug("Removing orphaned switch %s", entity_id)
             registry.async_remove(entity_id)
 
 

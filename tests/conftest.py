@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable, Generator, Iterator
 from contextlib import contextmanager
+import dataclasses
 from dataclasses import dataclass
 from datetime import timedelta
 import math
@@ -24,7 +25,7 @@ from unittest.mock import AsyncMock, PropertyMock, patch
 from bleak.backends.device import BLEDevice
 from bleak.backends.scanner import AdvertisementData
 import govee_ble_local
-from govee_ble_local import Device, GoveeBleError, create_device
+from govee_ble_local import Capability, Device, GoveeBleError, create_device
 from govee_ble_local.models import Encryption
 from homeassistant.components.bluetooth import BluetoothServiceInfoBleak
 from homeassistant.core import HomeAssistant
@@ -184,6 +185,20 @@ def make_device(
         return device.state
 
     device.update = AsyncMock(side_effect=_update)  # type: ignore[method-assign]
+    return device
+
+
+def make_power_only_light(**kwargs: Any) -> Device:
+    """Build a power-only light: a real Device on a profile with POWER alone, not a relay plug's.
+
+    govee-ble-local 1.6.x ships no such profile (every power-only one there is a relay plug);
+    1.7.0 adds H1162 / H1163 / H1167 / H1168. This one is a bulb's profile (H6006) cut down to
+    power; ``kwargs`` go to :func:`make_device`.
+    """
+    device = make_device("H6006", **kwargs)
+    device.profile = dataclasses.replace(
+        device.profile, capabilities=frozenset({Capability.POWER}), relay=False
+    )
     return device
 
 

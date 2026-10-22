@@ -85,12 +85,13 @@ async def async_setup_entry(
 ) -> None:
     """Set up the light entities for a device.
 
-    - the whole-fixture light (power/brightness/colour/scene),
+    - the whole-fixture light (power/brightness/colour/scene; on/off only for a
+      power-only light),
     - one light per colour-controllable zone (a zone that has segments; on/off-only
       zones are switches instead - see switch.py),
     - one light per addressable segment (disabled by default).
 
-    A device with no light-relevant capability (e.g. a smart plug) gets none.
+    A relay plug (the H5083 family) gets none: it is a switch (see helpers.py).
     """
     device = entry.runtime_data.device
 
@@ -153,6 +154,7 @@ class GoveeBleLocalLight(GoveeBleLocalEntity, LightEntity):
         if Capability.COLOR_TEMP in caps:
             modes.add(ColorMode.COLOR_TEMP)
         if not modes:
+            # ONOFF: a power-only light (not a relay plug, which is a switch).
             modes = {ColorMode.BRIGHTNESS if Capability.BRIGHTNESS in caps else ColorMode.ONOFF}
         self._attr_supported_color_modes = modes
         _apply_kelvin_range(self, self._device)

@@ -24,6 +24,7 @@ from homeassistant.components.bluetooth import (
     BluetoothServiceInfoBleak,
 )
 from homeassistant.components.light import DATA_COMPONENT as LIGHT_DATA
+from homeassistant.components.switch import SwitchDeviceClass
 from homeassistant.config_entries import ConfigEntryDisabler, ConfigEntryState
 from homeassistant.const import (
     EVENT_HOMEASSISTANT_STOP,
@@ -61,6 +62,7 @@ from .conftest import (
     allow_adverts,
     connection,
     make_device,
+    make_power_only_light,
     make_service_info,
     unavailable_callback,
 )
@@ -1083,6 +1085,50 @@ async def test_legacy_zone_switches_removed(
     assert await hass.config_entries.async_setup(mock_config_entry.entry_id)
     for unique_id in (f"{ADDRESS}_zone_0", f"{ADDRESS}_zone_main", f"{ADDRESS}_zone_background"):
         assert registry.async_get_entity_id("switch", DOMAIN, unique_id) is None
+
+
+@pytest.mark.parametrize(
+    ("device_sku", "power_only_light"),
+    [("H6006", True), ("H5083", False)],
+    ids=["power_only_light", "relay_plug"],
+)
+async def test_power_switch_removed_once_the_device_is_a_light(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_bluetooth: SimpleNamespace,
+    power_only_light: bool,
+) -> None:
+    """The power switch an earlier version made for a power-only light is dropped for its light.
+
+    Earlier versions made every power-only device a switch, so a power-only light (from
+    govee-ble-local 1.7.0) set up by one has a switch entity no platform provides now. A relay
+    plug keeps its switch: the same registry entry, so its customisations stay.
+    """
+    device = make_power_only_light() if power_only_light else make_device("H5083")
+    registry = er.async_get(hass)
+    mock_config_entry.add_to_hass(hass)
+    old = registry.async_get_or_create(
+        "switch",
+        DOMAIN,
+        f"{ADDRESS}_power",
+        config_entry=mock_config_entry,
+        suggested_object_id="test_ceiling",
+        original_device_class=SwitchDeviceClass.OUTLET,  # as GoveeBleLocalPowerSwitch registers
+    )
+    with patch("custom_components.govee_ble_local.create_device", return_value=device):
+        assert await hass.config_entries.async_setup(mock_config_entry.entry_id)
+        await hass.async_block_till_done(wait_background_tasks=True)
+
+    switch = registry.async_get_entity_id("switch", DOMAIN, f"{ADDRESS}_power")
+    light = registry.async_get_entity_id("light", DOMAIN, f"{ADDRESS}_light")
+    if power_only_light:
+        assert switch is None
+        assert light == "light.test_ceiling"
+        assert hass.states.get(old.entity_id) is None
+    else:
+        assert light is None
+        assert switch == old.entity_id
+        assert registry.async_get(switch).id == old.id
 
 
 @pytest.mark.parametrize("device_sku", ["H6047"])

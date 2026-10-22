@@ -36,7 +36,7 @@ from custom_components.govee_ble_local.const import (
     ZONE_OFF_FRESH_SECONDS,
 )
 
-from .conftest import connection, make_device
+from .conftest import connection, make_device, make_power_only_light
 from .const import ADDRESS
 
 PLUG = "switch.test_ceiling"
@@ -272,15 +272,15 @@ async def test_every_profile_gets_one_entity_per_relay(
 
     Each zone is a light or a switch (never both or neither), the whole device
     gets at most one control (a light or an outlet switch, one if it has no
-    zones), and the cleanup of pre-light zone switches only removes the ones a
-    zone light replaced.
+    zones), and the cleanup of earlier versions' switches only removes the ones
+    a light replaced: a zone light, or the whole-fixture light.
     """
     registry = er.async_get(hass)
     mock_config_entry.add_to_hass(hass)
-    for zone in mock_device.zones:  # the zone switches earlier versions registered
-        registry.async_get_or_create(
-            "switch", DOMAIN, f"{ADDRESS}_zone_{zone.name}", config_entry=mock_config_entry
-        )
+    # The switches earlier versions registered: one per zone, and the power switch.
+    zone_switches = [f"{ADDRESS}_zone_{zone.name}" for zone in mock_device.zones]
+    for unique_id in (*zone_switches, f"{ADDRESS}_power"):
+        registry.async_get_or_create("switch", DOMAIN, unique_id, config_entry=mock_config_entry)
     assert await hass.config_entries.async_setup(mock_config_entry.entry_id)
     await hass.async_block_till_done(wait_background_tasks=True)
 
@@ -294,6 +294,37 @@ async def test_every_profile_gets_one_entity_per_relay(
     assert len(whole) <= 1
     if not mock_device.zones:
         assert len(whole) == 1
+
+
+@pytest.mark.parametrize(
+    ("relay", "expected"),
+    [(True, ("switch", "power")), (False, ("light", "light"))],
+    ids=["relay_plug", "power_only_light"],
+)
+async def test_power_only_device_is_a_switch_only_as_a_relay_plug(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_bluetooth: SimpleNamespace,
+    relay: bool,
+    expected: tuple[str, str],
+) -> None:
+    """Power alone: a relay plug's profile gets the outlet switch, any other one an on/off
+    light (govee-ble-local 1.7.0's H1162 family), and never both."""
+    device = make_power_only_light()
+    device.profile = dataclasses.replace(device.profile, relay=relay)
+    mock_config_entry.add_to_hass(hass)
+    with patch("custom_components.govee_ble_local.create_device", return_value=device):
+        assert await hass.config_entries.async_setup(mock_config_entry.entry_id)
+        await hass.async_block_till_done(wait_background_tasks=True)
+    domain, key = expected
+    assert {
+        (e.domain, e.unique_id)
+        for e in er.async_entries_for_config_entry(er.async_get(hass), mock_config_entry.entry_id)
+        if e.domain in ("light", "switch")
+    } == {(domain, f"{ADDRESS}_{key}")}
+    assert [state.entity_id for state in hass.states.async_all(("light", "switch"))] == [
+        f"{domain}.test_ceiling"
+    ]
 
 
 # -- 11. zone switches ----------------------------------------------------------------

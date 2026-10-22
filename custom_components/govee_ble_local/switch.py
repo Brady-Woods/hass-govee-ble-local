@@ -31,8 +31,8 @@ async def async_setup_entry(
 
     One on/off switch per on/off-only zone (a zone with no segments;
     colour-controllable zones are lights instead - see light.py), or - for a
-    device with no light capability and no zones (e.g. a smart plug) - a single
-    whole-device power switch.
+    relay plug with no zones (the H5083 family) - a single whole-device power
+    switch. A power-only light is a light instead (see helpers.py).
     """
     device = entry.runtime_data.device
 

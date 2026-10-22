@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **A light that only switches on and off is a light, not a switch:** a model with power alone
+  that isn't a relay smart plug (by its library profile) gets an on/off light, so it joins light
+  groups, an area's lights and "turn off all the lights", which skipped it as a switch.
+  `govee-ble-local` 1.7.0 adds four such lamps (H1162, H1163, H1167 and H1168); no model in
+  1.6.x is one, so no device set up today changes. Smart plugs (the H5083 family) keep their
+  outlet switch. An earlier version of the integration that got library 1.7.0 (its `<2` range
+  allows that, on a fresh install or after a container rebuild) set those lamps up as switches:
+  that switch is now removed and the light takes its place, named after the device as the switch
+  was. An entity can't change domain, so automations and dashboards that used the switch need
+  the light instead.
+
 ## [1.6.0] - 2026-10-21
 
 Requires `govee-ble-local` 1.6.0 or newer (any 1.x) **from PyPI** and Home Assistant 2026.10+.
