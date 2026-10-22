@@ -10,14 +10,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - **A light that only switches on and off is a light, not a switch:** a model with power alone
   that isn't a relay smart plug (by its library profile) gets an on/off light, so it joins light
-  groups, an area's lights and "turn off all the lights", which skipped it as a switch.
-  The next `govee-ble-local` release (after 1.6.1) adds five such lights (H1162, H1163, H1167,
-  H1168 and H7004); no model in 1.6.1 or earlier is one, so no device set up today changes.
-  Smart plugs (the H5083 family) keep their outlet switch. An earlier version of the integration
-  that got that library release (its `<2` range allows that, on a fresh install or after a
-  container rebuild) set those lights up as switches: that switch is now removed and the light
-  takes its place, named after the device as the switch was. An entity can't change domain, so automations and dashboards that used the switch need
-  the light instead.
+  groups, an area's lights and "turn off all the lights", which skipped it as a switch. The next
+  `govee-ble-local` release (after 1.6.1) adds five such models: the H1162, H1163, H1167 and
+  H1168 Music Sync boxes and the H7004 grow light. No model in 1.6.1 or earlier is one, so no
+  device set up today changes. Smart plugs (the H5083 family) keep their outlet switch. An
+  earlier version of the integration that got that library release (its `<2` range allows that,
+  on a fresh install or after a container rebuild) set these models up as switches. That switch
+  now becomes the light: the light takes its entity ID with `light.` in place of `switch.`, and
+  its name, icon, area, labels and voice aliases, and stays hidden or disabled if you hid or
+  disabled the switch. An entity can't change domain, so automations, scripts and dashboards that
+  used the switch need the light instead.
 
 ## [1.6.1] - 2026-10-22
 

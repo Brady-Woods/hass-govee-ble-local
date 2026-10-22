@@ -237,7 +237,7 @@ Per device (depending on its capabilities):
 
 | Platform | Entity | Notes |
 | --- | --- | --- |
-| `light` | Main light | Whole-fixture power/brightness/RGB/color-temp/effects (on/off only for a lamp with nothing else) |
+| `light` | Main light | Whole-fixture power/brightness/RGB/color-temp/effects (on/off only, for a light with power alone) |
 | `light` | Zone light(s) | One per colour-controllable zone (RGB + kelvin); on/off-only zones become switches |
 | `light` | Segment light(s) | One per addressable segment (RGB + kelvin); **disabled by default** |
 | `switch` | Power / zone switch | Smart plugs (the H5083 family), and on/off-only zones |

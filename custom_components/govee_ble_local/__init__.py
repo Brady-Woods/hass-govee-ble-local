@@ -22,7 +22,7 @@ from govee_ble_local.identify import identify
 from homeassistant.components import bluetooth
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_ADDRESS, EVENT_HOMEASSISTANT_STOP, Platform
-from homeassistant.core import Event, HomeAssistant, callback
+from homeassistant.core import Event, HomeAssistant, callback, split_entity_id
 from homeassistant.exceptions import (
     ConfigEntryAuthFailed,
     ConfigEntryError,
@@ -247,7 +247,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: GoveeBleLocalConfigEntry
             scene_store_error = str(err)
             _async_report_scene_store(hass, err)
 
-    _async_remove_legacy_switches(hass, address, device)
+    _async_remove_legacy_zone_entities(hass, address, device)
+    _async_move_power_switch_to_light(hass, entry, address, device)
 
     # Always-on WARNING+ capture so unrecognised frames / rejections surface in the
     # downloadable diagnostics without the user having to enable debug logging.
@@ -446,34 +447,72 @@ def _async_track_bluetooth(hass: HomeAssistant, entry: GoveeBleLocalConfigEntry)
 
 
 @callback
-def _async_remove_legacy_switches(hass: HomeAssistant, address: str, device: Device) -> None:
-    """Remove orphaned switch entities left by earlier entity schemes.
+def _async_remove_legacy_zone_entities(hass: HomeAssistant, address: str, device: Device) -> None:
+    """Remove orphaned zone-switch entities left by earlier entity schemes.
 
     1. Pre-v0.11 zone switches were keyed by integer index ({address}_zone_0 /
        _zone_1); they are now keyed by zone name (_zone_main / _zone_background).
     2. A colour-controllable zone (one with segments) is now a light, not a
        switch, so its old switch entity ({address}_zone_{name}) is orphaned.
-    3. A power-only light (power alone, not a relay plug) is now a light, not a
-       power switch, so its old switch entity ({address}_power) is orphaned.
-       Earlier versions made one for such a model wherever they got a library
-       that has one (from the govee-ble-local release after 1.6.1: H1162 /
-       H1163 / H1167 / H1168 / H7004), as their ``<2`` range allows. An entity
-       can't move to another domain, so the light starts afresh.
 
-    Drop them so only the current entities remain.
+    Drop both so only the current entities remain.
     """
     registry = er.async_get(hass)
     stale_unique_ids = [f"{address}_zone_{i}" for i in ("0", "1")]
     stale_unique_ids += [
         f"{address}_zone_{zone.name}" for zone in device.zones if is_colour_zone(zone)
     ]
-    if has_fixture_light(device):
-        stale_unique_ids.append(f"{address}_power")
     for unique_id in stale_unique_ids:
         entity_id = registry.async_get_entity_id(Platform.SWITCH, DOMAIN, unique_id)
         if entity_id is not None:
-            _LOGGER.debug("Removing orphaned switch %s", entity_id)
+            _LOGGER.debug("Removing orphaned zone switch %s", entity_id)
             registry.async_remove(entity_id)
+
+
+@callback
+def _async_move_power_switch_to_light(
+    hass: HomeAssistant, entry: GoveeBleLocalConfigEntry, address: str, device: Device
+) -> None:
+    """Carry an earlier version's power switch over to the light that replaces it.
+
+    Earlier versions made every power-only device a switch ({address}_power),
+    so a power-only light (from the govee-ble-local release after 1.6.1:
+    H1162 / H1163 / H1167 / H1168 / H7004) set up by one of them, as their
+    ``<2`` range allows, has a switch no platform provides now. An entity can't
+    change domain, so the light's entry is created from the switch's: the same
+    object id and device, and the user's name, icon, area, labels and voice
+    aliases. Hidden or disabled carries over only when the user set it: an
+    integration's (Switch as X hides the switch it wraps) belongs to the switch.
+    Then the switch's entry is removed.
+    """
+    if not has_fixture_light(device):
+        return
+    registry = er.async_get(hass)
+    switch_id = registry.async_get_entity_id(Platform.SWITCH, DOMAIN, f"{address}_power")
+    if switch_id is None or (switch := registry.async_get(switch_id)) is None:
+        return
+    light = registry.async_get_or_create(
+        Platform.LIGHT,
+        DOMAIN,
+        f"{address}_light",
+        config_entry=entry,
+        device_id=switch.device_id,
+        suggested_object_id=split_entity_id(switch.entity_id)[1],
+    )
+    registry.async_update_entity(
+        light.entity_id,
+        name=switch.name,
+        icon=switch.icon,
+        area_id=switch.area_id,
+        labels=switch.labels,
+        aliases=switch.aliases,
+        hidden_by=switch.hidden_by if switch.hidden_by is er.RegistryEntryHider.USER else None,
+        disabled_by=(
+            switch.disabled_by if switch.disabled_by is er.RegistryEntryDisabler.USER else None
+        ),
+    )
+    _LOGGER.debug("Moving power switch %s over to light %s", switch.entity_id, light.entity_id)
+    registry.async_remove(switch.entity_id)
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: GoveeBleLocalConfigEntry) -> bool:

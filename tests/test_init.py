@@ -34,7 +34,12 @@ from homeassistant.const import (
     STATE_UNAVAILABLE,
 )
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers import device_registry as dr, entity_registry as er
+from homeassistant.helpers import (
+    area_registry as ar,
+    device_registry as dr,
+    entity_registry as er,
+    label_registry as lr,
+)
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
@@ -1106,29 +1111,40 @@ async def test_legacy_zone_switches_removed(
     [("H6006", True), ("H5083", False)],
     ids=["power_only_light", "relay_plug"],
 )
-async def test_power_switch_removed_once_the_device_is_a_light(
+async def test_power_switch_moves_over_to_the_light(
     hass: HomeAssistant,
     mock_config_entry: MockConfigEntry,
     mock_bluetooth: SimpleNamespace,
     power_only_light: bool,
 ) -> None:
-    """The power switch an earlier version made for a power-only light is dropped for its light.
+    """An earlier version's power switch of a power-only light becomes its light; a plug keeps it.
 
-    Earlier versions made every power-only device a switch, so a power-only light (from the
-    govee-ble-local release after 1.6.1) set up by one has a switch entity no platform provides
-    now. A relay
-    plug keeps its switch: the same registry entry, so its customisations stay.
+    Earlier versions made every power-only device a switch. The light takes the switch's object
+    id and the user's settings, a hide the user chose too, but not a disable an integration set.
+    A relay plug's switch is its entity: the same registry entry, untouched.
     """
     device = make_power_only_light() if power_only_light else make_device("H5083")
     registry = er.async_get(hass)
+    area = ar.async_get(hass).async_create("Office")
+    label = lr.async_get(hass).async_create("Desk")
     mock_config_entry.add_to_hass(hass)
     old = registry.async_get_or_create(
         "switch",
         DOMAIN,
         f"{ADDRESS}_power",
         config_entry=mock_config_entry,
-        suggested_object_id="test_ceiling",
+        suggested_object_id="desk",
         original_device_class=SwitchDeviceClass.OUTLET,  # as GoveeBleLocalPowerSwitch registers
+    )
+    old = registry.async_update_entity(
+        old.entity_id,
+        name="Desk",
+        icon="mdi:desk",
+        area_id=area.id,
+        labels={label.label_id},
+        aliases=["Desk light"],
+        hidden_by=er.RegistryEntryHider.USER,
+        disabled_by=er.RegistryEntryDisabler.INTEGRATION,
     )
     with patch("custom_components.govee_ble_local.create_device", return_value=device):
         assert await hass.config_entries.async_setup(mock_config_entry.entry_id)
@@ -1138,8 +1154,18 @@ async def test_power_switch_removed_once_the_device_is_a_light(
     light = registry.async_get_entity_id("light", DOMAIN, f"{ADDRESS}_light")
     if power_only_light:
         assert switch is None
-        assert light == "light.test_ceiling"
-        assert hass.states.get(old.entity_id) is None
+        moved = registry.async_get("light.desk")
+        assert moved is not None
+        assert moved.unique_id == f"{ADDRESS}_light"
+        assert (moved.name, moved.icon, moved.area_id, moved.labels, moved.aliases) == (
+            "Desk",
+            "mdi:desk",
+            area.id,
+            {label.label_id},
+            old.aliases,
+        )
+        assert (moved.hidden_by, moved.disabled_by) == (er.RegistryEntryHider.USER, None)
+        assert hass.states.get("light.desk").attributes["friendly_name"] == "Desk"
     else:
         assert light is None
         assert switch == old.entity_id

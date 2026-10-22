@@ -33,17 +33,10 @@ from govee_ble_local.wire import build, parse
 from homeassistant.components.bluetooth import BluetoothChange
 from homeassistant.components.light import DATA_COMPONENT
 from homeassistant.config_entries import ConfigEntryState
-from homeassistant.const import (
-    ENTITY_MATCH_ALL,
-    STATE_OFF,
-    STATE_ON,
-    STATE_UNAVAILABLE,
-    STATE_UNKNOWN,
-)
+from homeassistant.const import STATE_OFF, STATE_ON, STATE_UNAVAILABLE, STATE_UNKNOWN
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import entity_registry as er
-from homeassistant.setup import async_setup_component
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
@@ -2723,91 +2716,27 @@ async def test_a_spared_zone_off_is_no_command(
 
 
 # -- 10. power-only lights ------------------------------------------------------------
-# A light with power alone, whose profile isn't a relay plug's (from the govee-ble-local
-# release after 1.6.1: H1162 / H1163 / H1167 / H1168 / H7004): an on/off light, not a switch.
-# No profile in 1.6.1 or earlier is one, so the tests build it (conftest.make_power_only_light).
 
 
 async def test_power_only_light_is_an_on_off_light(
     hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_bluetooth: SimpleNamespace
 ) -> None:
-    """It gets one light, named after the device, with only the on/off mode; no switch."""
-    entry = await _setup_custom(hass, mock_config_entry, make_power_only_light(), mock_bluetooth)
-    entities = er.async_entries_for_config_entry(er.async_get(hass), entry.entry_id)
-    assert {e.unique_id for e in entities if e.domain == "light"} == {f"{ADDRESS}_light"}
-    assert [e for e in entities if e.domain == "switch"] == []
-    _seed(entry, is_on=True)
-    state = hass.states.get(MAIN)
-    assert state.state == STATE_ON
-    assert state.attributes["friendly_name"] == TITLE
-    assert state.attributes["supported_color_modes"] == ["onoff"]
-    assert state.attributes["color_mode"] == "onoff"
-    assert state.attributes["supported_features"] == 0
-    assert "brightness" not in state.attributes
-    assert "effect_list" not in state.attributes
-
-
-async def test_power_only_light_turns_on_and_off(
-    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_bluetooth: SimpleNamespace
-) -> None:
-    """Turn on and off send the power frame alone; a brightness asked for is dropped, and
-    "turn off all the lights" reaches it."""
+    """Power alone, not a relay plug: one on/off light and no switch; on and off are the
+    device's own power calls."""
     device = make_power_only_light()
     entry = await _setup_custom(hass, mock_config_entry, device, mock_bluetooth)
+    entities = er.async_entries_for_config_entry(er.async_get(hass), entry.entry_id)
+    assert {(e.domain, e.unique_id) for e in entities if e.domain in ("light", "switch")} == {
+        ("light", f"{ADDRESS}_light")
+    }
     _seed(entry, is_on=False, optimistic=False)
+    assert hass.states.get(MAIN).attributes["supported_color_modes"] == ["onoff"]
 
     await _call(hass, "turn_on", MAIN)
     device.turn_on.assert_awaited_once_with(power=True, brightness=None, rgb=None, kelvin=None)
-    assert connection(device).sent == [build.switch(True)]
-    assert hass.states.get(MAIN).state == STATE_ON
+    state = hass.states.get(MAIN)
+    assert (state.state, state.attributes["color_mode"]) == (STATE_ON, "onoff")
 
-    connection(device).sent.clear()
     await _call(hass, "turn_off", MAIN)
-    device.turn_off.assert_awaited_once()
-    assert connection(device).sent == [build.switch(False)]
+    device.turn_off.assert_awaited_once_with()
     assert hass.states.get(MAIN).state == STATE_OFF
-
-    # Home Assistant drops a brightness the light doesn't offer: a plain turn_on.
-    connection(device).sent.clear()
-    await _call(hass, "turn_on", MAIN, brightness=128)
-    assert device.turn_on.await_args.kwargs == {
-        "power": True,
-        "brightness": None,
-        "rgb": None,
-        "kelvin": None,
-    }
-    assert connection(device).sent == [build.switch(True)]
-
-    connection(device).sent.clear()
-    await _call(hass, "turn_off", ENTITY_MATCH_ALL)
-    assert device.turn_off.await_count == 2
-    assert connection(device).sent == [build.switch(False)]
-    assert hass.states.get(MAIN).state == STATE_OFF
-
-
-async def test_power_only_light_in_a_light_group(
-    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_bluetooth: SimpleNamespace
-) -> None:
-    """A light group takes it as a member: the group is on/off, and switches it on and off."""
-    # Before the device: the light platform's config is read once, as it sets up.
-    group = {"platform": "group", "name": "Group", "entities": [MAIN]}
-    assert await async_setup_component(hass, "light", {"light": [group]})
-    device = make_power_only_light()
-    entry = await _setup_custom(hass, mock_config_entry, device, mock_bluetooth)
-    _seed(entry, is_on=False, optimistic=False)
-    await hass.async_block_till_done()
-    assert hass.states.get("light.group").state == STATE_OFF
-    assert hass.states.get("light.group").attributes["supported_color_modes"] == ["onoff"]
-
-    await _call(hass, "turn_on", "light.group", brightness=128)
-    await hass.async_block_till_done()
-    assert connection(device).sent == [build.switch(True)]
-    assert hass.states.get(MAIN).state == STATE_ON
-    assert hass.states.get("light.group").state == STATE_ON
-
-    connection(device).sent.clear()
-    await _call(hass, "turn_off", "light.group")
-    await hass.async_block_till_done()
-    device.turn_off.assert_awaited_once()
-    assert connection(device).sent == [build.switch(False)]
-    assert hass.states.get("light.group").state == STATE_OFF

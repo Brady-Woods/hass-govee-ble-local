@@ -27,11 +27,11 @@ BLE_ERRORS: tuple[type[Exception], ...] = (BleakError, GoveeBleError, TimeoutErr
 SECRET_BYTES = 8
 
 # Which platform owns a device or a zone is decided once, below, for light.py,
-# switch.py and the legacy-switch cleanup in __init__.py, so each relay gets
+# switch.py and the legacy-switch handling in __init__.py, so each relay gets
 # exactly one entity. Any of these capabilities makes a device a light fixture,
-# and so does power alone on a device that isn't a relay plug (a power-only
-# lamp: an on/off light). A relay plug with none of them (the H5083 family) is
-# a switch instead.
+# and so does power alone on a device that isn't a relay plug (it gets an
+# on/off light). A relay plug with none of them (the H5083 family) is a switch
+# instead.
 _FIXTURE_LIGHT_CAPABILITIES = frozenset(
     {Capability.BRIGHTNESS, Capability.RGB, Capability.COLOR_TEMP}
 )

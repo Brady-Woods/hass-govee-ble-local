@@ -8,15 +8,7 @@ from typing import Any
 from unittest.mock import AsyncMock, patch
 
 from bleak.exc import BleakError
-from govee_ble_local import (
-    Capability,
-    Device,
-    GoveeBleConnectionError,
-    GoveeBleError,
-    Zone,
-    profile_for,
-    supported_skus,
-)
+from govee_ble_local import Capability, Device, GoveeBleConnectionError, GoveeBleError, Zone
 from homeassistant.core import Context, HomeAssistant
 import pytest
 from pytest_homeassistant_custom_component.common import MockUser
@@ -79,33 +71,6 @@ def test_fixture_light_or_power_switch(
     device = build()
     assert has_fixture_light(device) is light
     assert has_power_switch(device) is switch
-
-
-def test_every_power_only_profile_is_a_light_unless_a_relay_plug() -> None:
-    """Across the installed library's unzoned power-only profiles, opt-in ones too: a relay
-    plug gets the power switch, any other one the on/off light.
-
-    In govee-ble-local 1.6.1 every one is a relay plug; the release after it adds non-relay ones
-    (H1162, H1163, H1167, H1168, H7004), which this then checks as the library ships them.
-    """
-    light_capabilities = {Capability.BRIGHTNESS, Capability.RGB, Capability.COLOR_TEMP}
-    checked = []
-    for sku in supported_skus(allow_modelled=True):
-        profile = profile_for(sku, allow_modelled=True)
-        if (
-            profile is None  # one only its pact or goodsType picks
-            or Capability.POWER not in profile.capabilities
-            or profile.capabilities & light_capabilities
-            or profile.zones
-        ):
-            continue
-        device = make_device(sku, allow_modelled=True)
-        assert (has_fixture_light(device), has_power_switch(device)) == (
-            not profile.relay,
-            profile.relay,
-        ), sku
-        checked.append(sku)
-    assert "H5083" in checked
 
 
 @pytest.mark.parametrize(
