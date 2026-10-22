@@ -403,8 +403,10 @@ class GoveeBleLocalSegmentLight(_SubLight):
         fails, nothing else is sent. A zone whose power isn't known (the
         library forgets an H6047's bars as the whole fixture turns on), or held
         on, gets the change alone, as before: a redundant bar switch on an H6047
-        reads both bars first (``aa 36``), which can go unanswered and fail the
-        call, and may restart the running scene or mode. So a zone switched off
+        reads both bars first (``aa 36``) while it doesn't know them, or knows
+        the other bar only from long ago; that read can go unanswered and fail
+        the call, and the switch may restart the running scene or mode. So a
+        zone switched off
         in the Govee app while the fixture stays on, held on until the next
         read-back, still gets its segment's colour while dark.
         """

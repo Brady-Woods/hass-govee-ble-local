@@ -857,16 +857,18 @@ async def test_a_first_poll_still_waiting_for_its_place_as_a_burst_starts_is_hel
     assert holding_timers(hass, hall) == []
 
 
-async def test_a_poll_held_again_after_a_failed_one_stays_failed(
+async def test_a_poll_held_again_after_failed_ones_stays_failed(
     hass: HomeAssistant, clock: Clock, fleet: list[Member], burst: CommandBurst
 ) -> None:
-    """After a failed poll, one held again reads nothing: it stays failed (no "recovered"),
-    and nothing counts toward the backoff or the poll interval. It runs after the burst."""
+    """After two failed polls (the interval backed off), one held again reads nothing: it
+    stays failed (no "recovered"), and nothing counts toward the backoff or the poll
+    interval. It runs after the burst."""
     first, second, hall = fleet
     coordinator = hall.coordinator
     read = hall.device.update.side_effect  # type: ignore[attr-defined]
     hall.device.update.side_effect = GoveeBleConnectionError("down")  # type: ignore[attr-defined]
-    await clock.run_to(122)
+    await clock.run_to(244)  # polls at about 120 s and 240 s, both failed
+    assert coordinator._backoff_failures == 2
     assert not coordinator.last_update_success
     hall.device.update.side_effect = read  # type: ignore[attr-defined]
 
@@ -880,8 +882,9 @@ async def test_a_poll_held_again_after_a_failed_one_stays_failed(
         )
 
     before = backoff()
+    assert coordinator.update_interval is not None
     give_back = await take_every_poll_place(hass)
-    await clock.run_to(244)  # due again at about 240 s
+    await clock.run_to(244 + coordinator.update_interval.total_seconds())  # due again
     assert coordinator._poll_running
     first.start()
     second.start()
@@ -933,6 +936,77 @@ async def test_a_poll_held_again_still_runs_at_the_cap_from_when_it_came_due(
         first.start()
         assert burst.active
     assert clock.since(hall) == [0.0, near(cap_due)]
+    first.finish()
+    second.finish()
+
+
+async def test_a_poll_held_again_and_joined_by_a_later_return_poll_keeps_the_earlier_cap(
+    hass: HomeAssistant, clock: Clock, fleet: list[Member], burst: CommandBurst
+) -> None:
+    """Held at about 120 s, released as the burst ends, the poll waits for a place; a return
+    poll held 30 s later joins it (a poll runs). Held again by the next burst, apart for the
+    return poll, it keeps the earlier hold's cap (about 240 s), not the return poll's."""
+    first, second, hall = fleet
+    coordinator = hall.coordinator
+    await clock.run_to(100)
+    first.start()
+    second.start()
+    await clock.run_to(122)
+    [cap] = timers(hass, "_async_holdoff_cap_reached", coordinator)
+    cap_due = due(clock, cap)
+    give_back = await take_every_poll_place(hass)
+    first.finish()
+    second.finish()
+    await clock.run(HOLDOFF + 1)
+    assert coordinator._poll_running  # released, waiting for a place
+    await clock.run(30)
+    coordinator._async_request_poll("return_poll", keep=True)  # joins the running poll
+    assert coordinator._first_poll_waiting
+    first.start()
+    second.start()
+    give_back()
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert polls_done(*fleet)()
+    assert coordinator._first_poll_waiting  # held again apart, for the return poll
+    [again] = timers(hass, "_async_holdoff_cap_reached", coordinator)
+    assert due(clock, again) == pytest.approx(cap_due, abs=1)
+
+    while clock.now < cap_due + 5:  # one command after another to the first device
+        await clock.run(5)
+        first.finish()
+        first.start()
+    assert clock.since(hall) == [0.0, near(cap_due)]
+    first.finish()
+    second.finish()
+
+
+async def test_a_later_poll_held_again_gets_a_cap_of_its_own(
+    hass: HomeAssistant, clock: Clock, fleet: list[Member], burst: CommandBurst
+) -> None:
+    """A poll held by a burst, then released and read, leaves no cap behind: a later poll that
+    comes due unheld (the turn-on poll at 200 s) and is held again counts its cap from then."""
+    first, second, hall = fleet
+    coordinator = hall.coordinator
+    await clock.run_to(100)
+    first.start()
+    second.start()
+    await clock.run_to(130)  # held at about 120 s
+    first.finish()
+    second.finish()
+    await clock.run(HOLDOFF + 1)  # released as the burst ends, and read
+    assert clock.since(hall) == [0.0, near(130 + HOLDOFF)]
+    await clock.run_to(200)
+    give_back = await take_every_poll_place(hass)
+    coordinator._async_request_poll("turn_on_poll")  # nothing holds polls off: waits for a place
+    assert coordinator._poll_running
+    first.start()
+    second.start()
+    give_back()
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert polls_done(*fleet)()
+    assert clock.since(hall) == [0.0, near(130 + HOLDOFF)]  # held again, not read mid-burst
+    [cap] = timers(hass, "_async_holdoff_cap_reached", coordinator)
+    assert due(clock, cap) == pytest.approx(200 + CAP, abs=1)
     first.finish()
     second.finish()
 

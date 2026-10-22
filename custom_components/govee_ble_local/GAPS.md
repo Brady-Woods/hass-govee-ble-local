@@ -63,10 +63,13 @@ or ring, an H6047 bar), and its turn_on switches that zone on first. That rests 
 **modelled from the firmware, not checked on the bench**: with the fixture on, a `33 05` lights no
 zone (`Device._wake_power` models the wake only while the fixture isn't known on). A zone whose
 power is unknown or held on gets no zone power from a segment: on an H6047 a bar switch reads
-both bars first (`aa 36`, which can go unanswered), and its `33 36` handler re-runs the power-on
-tail, which may restart a running scene or mode. Entity count is the static
-`profile.segments` width; for IC-driven SKUs (e.g. H6641) the true group count is read live, so
-some declared segment entities may never report state until read-back is confirmed (see §2).
+both bars first (`aa 36`, which can go unanswered) while it doesn't know them, or knows the other
+bar only from long ago, and its `33 36` handler re-runs the power-on tail, which may restart a
+running scene or mode.
+
+Entity count is the static `profile.segments` width; for IC-driven SKUs (e.g. H6641) the true group
+count is read live, so some declared segment entities may never report state until read-back is
+confirmed (see §2).
 
 ---
 

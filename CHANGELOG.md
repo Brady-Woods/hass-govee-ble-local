@@ -17,7 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   segments light too, in the colours they kept. If the zone's power-on fails, no colour is sent.
   A zone whose power isn't known, or that is held on, gets no zone power from a segment, as
   before: after the fixture's own turn-on (which lights every zone) an H6047's bars aren't known,
-  and a bar switch reads both bars first, which can go unanswered and fail the call, and may
+  and a bar switch then reads both bars first, which can go unanswered and fail the call, and may
   restart the running scene or mode. So a zone switched off in the Govee app while the fixture
   stays on still shows on until the next read-back, and a segment's colour then goes to a dark
   zone. This matches how a segment light already follows the whole fixture's power.

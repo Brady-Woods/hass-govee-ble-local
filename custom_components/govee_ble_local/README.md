@@ -125,7 +125,8 @@ profile's capabilities:
   aren't. One poll runs when the wait ends, however many came due (a poll
   that runs meanwhile counts), and a poll waits at most
   `POLL_HOLDOFF_MAX_SECONDS` (2 min) from when it came due, held again or
-  not. A policy step that stops polls drops a
+  not; it may still wait for its place after that. A policy step that stops
+  polls drops a
   held scheduled or turn-on poll, never the first poll or the return poll.
 - **Availability = reachability**: an entity stays available while the device
   is advertising, regardless of poll failures (commands can still reach it).
@@ -287,7 +288,10 @@ verified on hardware.
   A zone whose power isn't known, or that is held on, gets the segment's change
   alone, as before: a zone switched off in the Govee app while the fixture
   stays on shows on, with its segments, until the next read-back, and a
-  segment's colour then goes to a dark zone. On an H60A6 or H6047 that isn't known on, a
+  segment's colour then goes to a dark zone. An H6047 bar switch carries both
+  bars, so switching one can switch such a bar back on: the library sends the
+  other bar as it last read it when it can't read it again (or read it moments
+  ago). On an H60A6 or H6047 that isn't known on, a
   segment's turn_off sends nothing, because a colour frame there switches the
   fixture on: the segment comes back in its old colour with the fixture. On
   other models it is blacked out; whether that colour frame wakes a fixture that

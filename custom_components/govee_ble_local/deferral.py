@@ -185,7 +185,7 @@ class OffDeferral:
             return False
         if (
             hass.is_stopping
-            or not (burst := _other_devices_commanding(hass, self._address))
+            or not (waiting_for := _other_devices_commanding(hass, self._address))
             # Its link is up (a command to it just landed): waiting saves no slot.
             or async_link_up(hass, self._address)
         ):
@@ -195,9 +195,9 @@ class OffDeferral:
         @callback
         def _async_commands_changed() -> None:
             # A device drops out once its commands have ended: one that starts
-            # after that isn't of this burst.
-            burst.intersection_update(_other_devices_commanding(hass, self._address))
-            if not burst:
+            # after that isn't waited for.
+            waiting_for.intersection_update(_other_devices_commanding(hass, self._address))
+            if not waiting_for:
                 self._async_end(outcome, True, "the other devices' commands are done")
 
         @callback
