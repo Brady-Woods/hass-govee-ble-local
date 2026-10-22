@@ -309,7 +309,7 @@ async def test_power_only_device_is_a_switch_only_as_a_relay_plug(
     expected: tuple[str, str],
 ) -> None:
     """Power alone: a relay plug's profile gets the outlet switch, any other one an on/off
-    light (govee-ble-local 1.7.0's H1162 family), and never both."""
+    light (the H1162 family, after govee-ble-local 1.6.1), and never both."""
     device = make_power_only_light()
     device.profile = dataclasses.replace(device.profile, relay=relay)
     mock_config_entry.add_to_hass(hass)

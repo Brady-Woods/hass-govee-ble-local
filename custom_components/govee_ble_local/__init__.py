@@ -456,9 +456,9 @@ def _async_remove_legacy_switches(hass: HomeAssistant, address: str, device: Dev
     3. A power-only light (power alone, not a relay plug) is now a light, not a
        power switch, so its old switch entity ({address}_power) is orphaned.
        Earlier versions made one for such a model wherever they got a library
-       that has one (from govee-ble-local 1.7.0: H1162 / H1163 / H1167 / H1168),
-       as their ``<2`` range allows. An entity can't move to another domain, so
-       the light starts afresh.
+       that has one (from the govee-ble-local release after 1.6.1: H1162 /
+       H1163 / H1167 / H1168 / H7004), as their ``<2`` range allows. An entity
+       can't move to another domain, so the light starts afresh.
 
     Drop them so only the current entities remain.
     """

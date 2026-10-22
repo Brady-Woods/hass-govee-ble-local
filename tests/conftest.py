@@ -191,9 +191,9 @@ def make_device(
 def make_power_only_light(**kwargs: Any) -> Device:
     """Build a power-only light: a real Device on a profile with POWER alone, not a relay plug's.
 
-    govee-ble-local 1.6.x ships no such profile (every power-only one there is a relay plug);
-    1.7.0 adds H1162 / H1163 / H1167 / H1168. This one is a bulb's profile (H6006) cut down to
-    power; ``kwargs`` go to :func:`make_device`.
+    govee-ble-local 1.6.1 and earlier ship no such profile (every power-only one there is a relay
+    plug); the release after 1.6.1 adds H1162 / H1163 / H1167 / H1168 / H7004. This one is a
+    bulb's profile (H6006) cut down to power; ``kwargs`` go to :func:`make_device`.
     """
     device = make_device("H6006", **kwargs)
     device.profile = dataclasses.replace(

@@ -2723,9 +2723,9 @@ async def test_a_spared_zone_off_is_no_command(
 
 
 # -- 10. power-only lights ------------------------------------------------------------
-# A light with power alone, whose profile isn't a relay plug's (govee-ble-local 1.7.0's
-# H1162 / H1163 / H1167 / H1168): an on/off light, not a switch. No 1.6.x profile is one, so
-# the tests build it (conftest.make_power_only_light).
+# A light with power alone, whose profile isn't a relay plug's (from the govee-ble-local
+# release after 1.6.1: H1162 / H1163 / H1167 / H1168 / H7004): an on/off light, not a switch.
+# No profile in 1.6.1 or earlier is one, so the tests build it (conftest.make_power_only_light).
 
 
 async def test_power_only_light_is_an_on_off_light(

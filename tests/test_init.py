@@ -1114,8 +1114,9 @@ async def test_power_switch_removed_once_the_device_is_a_light(
 ) -> None:
     """The power switch an earlier version made for a power-only light is dropped for its light.
 
-    Earlier versions made every power-only device a switch, so a power-only light (from
-    govee-ble-local 1.7.0) set up by one has a switch entity no platform provides now. A relay
+    Earlier versions made every power-only device a switch, so a power-only light (from the
+    govee-ble-local release after 1.6.1) set up by one has a switch entity no platform provides
+    now. A relay
     plug keeps its switch: the same registry entry, so its customisations stay.
     """
     device = make_power_only_light() if power_only_light else make_device("H5083")
