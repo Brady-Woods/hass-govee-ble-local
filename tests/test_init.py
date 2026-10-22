@@ -13,6 +13,7 @@ from bleak.backends.device import BLEDevice
 import govee_ble_local
 from govee_ble_local import (
     Device,
+    Encryption,
     GoveeBleConnectionError,
     GoveeBleError,
     create_device,
@@ -712,15 +713,22 @@ def _fake_transport() -> Any:
 
 
 @pytest.mark.parametrize(
-    ("pact", "state"),
-    [((1, 1), ConfigEntryState.LOADED), ((2, 3), ConfigEntryState.SETUP_RETRY)],
-    ids=["accepted_pact", "refused_pact"],
+    ("pact", "name", "state"),
+    [
+        ((1, 1), "GVH6009ABCD", ConfigEntryState.LOADED),
+        ((2, 3), "GVH6009ABCD", ConfigEntryState.SETUP_RETRY),
+        ((1, 1), "5134P0098101970F", ConfigEntryState.LOADED),
+        ((2, 3), "5134P0098101970F", ConfigEntryState.SETUP_RETRY),
+    ],
+    ids=["accepted_pact", "refused_pact", "accepted_pact_renamed", "refused_pact_renamed"],
 )
 async def test_setup_with_the_real_library_routes_by_the_advertised_pact(
     hass: HomeAssistant,
     presence: SimpleNamespace,
     mock_bluetooth: SimpleNamespace,
+    *,
     pact: tuple[int, int],
+    name: str,
     state: ConfigEntryState,
 ) -> None:
     """The real create_device builds the H6009 at its advertised pact, or setup retries.
@@ -728,23 +736,29 @@ async def test_setup_with_the_real_library_routes_by_the_advertised_pact(
     Only the BLE transport is faked, so the keyword arguments setup passes and the
     library's pact routing both run for real. The H6009 is served only at its row's
     pacts: at another one the model is supported but refused, which can change with a
-    later advert, so setup retries instead of failing for good.
+    later advert, so setup retries instead of failing for good. That holds when Home
+    Assistant's record shows another name (another device's advertisement merged in):
+    the entry's model and its Govee manufacturer data decide, not the name.
     """
-    info = make_service_info(
-        name="GVH6009ABCD", manufacturer_data=pact_mfg(*pact), advertisement=True
-    )
+    info = make_service_info(name=name, manufacturer_data=pact_mfg(*pact), advertisement=True)
     presence.service_info = mock_bluetooth.last_info.return_value = info
     entry = MockConfigEntry(
         domain=DOMAIN, title=TITLE, unique_id=ADDRESS, data={"address": ADDRESS, CONF_SKU: "H6009"}
     )
     entry.add_to_hass(hass)
-    with _fake_transport():
+    with _fake_transport() as transport:
         await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done(wait_background_tasks=True)
         assert entry.state is state
         if state is ConfigEntryState.LOADED:
-            assert entry.runtime_data.device.profile == profile_for("H6009", pact=pact)
-            assert isinstance(entry.runtime_data.device._conn, FakeConnection)
+            device = entry.runtime_data.device
+            assert device.profile == profile_for("H6009", pact=pact)
+            assert isinstance(device._conn, FakeConnection)
+            # The advert's encrypted Govee block decides, whatever the name: library 1.6.1
+            # (the floor) does so for a renamed record too; 1.6.0 fell back to the profile's
+            # cipher. (The fake transport reports none of its own: check what it was built with.)
+            assert device.pact == pact
+            assert transport.call_args.kwargs["encryption"] is Encryption.AES_RC4_PSK
             assert await hass.config_entries.async_unload(entry.entry_id)
         else:
             assert entry.error_reason_translation_domain == DOMAIN

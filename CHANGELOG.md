@@ -8,6 +8,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **Rejected commands and secret keys are back in the diagnostics.** Since `govee-ble-local` 1.5.0
+  the library logs a refused write only at DEBUG and raises `GoveeBleCommandRejected` instead, so
+  refusals had dropped out of `recent_warnings`. The integration now logs a refused command and a
+  rejected secret key at WARNING with the device address, from a service call or a poll. The
+  always-on capture also keeps this integration's own WARNING+ lines for the device (rejections,
+  failed polls), as well as the library's.
+
+### Changed
+- `scripts/check.sh` in a dev checkout: when `../govee-ble-local` no longer tracks its generated
+  Kaitai classes (it then builds them from `spec/*.ksy` on install), the gate requires the JVM
+  `kaitai-struct-compiler` 0.11 and stops with install instructions if it is missing, instead of
+  failing inside a quiet `pip install`. CI and `FROM_MANIFEST=1` install released packages, which
+  ship the classes, so they need no compiler.
+
+## [1.6.1] - 2026-10-22
+
+Requires `govee-ble-local` 1.6.1 or newer (any 1.x) **from PyPI** and Home Assistant 2026.10+.
+
+### Changed
+- **Requires `govee-ble-local` 1.6.1 or newer** (`>=1.6.1,<2`, was `>=1.6.0,<2`), which Home Assistant
+  installs on its next restart. 1.6.1 fixes a light that ignored every command when Home
+  Assistant's Bluetooth record for it showed another device's name: the library took the light for
+  an unencrypted one and talked to it in plain text. It now takes encryption and the protocol
+  version from the light's own Govee manufacturer data, whatever the name, as the Govee app does
+  for a light already added. Seen on the lab's H6008, whose record had a nearby device's name
+  merged in through an ESPHome proxy. Reloading the light's entry helped only once Home Assistant's
+  record showed the light's own name again: the library picks the cipher when the light is set up.
+- The README's list of supported models is generated from `govee-ble-local` 1.6.1 (unchanged: 98,
+  plus 6 opt-in), and shows where a model's colour-temperature range depends on its hardware or
+  software version or its protocol (the H61A8 narrows to 2700-6500 K from hardware 3.08.01; the
+  H1401 widens to 1000-10000 K from software 1.00.15; the H61F2 does on protocol 4,1).
+
+### Fixed
 - **A segment light follows its zone's power** (H60A6, H6047). With the fixture on but the
   segment's zone off (an H60A6's main panel or ring, an H6047 bar), a segment light showed on,
   and turning it on sent the colour to a segment that stayed dark: with the fixture on, a colour
@@ -35,22 +68,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the 2-minute cap, which still counts from when it came due. The first poll after setup and the
   return poll stay held apart, as before. A manual refresh, and a poll the cap released, still
   run anyway.
+- **A light whose record shows another device's name no longer fails setup for good when its
+  protocol version isn't served.** Setup read the version from the name-gated advertisement check,
+  found nothing, and reported the model as unsupported (a permanent error). It now reads the
+  light's Govee manufacturer data, so setup retries ("protocol not supported") as for any light.
+  Adding such a light in the config flow stops with "protocol not supported" too, instead of
+  creating an entry that can't load.
 - Tests: a context without a user is checked to be no person's without the user store being
   asked. Home Assistant answers "no user" for no id today, so dropping that check in
   `helpers.async_context_is_person` passed every test. No change to the integration itself.
-- **Rejected commands and secret keys are back in the diagnostics.** Since `govee-ble-local` 1.5.0
-  the library logs a refused write only at DEBUG and raises `GoveeBleCommandRejected` instead, so
-  refusals had dropped out of `recent_warnings`. The integration now logs a refused command and a
-  rejected secret key at WARNING with the device address, from a service call or a poll. The
-  always-on capture also keeps this integration's own WARNING+ lines for the device (rejections,
-  failed polls), as well as the library's.
-
-### Changed
-- `scripts/check.sh` in a dev checkout: when `../govee-ble-local` no longer tracks its generated
-  Kaitai classes (it then builds them from `spec/*.ksy` on install), the gate requires the JVM
-  `kaitai-struct-compiler` 0.11 and stops with install instructions if it is missing, instead of
-  failing inside a quiet `pip install`. CI and `FROM_MANIFEST=1` install released packages, which
-  ship the classes, so they need no compiler.
 
 ## [1.6.0] - 2026-10-21
 
@@ -647,7 +673,8 @@ Migration to the `govee-ble-local` v3 library and a large feature expansion.
 - Fixed / added entity icons and names; on/off tracked passively from advertisements between
   polls.
 
-[Unreleased]: https://github.com/Brady-Woods/hass-govee-ble-local/compare/v1.6.0...HEAD
+[Unreleased]: https://github.com/Brady-Woods/hass-govee-ble-local/compare/v1.6.1...HEAD
+[1.6.1]: https://github.com/Brady-Woods/hass-govee-ble-local/compare/v1.6.0...v1.6.1
 [1.6.0]: https://github.com/Brady-Woods/hass-govee-ble-local/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/Brady-Woods/hass-govee-ble-local/compare/v1.4.1...v1.5.0
 [1.4.1]: https://github.com/Brady-Woods/hass-govee-ble-local/compare/v1.4.0...v1.4.1

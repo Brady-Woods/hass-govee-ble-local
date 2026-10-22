@@ -39,7 +39,7 @@ from homeassistant.helpers.selector import (
 import probatio as vol
 
 from .const import CONF_ALLOW_MODELLED, CONF_CLEAR_SECRET, CONF_SECRET, CONF_SKU, DOMAIN
-from .helpers import BLE_ERRORS, parse_secret
+from .helpers import BLE_ERRORS, advertised_pact, parse_secret
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -228,9 +228,7 @@ class GoveeBleLocalConfigFlow(ConfigFlow, domain=DOMAIN):
 
     def _setup_pact(self, address: str) -> tuple[int, int] | None:
         """Return the pact of the advert setup will route by (the latest connectable one)."""
-        info = async_last_service_info(self.hass, address, connectable=True)
-        adv = identify(info.name, info.manufacturer_data) if info else None
-        return adv.pact if adv else None
+        return advertised_pact(async_last_service_info(self.hass, address, connectable=True))
 
     def _create_entry(self, device: _PendingDevice, secret: str | None = None) -> ConfigFlowResult:
         """Create the entry for ``device``, with its secret key if it has one."""

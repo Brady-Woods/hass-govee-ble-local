@@ -360,17 +360,25 @@ async def test_user_flow_offers_only_devices_supported_at_their_pact(
     assert profile.call_args.kwargs == {"pact": pact, "allow_modelled": False}
 
 
+# Another device's advertisement merged into the record: its name and its manufacturer block.
+RENAMED = "5134P0098101970F"
+FOREIGN = {11816: bytes.fromhex("89304dad0000")}
+
+
 @pytest.mark.parametrize(
-    ("name", "flow_mfg", "latest_mfg", "entry_pact"),
+    ("name", "latest_name", "flow_mfg", "latest_mfg", "entry_pact"),
     [
-        ("GVH6009ABCD", {}, pact_mfg(1, 1), (1, 1)),  # no pact, then one its row accepts
-        ("GVH6009ABCD", {}, pact_mfg(2, 3), None),  # no pact, then one it doesn't: refused
-        ("GVH6009ABCD", {}, {}, None),  # still no pact: any pact, as setup will take it
-        ("GVH6009ABCD", {}, None, None),  # no connectable advert to check against
-        ("GVH6009ABCD", pact_mfg(1, 1), pact_mfg(2, 3), None),  # the pact changed: refused
-        (LOCAL_NAME, pact_mfg(1, 1), pact_mfg(9, 9), (9, 9)),  # changed, still served
-        ("GVH6009ABCD", pact_mfg(1, 1), {}, (1, 1)),  # setup's advert has none: flow's stands
-        ("GVH6009ABCD", pact_mfg(1, 1), None, (1, 1)),  # no connectable advert: flow's stands
+        ("GVH6009ABCD", None, {}, pact_mfg(1, 1), (1, 1)),  # no pact, then one its row accepts
+        ("GVH6009ABCD", None, {}, pact_mfg(2, 3), None),  # no pact, then one it doesn't: refused
+        ("GVH6009ABCD", None, {}, {}, None),  # still no pact: any pact, as setup will take it
+        ("GVH6009ABCD", None, {}, None, None),  # no connectable advert to check against
+        ("GVH6009ABCD", None, pact_mfg(1, 1), pact_mfg(2, 3), None),  # the pact changed: refused
+        (LOCAL_NAME, None, pact_mfg(1, 1), pact_mfg(9, 9), (9, 9)),  # changed, still served
+        ("GVH6009ABCD", None, pact_mfg(1, 1), {}, (1, 1)),  # setup's advert has none
+        ("GVH6009ABCD", None, pact_mfg(1, 1), None, (1, 1)),  # no connectable advert
+        # Setup's advert shows another device's name: its Govee block still decides.
+        ("GVH6009ABCD", RENAMED, pact_mfg(1, 1), {**FOREIGN, **pact_mfg(2, 3)}, None),
+        (LOCAL_NAME, RENAMED, pact_mfg(1, 1), {**FOREIGN, **pact_mfg(9, 9)}, (9, 9)),
     ],
     ids=[
         "none_then_accepted",
@@ -381,6 +389,8 @@ async def test_user_flow_offers_only_devices_supported_at_their_pact(
         "changed_accepted",
         "pact_then_none",
         "pact_no_advert",
+        "renamed_refused",
+        "renamed_changed_accepted",
     ],
 )
 async def test_finish_rechecks_at_the_setup_advert_pact(
@@ -388,6 +398,7 @@ async def test_finish_rechecks_at_the_setup_advert_pact(
     setup_entry: AsyncMock,
     *,
     name: str,
+    latest_name: str | None,
     flow_mfg: dict[int, bytes],
     latest_mfg: dict[int, bytes] | None,
     entry_pact: tuple[int, int] | None,
@@ -399,7 +410,9 @@ async def test_finish_rechecks_at_the_setup_advert_pact(
     )
     assert result["step_id"] == "bluetooth_confirm"
     latest = (
-        None if latest_mfg is None else make_service_info(name=name, manufacturer_data=latest_mfg)
+        None
+        if latest_mfg is None
+        else make_service_info(name=latest_name or name, manufacturer_data=latest_mfg)
     )
     with (
         patch(f"{FLOW}.async_last_service_info", return_value=latest) as last,
