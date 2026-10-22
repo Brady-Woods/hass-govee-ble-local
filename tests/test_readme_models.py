@@ -65,9 +65,10 @@ def test_the_readme_lists_the_supported_models() -> None:
 def test_a_model_served_only_at_some_pacts_is_listed_with_them() -> None:
     """A model with no profile without a pact is described at the pacts it is served at.
 
-    Library 1.6.1 has none; the device-list release lists 19 (H6159 at 2,1, the H6145 at
-    10,1-3, ...), which ``profile_for`` refuses without one. Modelled here on the H6009's
-    profile: one row's features at each of its pacts, else each pact's.
+    Library 1.6.1 has none; the device-list release lists such models in ``supported_skus``
+    (H6159 at 2,1, the H6145 at 10,1-3, ...), which ``profile_for`` refuses without a pact.
+    Modelled here on the H6009's profile: one row's features at each of its pacts, else each
+    pact's.
     """
     generator = _generator()
     real_profile_for, real_supported = generator.profile_for, generator.supported_skus

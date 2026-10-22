@@ -46,8 +46,9 @@ PLUG = "switch.test_ceiling"
 def _served_pact(sku: str, *, allow_modelled: bool) -> tuple[int, int] | None:
     """None for a model the library serves without a pact, else the first pact it serves it at.
 
-    Some models are served only at their rows' pacts (none in library 1.6.1; 19 in its
-    device-list release). The library lists no model's pacts, so they are asked for in order.
+    Some models are served only at their rows' pacts (none in library 1.6.1; its device-list
+    release has some, default and opt-in). The library lists no model's pacts, so they are asked
+    for in order.
     """
     if profile_for(sku, allow_modelled=allow_modelled) is not None:
         return None
