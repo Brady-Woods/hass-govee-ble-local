@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.6.1] - 2026-10-22
+
+Requires `govee-ble-local` 1.6.1 or newer (any 1.x) **from PyPI** and Home Assistant 2026.10+.
+
 ### Changed
 - **Requires `govee-ble-local` 1.6.1 or newer** (`>=1.6.1,<2`, was `>=1.6.0,<2`), which Home Assistant
   installs on its next restart. 1.6.1 fixes a light that ignored every command when Home
@@ -654,7 +658,8 @@ Migration to the `govee-ble-local` v3 library and a large feature expansion.
 - Fixed / added entity icons and names; on/off tracked passively from advertisements between
   polls.
 
-[Unreleased]: https://github.com/Brady-Woods/hass-govee-ble-local/compare/v1.6.0...HEAD
+[Unreleased]: https://github.com/Brady-Woods/hass-govee-ble-local/compare/v1.6.1...HEAD
+[1.6.1]: https://github.com/Brady-Woods/hass-govee-ble-local/compare/v1.6.0...v1.6.1
 [1.6.0]: https://github.com/Brady-Woods/hass-govee-ble-local/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/Brady-Woods/hass-govee-ble-local/compare/v1.4.1...v1.5.0
 [1.4.1]: https://github.com/Brady-Woods/hass-govee-ble-local/compare/v1.4.0...v1.4.1
