@@ -55,7 +55,14 @@ from .const import (
     STOP_CLOSE_TIMEOUT_SECONDS,
 )
 from .coordinator import GoveeBleLocalCoordinator
-from .helpers import clean_mac, clean_text, has_fixture_light, is_colour_zone, parse_secret
+from .helpers import (
+    advertised_pact,
+    clean_mac,
+    clean_text,
+    has_fixture_light,
+    is_colour_zone,
+    parse_secret,
+)
 from .services import async_register_services
 
 _LOGGER = logging.getLogger(__name__)
@@ -200,18 +207,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: GoveeBleLocalConfigEntry
             allow_modelled=allow_modelled,
         )
     except GoveeBleNotSupported as err:
-        adv = identify(service_info.name, service_info.manufacturer_data) if service_info else None
-        if (
-            adv is not None
-            and adv.pact is not None
-            and is_supported_sku(sku, allow_modelled=allow_modelled)
-        ):
+        pact = advertised_pact(service_info)
+        if pact is not None and is_supported_sku(sku, allow_modelled=allow_modelled):
             # The library serves the model, only not at the pact the device advertises now.
             # A later advert can carry another, so retry instead of giving up for good.
             raise ConfigEntryNotReady(
                 translation_domain=DOMAIN,
                 translation_key="protocol_not_supported",
-                translation_placeholders={"sku": sku, "protocol": "{},{}".format(*adv.pact)},
+                translation_placeholders={"sku": sku, "protocol": "{},{}".format(*pact)},
             ) from err
         # Permanent: retrying can't make an unsupported model supported.
         raise ConfigEntryError(
