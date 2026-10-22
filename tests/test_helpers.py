@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 import dataclasses
+from unittest.mock import AsyncMock, patch
 
 from bleak.exc import BleakError
 from govee_ble_local import Capability, Device, GoveeBleConnectionError, GoveeBleError, Zone
@@ -197,3 +198,15 @@ async def test_contexts_without_a_person(hass: HomeAssistant) -> None:
     assert not await async_context_is_person(hass, Context())
     assert not await async_context_is_person(hass, Context(user_id=system.id))
     assert not await async_context_is_person(hass, Context(user_id=deleted.id))
+
+
+async def test_a_context_without_a_user_is_never_looked_up(
+    hass: HomeAssistant, hass_admin_user: MockUser
+) -> None:
+    """A context without a user is no person's whatever the user store would answer for it:
+    it isn't asked (it answers None for no id today, which alone would hide a missing check)."""
+    with patch.object(
+        hass.auth, "async_get_user", AsyncMock(return_value=hass_admin_user)
+    ) as get_user:
+        assert not await async_context_is_person(hass, Context())
+    get_user.assert_not_awaited()
