@@ -34,6 +34,7 @@ from custom_components.govee_ble_local import config_flow
 from custom_components.govee_ble_local.config_flow import GoveeBleLocalConfigFlow
 from custom_components.govee_ble_local.const import (
     CONF_ALLOW_MODELLED,
+    CONF_BROADCAST,
     CONF_CLEAR_SECRET,
     CONF_SECRET,
     CONF_SKU,
@@ -41,7 +42,15 @@ from custom_components.govee_ble_local.const import (
 )
 
 from .conftest import ModelledCase, make_device, make_service_info
-from .const import ADDRESS, LOCAL_NAME, PLUG_ADDRESS, PLUG_NAME, SECRET_HEX, pact_mfg
+from .const import (
+    ADDRESS,
+    LOCAL_NAME,
+    PLUG_ADDRESS,
+    PLUG_NAME,
+    SECRET_HEX,
+    broadcast_data,
+    pact_mfg,
+)
 
 FLOW = "custom_components.govee_ble_local.config_flow"
 UNSUPPORTED_NAME = "GVH9999ABCD"
@@ -234,7 +243,11 @@ async def test_bluetooth_discovery_creates_entry(
     result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["title"] == LOCAL_NAME
-    assert result["data"] == {CONF_ADDRESS: ADDRESS, CONF_SKU: "H60A6"}
+    assert result["data"] == {
+        CONF_ADDRESS: ADDRESS,
+        CONF_SKU: "H60A6",
+        CONF_BROADCAST: broadcast_data(),
+    }
     assert result["result"].unique_id == ADDRESS
     await assert_set_up_once(hass, setup_entry)
 
@@ -429,6 +442,28 @@ async def test_finish_rechecks_at_the_setup_advert_pact(
     else:
         assert result["type"] is FlowResultType.CREATE_ENTRY
         assert profile.call_args.kwargs == {"pact": entry_pact, "allow_modelled": False}
+        # The entry keeps that advert's header, for a setup whose record has none.
+        assert result["data"].get(CONF_BROADCAST) == (
+            None if entry_pact is None else broadcast_data(*entry_pact)
+        )
+
+
+async def test_the_entry_keeps_the_setup_adverts_header(
+    hass: HomeAssistant, setup_entry: AsyncMock
+) -> None:
+    """At the same pact, the entry takes the later advert's encrypt flag and version."""
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": SOURCE_BLUETOOTH}, data=make_service_info()
+    )
+    # Header 0x02: no encrypt flag, broadcast version 2; the same Govee block otherwise.
+    plaintext = {0x8802: next(iter(pact_mfg(1, 1).values()))}
+    with patch(
+        f"{FLOW}.async_last_service_info",
+        return_value=make_service_info(manufacturer_data=plaintext),
+    ):
+        result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["data"][CONF_BROADCAST] == {"pact": [1, 1], "encrypted": False, "version": 2}
 
 
 # -- modelled-only models ---------------------------------------------------------
@@ -454,6 +489,7 @@ async def test_modelled_model_asks_before_setup_and_records_the_opt_in(
         CONF_ADDRESS: ADDRESS,
         CONF_SKU: modelled.sku,
         CONF_ALLOW_MODELLED: True,
+        CONF_BROADCAST: broadcast_data(*modelled.pact),
     }
 
 
@@ -565,6 +601,20 @@ async def test_reconfigure_checks_the_secret_with_the_entrys_opt_in(
     assert profile.call_args.kwargs == {"pact": None, "allow_modelled": opted_in}
 
 
+async def test_reconfigure_checks_the_secret_at_the_stored_pact(
+    hass: HomeAssistant, setup_entry: AsyncMock
+) -> None:
+    """The profile is looked up at the entry's stored pact, as setup routes the model."""
+    entry = plug_entry(**{CONF_BROADCAST: broadcast_data(1, 1)})
+    entry.add_to_hass(hass)
+    with patch(f"{FLOW}.profile_for", wraps=config_flow.profile_for) as profile:
+        result = await entry.start_reconfigure_flow(hass)
+    assert result["step_id"] == "reconfigure"
+    assert CONF_SECRET in result["data_schema"].schema
+    assert profile.call_args.args == ("H5083",)
+    assert profile.call_args.kwargs == {"pact": (1, 1), "allow_modelled": False}
+
+
 # -- user flow ----------------------------------------------------------------
 
 
@@ -596,7 +646,11 @@ async def test_user_flow_lists_only_supported_new_devices(
     )
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["title"] == LOCAL_NAME
-    assert result["data"] == {CONF_ADDRESS: ADDRESS, CONF_SKU: "H60A6"}
+    assert result["data"] == {
+        CONF_ADDRESS: ADDRESS,
+        CONF_SKU: "H60A6",
+        CONF_BROADCAST: broadcast_data(),
+    }
     # Setting the domain up also sets up the other (already configured) entry.
     await hass.async_block_till_done()
     set_up = [call.args[1].entry_id for call in setup_entry.call_args_list]
@@ -655,6 +709,7 @@ async def test_user_flow_secret_device_goes_to_secret_step(
         CONF_ADDRESS: PLUG_ADDRESS,
         CONF_SKU: "H5083",
         CONF_SECRET: SECRET_HEX,
+        CONF_BROADCAST: broadcast_data(),
     }
     await assert_set_up_once(hass, setup_entry)
 
@@ -679,6 +734,7 @@ async def test_secret_read_shows_progress_then_creates_entry(
         CONF_ADDRESS: PLUG_ADDRESS,
         CONF_SKU: "H5083",
         CONF_SECRET: SECRET_HEX,
+        CONF_BROADCAST: broadcast_data(),
     }
     plug_device.read_secret.assert_awaited_once()
     plug_device.stop.assert_awaited_once()
@@ -836,6 +892,7 @@ async def test_manual_secret_normalized(
         CONF_ADDRESS: PLUG_ADDRESS,
         CONF_SKU: "H5083",
         CONF_SECRET: SECRET_HEX,
+        CONF_BROADCAST: broadcast_data(),
     }
     await assert_set_up_once(hass, setup_entry)
 
@@ -849,7 +906,11 @@ async def test_manual_secret_blank_allowed_on_setup(
     result = await hass.config_entries.flow.async_configure(form["flow_id"], {CONF_SECRET: ""})
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["title"] == PLUG_NAME
-    assert result["data"] == {CONF_ADDRESS: PLUG_ADDRESS, CONF_SKU: "H5083"}
+    assert result["data"] == {
+        CONF_ADDRESS: PLUG_ADDRESS,
+        CONF_SKU: "H5083",
+        CONF_BROADCAST: broadcast_data(),
+    }
     assert CONF_SECRET not in result["data"]
     await assert_set_up_once(hass, setup_entry)
 
@@ -889,6 +950,7 @@ async def test_cloud_secret_picks_matching_device(
         CONF_ADDRESS: PLUG_ADDRESS,
         CONF_SKU: "H5083",
         CONF_SECRET: SECRET_HEX,
+        CONF_BROADCAST: broadcast_data(),
     }
     assert CONF_EMAIL not in result["data"]
     assert CONF_PASSWORD not in result["data"]

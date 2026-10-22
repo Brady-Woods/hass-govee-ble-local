@@ -18,6 +18,7 @@ from govee_ble_local import (
     GoveeBleNotSupported,
     GoveeBleTimeout,
     Zone,
+    profile_for,
     supported_skus,
 )
 from govee_ble_local.wire import build
@@ -42,8 +43,21 @@ from .const import ADDRESS
 PLUG = "switch.test_ceiling"
 
 
+def _served_pact(sku: str, *, allow_modelled: bool) -> tuple[int, int] | None:
+    """None for a model the library serves without a pact, else the first pact it serves it at.
+
+    Some models are served only at their rows' pacts (none in library 1.6.1; 19 in its
+    device-list release). The library lists no model's pacts, so they are asked for in order.
+    """
+    if profile_for(sku, allow_modelled=allow_modelled) is not None:
+        return None
+    pacts = ((pact_type, code) for pact_type in range(256) for code in range(256))
+    return next(p for p in pacts if profile_for(sku, pact=p, allow_modelled=allow_modelled))
+
+
 def _every_sku() -> list[Any]:
-    """(device_sku, allow_modelled) for every SKU the library supports, then the opt-in-only ones.
+    """(device_sku, allow_modelled, device_pact) for every SKU the library supports, then the
+    opt-in-only ones, at a pact it serves them at where they need one.
 
     The opt-in list is the library's own (supported_skus with allow_modelled, minus without),
     never a fixed one: an opted-in device is set up through the flow's confirmation, so it gets
@@ -52,8 +66,14 @@ def _every_sku() -> list[Any]:
     default = supported_skus()
     opt_in = sorted(set(supported_skus(allow_modelled=True)) - set(default))
     return [
-        *(pytest.param(sku, False, id=sku) for sku in default),
-        *(pytest.param(sku, True, id=f"{sku}-opted_in") for sku in opt_in),
+        *(
+            pytest.param(sku, False, _served_pact(sku, allow_modelled=False), id=sku)
+            for sku in default
+        ),
+        *(
+            pytest.param(sku, True, _served_pact(sku, allow_modelled=True), id=f"{sku}-opted_in")
+            for sku in opt_in
+        ),
     ]
 
 
@@ -261,7 +281,7 @@ async def test_light_fixtures_have_no_power_switch(
     assert hass.states.async_all("switch") == []
 
 
-@pytest.mark.parametrize(("device_sku", "allow_modelled"), _every_sku())
+@pytest.mark.parametrize(("device_sku", "allow_modelled", "device_pact"), _every_sku())
 async def test_every_profile_gets_one_entity_per_relay(
     hass: HomeAssistant,
     mock_config_entry: MockConfigEntry,

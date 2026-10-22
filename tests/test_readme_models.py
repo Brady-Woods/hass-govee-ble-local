@@ -7,16 +7,20 @@ it lists must still be supported: a newer library may add models, never drop the
 
 from __future__ import annotations
 
+import dataclasses
 from importlib.metadata import version
 import importlib.util
 import json
 from pathlib import Path
 import re
 from types import ModuleType
+from typing import Any
+from unittest.mock import patch
 
-from govee_ble_local import supported_skus
+from govee_ble_local import Capability, supported_skus
 from packaging.requirements import Requirement
 from packaging.version import Version
+import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -56,3 +60,65 @@ def test_the_readme_lists_the_supported_models() -> None:
     listed = set(re.findall(r"^\| ([A-Z][A-Z0-9]+) \|", block, re.MULTILINE))
     assert listed
     assert listed <= set(supported_skus(allow_modelled=True))
+
+
+def test_a_model_served_only_at_some_pacts_is_listed_with_them() -> None:
+    """A model with no profile without a pact is described at the pacts it is served at.
+
+    Library 1.6.1 has none; the device-list release lists 19 (H6159 at 2,1, the H6145 at
+    10,1-3, ...), which ``profile_for`` refuses without one. Modelled here on the H6009's
+    profile: one row's features at each of its pacts, else each pact's.
+    """
+    generator = _generator()
+    real_profile_for, real_supported = generator.profile_for, generator.supported_skus
+    light = real_profile_for("H6009")
+    segmented = dataclasses.replace(
+        light, capabilities=light.capabilities | {Capability.SEGMENTS}, segments=6
+    )
+    served = {
+        "H6159": {(2, 1): light},
+        "H6145": {(10, 1): light, (10, 2): light, (10, 3): light},
+        "H6119": {(10, 1): light, (10, 2): segmented},
+    }
+
+    def _profile_for(
+        sku: str, *, pact: tuple[int, int] | None = None, allow_modelled: bool = False
+    ) -> Any:
+        if sku in served:
+            return served[sku].get(pact)
+        return real_profile_for(sku, pact=pact, allow_modelled=allow_modelled)
+
+    def _supported(*, allow_modelled: bool = False) -> list[str]:
+        return sorted({*real_supported(allow_modelled=allow_modelled), *served})
+
+    _, features = generator._describe(light)
+    _, segment_features = generator._describe(segmented)
+    with (
+        patch.object(generator, "profile_for", _profile_for),
+        patch.object(generator, "supported_skus", _supported),
+    ):
+        assert generator._features("H6159") == ("Light", f"{features}; only at protocol 2,1", True)
+        assert generator._features("H6145") == (
+            "Light",
+            f"{features}; only at protocol 10,1, 10,2 or 10,3",
+            True,
+        )
+        assert generator._features("H6119") == (
+            "Light",
+            f"at protocol 10,1: {features}; at protocol 10,2: {segment_features}",
+            True,
+        )
+        assert generator._features("H6009") == ("Light", features, False)
+        block = generator.render()
+    assert f"| H6159 | Light | {features}; only at protocol 2,1 | Supported |" in block
+    assert "A model supported only at some protocol versions is set up once" in block
+
+
+def test_a_listed_model_served_at_no_probed_pact_is_an_error() -> None:
+    """Rather than a row without features: the generator's probe must then reach further."""
+    generator = _generator()
+    with (
+        patch.object(generator, "profile_for", lambda *_a, **_k: None),
+        pytest.raises(ValueError, match="H6159: listed as supported but has no profile"),
+    ):
+        generator._features("H6159")

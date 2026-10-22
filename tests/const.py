@@ -29,4 +29,12 @@ def pact_mfg(pact_type: int, pact_code: int) -> dict[int, bytes]:
     }
 
 
+def broadcast_data(pact_type: int = 1, pact_code: int = 1) -> dict[str, object]:
+    """The config entry's stored header (CONF_BROADCAST) of a govee_mfg / pact_mfg advert.
+
+    GOVEE_COMPANY_ID's low byte 0x43 is the header: the encrypt flag 0x40, broadcast version 3.
+    """
+    return {"pact": [pact_type, pact_code], "encrypted": True, "version": 3}
+
+
 SECRET_HEX = "a1b2c3d4e5f60718"
