@@ -28,14 +28,16 @@ END = "<!-- END supported-models -->"
 TESTED = frozenset({"H5083", "H6006", "H6008", "H6047", "H6052", "H60A6", "H61A8", "H6641"})
 
 # The pacts asked about for a model the library serves only at the pact it advertises (it has no
-# profile without one): every (pact_type, pact_code) up to 255 each, past any the library routes.
-# The library has no public list of a model's pacts; asking at each takes well under a second.
+# profile without one): every (pact_type, pact_code) up to 255 each. pact_type is a 2-byte field,
+# but the highest any library row lists is 10 (device-list release), and asking at all 65536
+# types would take seconds per model: a model served only above 255 raises in _features. The
+# library has no public list of a model's pacts; asking at each of these takes about 44 ms.
 PROBED_PACTS = tuple((pact_type, code) for pact_type in range(256) for code in range(256))
 
 
 def _pacts(pacts: list[tuple[int, int]]) -> str:
-    """Return ``pacts`` as the README names them: "2,1", "10,1 or 10,2"."""
-    names = [f"{pact_type},{code}" for pact_type, code in pacts]
+    """Return ``pacts`` as the README names them: "(2,1)", "(10,1) or (10,2)"."""
+    names = [f"({pact_type},{code})" for pact_type, code in pacts]
     return names[0] if len(names) == 1 else f"{', '.join(names[:-1])} or {names[-1]}"
 
 

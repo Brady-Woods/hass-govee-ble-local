@@ -10,27 +10,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - **Setup remembers a light's protocol version and encryption.** The entry keeps the last Govee
   broadcast header Home Assistant heard from the light (its protocol version, encrypt flag and
-  broadcast version), from the config flow and from each setup that hears a newer one, as the
-  Govee app keeps it for a light already added. When Home Assistant's record of the light carries
-  no Govee data (after a restart, before the light advertises again, or with another device's
-  advertisement merged in), setup builds the light from the stored header instead of the model's
-  defaults. So an H6008, whose firmware encrypts although its model's profile says plain text,
-  stays encrypted after such a restart, and a model whose protocol version picks its profile or
-  brightness range gets the right one: without it, `govee-ble-local`'s coming device-list release
-  would give the H6118 / H6179 / H6194 the wrong brightness byte, and refuse brightness on a light
-  whose range depends on the protocol version. An entry added before this version gets the header
-  from its first setup that hears the light; until then it is set up as before. Diagnostics show
-  the stored header.
-- **A model served only at some protocol versions waits for one instead of failing for good.** The
+  broadcast version), from the config flow, each setup and each advertisement that carries a newer
+  one, as the Govee app keeps it for a light already added. When Home Assistant's record of the
+  light carries no Govee data (after a restart, before the light advertises again, or with another
+  device's advertisement merged in), setup builds the light from the stored header instead of the
+  model's defaults. So an H6008, whose firmware encrypts although its model's profile says plain
+  text, stays encrypted after such a restart, and a model whose protocol version picks its profile
+  or brightness range gets the right one: without it, `govee-ble-local`'s coming device-list
+  release would give the H6118 / H6179 / H6194 the wrong brightness byte, and refuse brightness on
+  a light whose range depends on the protocol version. An entry added before this version gets the
+  header from the first advertisement that carries it. A light set up before any was heard reloads
+  once then, if its protocol version gives the model another profile. Diagnostics show the stored
+  header.
+- **A model whose rows need a protocol version waits for one instead of failing for good.** The
   coming device-list release of `govee-ble-local` serves some models (H6159, the H6145 family,
   H6076, the opt-in H70B3 and others) only at the protocol versions their rows list, and not at all
   without one. Setup reported such a light as unsupported (a permanent error) when no protocol
-  version had been heard, or one the model isn't served at. It now retries ("protocol version not
-  known yet", or "protocol not supported"), and keeps the permanent "model not supported" for a
-  model the library doesn't list at all. Today's models are all served without a protocol version,
-  so nothing changes for them.
+  version had been heard, or one the model isn't served at. It now retries ("protocol unknown", or
+  "protocol not supported"), and keeps the permanent "model not supported" for a model the library
+  doesn't list at all. Today's models are all served without a protocol version, so nothing changes
+  for them.
 - The README's model list generator no longer fails on such a model: its row names the protocol
-  versions it is served at.
+  versions it is served at, as "(10,1), (10,2) or (10,3)".
 
 ## [1.6.1] - 2026-10-22
 

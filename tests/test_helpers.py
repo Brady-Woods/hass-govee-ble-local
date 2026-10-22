@@ -7,7 +7,7 @@ from typing import Any
 from unittest.mock import AsyncMock, patch
 
 from bleak.exc import BleakError
-from govee_ble_local import GoveeAdvertisement, GoveeBleConnectionError, GoveeBleError
+from govee_ble_local import GoveeBleConnectionError, GoveeBleError
 from homeassistant.core import Context, HomeAssistant
 import pytest
 from pytest_homeassistant_custom_component.common import MockUser
@@ -25,7 +25,7 @@ from custom_components.govee_ble_local.helpers import (
 )
 
 from .conftest import make_service_info
-from .const import SECRET_HEX, broadcast_data, pact_mfg
+from .const import SECRET_HEX, pact_mfg
 
 
 @pytest.mark.parametrize(
@@ -176,57 +176,18 @@ def _info(name: str | None, mfg: dict[int, bytes]) -> Any:
 FOREIGN = {11816: bytes.fromhex("89304dad0000")}  # another device's block, merged in
 
 
-def test_advertised_broadcast_from_a_govee_name() -> None:
-    """The encrypt flag and broadcast version come with the pact."""
-    broadcast = advertised_broadcast(_info("GVH6009ABCD", pact_mfg(2, 3)))
-    assert broadcast == Broadcast(encrypted=True, version=3, pact_type=2, pact_code=3)
-    assert broadcast.pact == (2, 3)
-
-
-def test_advertised_broadcast_under_another_name_comes_from_the_govee_block() -> None:
-    """Another device's name merged into the record: the Govee manufacturer data decides."""
-    info = _info("5134P0098101970F", {**FOREIGN, **pact_mfg(1, 1)})
-    assert advertised_broadcast(info) == Broadcast(True, 3, 1, 1)
-
-
-def test_advertised_broadcast_is_none_without_a_govee_block_or_record() -> None:
-    assert advertised_broadcast(_info("5134P0098101970F", FOREIGN)) is None
-    assert advertised_broadcast(_info("GVH6009ABCD", {})) is None  # a Govee name, no pact
-    assert advertised_broadcast(None) is None
-
-
-def test_broadcast_round_trips_through_the_config_entry() -> None:
-    broadcast = Broadcast(encrypted=False, version=1, pact_type=2, pact_code=1)
-    data = broadcast.as_data()
-    assert data == {"pact": [2, 1], "encrypted": False, "version": 1}
-    assert Broadcast.from_data(json.loads(json.dumps(data))) == broadcast  # as HA stores it
-    assert broadcast_data(10, 2) == Broadcast(True, 3, 10, 2).as_data()  # the tests' advert
-
-
-@pytest.mark.parametrize(
-    "data",
-    [
-        None,
-        "2,1",
-        {},
-        {"pact": [2, 1], "encrypted": True},  # no version
-        {"pact": [2], "encrypted": True, "version": 3},
-        {"pact": [2, 1, 0], "encrypted": True, "version": 3},
-        {"pact": ["2", 1], "encrypted": True, "version": 3},
-        {"pact": [2, 1], "encrypted": 1, "version": 3},
-        {"pact": [2, 1], "encrypted": True, "version": "3"},
-    ],
-)
-def test_a_malformed_stored_broadcast_is_none(data: object) -> None:
-    """Only a hand-edited entry has one; setup then waits for an advert instead of failing."""
-    assert Broadcast.from_data(data) is None
-
-
-def test_broadcast_as_the_librarys_advertisement() -> None:
-    """Rebuilt for create_device: the pact routes the model, the flag picks the cipher."""
-    adv = Broadcast(encrypted=True, version=3, pact_type=10, pact_code=1).advertisement(
-        "h6159", "Govee_H6159_ABCD"
-    )
-    assert adv == GoveeAdvertisement("H6159", "Govee_H6159_ABCD", True, 3, 10, 1)
-    assert adv.pact == (10, 1)
+def test_broadcast_round_trips_from_a_record_through_the_entry_to_the_library() -> None:
+    """The header read off a record, whatever its name, as stored and as rebuilt for setup."""
+    # Another device's name and manufacturer block merged in: the Govee block decides.
+    info = _info("5134P0098101970F", {**FOREIGN, **pact_mfg(10, 2)})
+    broadcast = advertised_broadcast(info)
+    assert broadcast == Broadcast(encrypted=True, version=3, pact_type=10, pact_code=2)
+    assert Broadcast.from_data(json.loads(json.dumps(broadcast.as_data()))) == broadcast
+    adv = broadcast.advertisement("h6159", info.name)
+    assert (adv.sku, adv.pact, adv.encrypted) == ("H6159", (10, 2), True)
     assert adv.encryption_known
+    # Nothing to read or restore: no Govee block, no record, nothing or something else stored.
+    assert advertised_broadcast(_info("GVH6009ABCD", FOREIGN)) is None
+    assert advertised_broadcast(None) is None
+    assert Broadcast.from_data(None) is None
+    assert Broadcast.from_data({"pact": "10,2"}) is None

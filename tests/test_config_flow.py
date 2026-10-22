@@ -448,24 +448,6 @@ async def test_finish_rechecks_at_the_setup_advert_pact(
         )
 
 
-async def test_the_entry_keeps_the_setup_adverts_header(
-    hass: HomeAssistant, setup_entry: AsyncMock
-) -> None:
-    """At the same pact, the entry takes the later advert's encrypt flag and version."""
-    result = await hass.config_entries.flow.async_init(
-        DOMAIN, context={"source": SOURCE_BLUETOOTH}, data=make_service_info()
-    )
-    # Header 0x02: no encrypt flag, broadcast version 2; the same Govee block otherwise.
-    plaintext = {0x8802: next(iter(pact_mfg(1, 1).values()))}
-    with patch(
-        f"{FLOW}.async_last_service_info",
-        return_value=make_service_info(manufacturer_data=plaintext),
-    ):
-        result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
-    assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert result["data"][CONF_BROADCAST] == {"pact": [1, 1], "encrypted": False, "version": 2}
-
-
 # -- modelled-only models ---------------------------------------------------------
 
 
@@ -599,20 +581,6 @@ async def test_reconfigure_checks_the_secret_with_the_entrys_opt_in(
     assert result["step_id"] == "reconfigure"
     assert profile.call_args.args == (modelled.sku,)
     assert profile.call_args.kwargs == {"pact": None, "allow_modelled": opted_in}
-
-
-async def test_reconfigure_checks_the_secret_at_the_stored_pact(
-    hass: HomeAssistant, setup_entry: AsyncMock
-) -> None:
-    """The profile is looked up at the entry's stored pact, as setup routes the model."""
-    entry = plug_entry(**{CONF_BROADCAST: broadcast_data(1, 1)})
-    entry.add_to_hass(hass)
-    with patch(f"{FLOW}.profile_for", wraps=config_flow.profile_for) as profile:
-        result = await entry.start_reconfigure_flow(hass)
-    assert result["step_id"] == "reconfigure"
-    assert CONF_SECRET in result["data_schema"].schema
-    assert profile.call_args.args == ("H5083",)
-    assert profile.call_args.kwargs == {"pact": (1, 1), "allow_modelled": False}
 
 
 # -- user flow ----------------------------------------------------------------

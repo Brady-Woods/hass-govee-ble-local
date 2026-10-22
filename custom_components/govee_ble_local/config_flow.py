@@ -466,11 +466,8 @@ class GoveeBleLocalConfigFlow(ConfigFlow, domain=DOMAIN):
         """
         entry = self._get_reconfigure_entry()
         sku: str = entry.data.get(CONF_SKU, "")
-        broadcast = Broadcast.from_data(entry.data.get(CONF_BROADCAST))
         needs_secret = bool(sku) and _requires_secret(
-            sku,
-            broadcast.pact if broadcast is not None else None,
-            allow_modelled=bool(entry.data.get(CONF_ALLOW_MODELLED, False)),
+            sku, allow_modelled=bool(entry.data.get(CONF_ALLOW_MODELLED, False))
         )
         errors: dict[str, str] = {}
 

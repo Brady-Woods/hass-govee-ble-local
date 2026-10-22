@@ -62,6 +62,7 @@ from .coordinator import GoveeBleLocalCoordinator
 from .helpers import (
     Broadcast,
     advertised_broadcast,
+    async_store_broadcast,
     clean_mac,
     clean_text,
     is_colour_zone,
@@ -187,15 +188,12 @@ def _async_broadcast(
     An advertised header that differs from the stored one replaces it, so the entry keeps
     the latest the device has shown: one that the library refuses included, since a later
     restart without a record should wait for the device rather than route it by an older
-    pact. An entry set up before the header was stored gets one this way, from the first
-    setup that hears it.
+    pact. An entry set up before the header was stored gets one this way, or from the first
+    advertisement that carries it (the coordinator's advertisement path).
     """
     if advertised is None:
         return Broadcast.from_data(entry.data.get(CONF_BROADCAST))
-    if entry.data.get(CONF_BROADCAST) != advertised.as_data():
-        hass.config_entries.async_update_entry(
-            entry, data={**entry.data, CONF_BROADCAST: advertised.as_data()}
-        )
+    async_store_broadcast(hass, entry, advertised)
     return advertised
 
 

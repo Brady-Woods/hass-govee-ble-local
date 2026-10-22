@@ -11,7 +11,13 @@ from govee_ble_local.identify import parse_manufacturer_data
 from homeassistant.core import Context, HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 
-from .const import DEFAULT_MAX_KELVIN, DEFAULT_MIN_KELVIN, DOMAIN, ZONE_OFF_FRESH_SECONDS
+from .const import (
+    CONF_BROADCAST,
+    DEFAULT_MAX_KELVIN,
+    DEFAULT_MIN_KELVIN,
+    DOMAIN,
+    ZONE_OFF_FRESH_SECONDS,
+)
 
 if TYPE_CHECKING:
     from govee_ble_local import Device, Zone
@@ -95,6 +101,15 @@ def advertised_broadcast(service_info: BluetoothServiceInfoBleak | None) -> Broa
     if (fields := parse_manufacturer_data(service_info.manufacturer_data)) is None:
         return None
     return Broadcast(*fields)
+
+
+@callback
+def async_store_broadcast(
+    hass: HomeAssistant, entry: GoveeBleLocalConfigEntry, broadcast: Broadcast
+) -> None:
+    """Store ``broadcast`` as the entry's header (CONF_BROADCAST), unless it already is."""
+    if entry.data.get(CONF_BROADCAST) != (data := broadcast.as_data()):
+        hass.config_entries.async_update_entry(entry, data={**entry.data, CONF_BROADCAST: data})
 
 
 def has_fixture_light(device: Device) -> bool:
