@@ -951,6 +951,33 @@ async def test_a_call_to_another_device_leaves_the_off_waiting(
     assert off.sent
 
 
+async def test_only_the_commands_running_as_the_off_starts_hold_it_back(
+    hass: HomeAssistant, add_device: Callable[..., Any], tracker: CommandTracker
+) -> None:
+    """The off waits for its burst: the commands running as it starts. One that starts later
+    doesn't hold it back, to a device it doesn't wait for (another automation) or to one it
+    did once that device's commands had ended (a slider's next step)."""
+    off = await add_device(is_on=False)
+    first, second, later = ELSEWHERE, "AA:BB:CC:DD:EE:98", "AA:BB:CC:DD:EE:97"
+    tracker.start(first)
+    tracker.start(second)
+    call = turn_off(hass, off)
+    await settle()
+    assert waits(hass, off) == 1
+
+    tracker.start(later)
+    tracker.finish(first)
+    tracker.start(first)
+    await settle()
+    assert off.sent == []  # the second device's command still runs
+    tracker.finish(second)
+    await settle()
+    assert off.sent  # though the later commands still run
+    await call
+    tracker.finish(first)
+    tracker.finish(later)
+
+
 def zone_light(hass: HomeAssistant, rig: Rig, zone: str = "main") -> Rig:
     """Return the fixture's rig with its turn-off going to the light of ``zone`` instead."""
     unique_id = f"{rig.device.address}_zone_{zone}_light"

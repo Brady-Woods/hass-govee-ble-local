@@ -324,9 +324,11 @@ class GoveeBleLocalSegmentLight(_SubLight):
     modelled as setting the segment to black and "on" re-applies the last real
     colour. A fixture switched off keeps each segment's colour (the read-back
     still reports it), so a segment shows off whenever the whole fixture is
-    known off, and is lit again with it. The library doesn't track per-segment
-    colour temperature, so while one is active the commanded state is kept
-    instead of the read-back colour.
+    known off, and is lit again with it; on a zoned fixture, likewise whenever
+    the zone it belongs to is known off (an H60A6's main panel or ring, an
+    H6047 bar). The library doesn't track per-segment colour temperature, so
+    while one is active the commanded state is kept instead of the read-back
+    colour.
     """
 
     _attr_translation_key = "segment"
@@ -338,6 +340,8 @@ class GoveeBleLocalSegmentLight(_SubLight):
         """Initialize the light for segment ``index`` (0-based)."""
         super().__init__(entry, f"segment_{index}")
         self._index = index
+        # The zone the segment belongs to, on a zoned fixture.
+        self._zone_name = next((z.name for z in self._device.zones if index in z.segments), None)
         self._attr_translation_placeholders = {"number": str(index + 1)}
         # Last non-black colour: what "turn on" restores after a black-out "off".
         self._last_color: tuple[int, int, int] | None = None
@@ -361,14 +365,18 @@ class GoveeBleLocalSegmentLight(_SubLight):
 
     @property
     def is_on(self) -> bool | None:
-        """Return whether the segment is lit (off whenever the whole fixture is known off)."""
-        if self.coordinator.data.is_on is False:
+        """Return whether the segment is lit (off whenever the fixture or its zone is known off)."""
+        if self.coordinator.data.is_on is False or self._zone_known_off():
             return False
         return self._attr_is_on
 
     def _fixture_known_on(self) -> bool:
         """Return whether the whole fixture is known to be on."""
         return self.coordinator.data.is_on is True
+
+    def _zone_known_off(self) -> bool:
+        """Return whether the zone the segment belongs to is known off."""
+        return self._zone_name is not None and self._device.zone_is_on(self._zone_name) is False
 
     def _is_dark(self) -> bool:
         """Return whether the segment itself is blacked out (whatever the fixture's power)."""
@@ -385,12 +393,38 @@ class GoveeBleLocalSegmentLight(_SubLight):
         switches the fixture on while the library keeps it off (see
         ``async_turn_off``). That lights the fixture's other segments too, in the
         colours they kept.
+
+        On a fixture known on, a segment whose zone is known off has that zone
+        switched on first, then any colour sent, the Govee app user's order (the
+        app hides an off zone's segments). A colour frame alone would colour a
+        segment that stays dark: with the fixture on it lights no zone (as the
+        library models the firmware, ``Device._wake_power``; not checked on the
+        bench). That lights the zone's other segments too. If the zone's power
+        fails, nothing else is sent. A zone whose power isn't known (the
+        library forgets an H6047's bars as the whole fixture turns on), or held
+        on, gets the change alone, as before: a redundant bar switch on an H6047
+        reads both bars first (``aa 36``) while it doesn't know them, or knows
+        the other bar only from long ago; that read can go unanswered and fail
+        the call, and the switch may restart the running scene or mode. So a
+        zone switched off
+        in the Govee app while the fixture stays on, held on until the next
+        read-back, still gets its segment's colour while dark.
         """
         power = Capability.POWER in self._device.capabilities and not self._fixture_known_on()
+        # The zone to switch on first, if any (the fixture's power-on lights every zone).
+        zone = self._zone_name if not power and self._zone_known_off() else None
         async with self._command():
             if power:
                 _LOGGER.debug("Switching %s on to light segment %d", self._address, self._index + 1)
                 await self._run_client_command(self._device.set_power(True))
+            elif zone is not None:
+                _LOGGER.debug(
+                    "Switching zone %s of %s on to light segment %d",
+                    zone,
+                    self._address,
+                    self._index + 1,
+                )
+                await self._run_client_command(self._device.set_zone_power(zone, True))
             if ATTR_COLOR_TEMP_KELVIN in kwargs:
                 kelvin = _clamp_kelvin(self._device, kwargs[ATTR_COLOR_TEMP_KELVIN])
                 _LOGGER.debug(
@@ -445,7 +479,9 @@ class GoveeBleLocalSegmentLight(_SubLight):
         Home Assistant shows it off. A fixture that is off has its segments dark already,
         so nothing is sent, and it is no command: polls aren't held off for it, and no
         device I/O is noted. The segment keeps its colour and is lit again with the
-        fixture.
+        fixture. With the fixture known on, the black-out goes out though the
+        segment's zone is off: it lights no zone then (as the library models the
+        firmware), and the segment stays dark once that zone is switched on again.
         """
         if self._device.zones and not self._fixture_known_on():
             _LOGGER.debug(
