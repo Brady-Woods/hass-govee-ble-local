@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import Any
 from unittest.mock import AsyncMock, patch
 
 from bleak.exc import BleakError
@@ -12,6 +13,7 @@ from pytest_homeassistant_custom_component.common import MockUser
 
 from custom_components.govee_ble_local.helpers import (
     BLE_ERRORS,
+    advertised_pact,
     async_context_is_person,
     brightness_to_pct,
     clean_mac,
@@ -20,7 +22,8 @@ from custom_components.govee_ble_local.helpers import (
     pct_to_brightness,
 )
 
-from .const import SECRET_HEX
+from .conftest import make_service_info
+from .const import SECRET_HEX, pact_mfg
 
 
 @pytest.mark.parametrize(
@@ -162,3 +165,26 @@ async def test_a_context_without_a_user_is_never_looked_up(
     ) as get_user:
         assert not await async_context_is_person(hass, Context())
     get_user.assert_not_awaited()
+
+
+def _info(name: str | None, mfg: dict[int, bytes]) -> Any:
+    return make_service_info(name=name, manufacturer_data=mfg, advertisement=True)
+
+
+FOREIGN = {11816: bytes.fromhex("89304dad0000")}  # another device's block, merged in
+
+
+def test_advertised_pact_from_a_govee_name() -> None:
+    assert advertised_pact(_info("GVH6009ABCD", pact_mfg(2, 3))) == (2, 3)
+
+
+def test_advertised_pact_under_another_name_comes_from_the_govee_block() -> None:
+    """Another device's name merged into the record: the Govee manufacturer data decides."""
+    info = _info("5134P0098101970F", {**FOREIGN, **pact_mfg(1, 1)})
+    assert advertised_pact(info) == (1, 1)
+
+
+def test_advertised_pact_is_none_without_a_govee_block_or_record() -> None:
+    assert advertised_pact(_info("5134P0098101970F", FOREIGN)) is None
+    assert advertised_pact(_info("GVH6009ABCD", {})) is None  # a Govee name, no pact
+    assert advertised_pact(None) is None

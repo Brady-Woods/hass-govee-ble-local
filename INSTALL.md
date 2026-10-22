@@ -71,6 +71,6 @@ manifest requirement (it re-runs on every start).
 - **"Integration not found":** on a container host this is almost always a file-ownership or
   SELinux-label problem — re-run the `chown` + `chcon` steps and restart.
 - **Library missing / import errors after a container image update:** restart Home Assistant so
-  it reinstalls the requirement; ensure the container has network access to GitHub at boot.
+  it reinstalls the requirement; ensure the container has network access to PyPI at boot.
 - Download **Settings → Devices & Services → Govee BLE Local → ⋮ → Download diagnostics** for a
   redacted dump (recent warnings + last self-test capture).
