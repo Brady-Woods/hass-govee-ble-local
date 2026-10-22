@@ -8,6 +8,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **A segment light follows its zone's power** (H60A6, H6047). With the fixture on but the
+  segment's zone off (an H60A6's main panel or ring, an H6047 bar), a segment light showed on,
+  and turning it on sent the colour to a segment that stayed dark: with the fixture on, a colour
+  frame lights no zone (as the library models the firmware; not checked on the devices). Now the
+  segment shows off while its zone is known off, and turning it on then switches that zone on
+  first, and sends any colour after it, the order the Govee app's user follows. The zone's other
+  segments light too, in the colours they kept. If the zone's power-on fails, no colour is sent.
+  A zone whose power isn't known, or that is held on, gets no zone power from a segment, as
+  before: after the fixture's own turn-on (which lights every zone) an H6047's bars aren't known,
+  and a bar switch then reads both bars first, which can go unanswered and fail the call, and may
+  restart the running scene or mode. So a zone switched off in the Govee app while the fixture
+  stays on still shows on until the next read-back, and a segment's colour then goes to a dark
+  zone. This matches how a segment light already follows the whole fixture's power.
+- **A turn-off of a light already off waits only for the commands already running as it
+  starts.** It waited while a command to any other device ran, so a lone turn-off (a script
+  step) could wait the full 10 s behind unrelated commands that kept starting: another
+  automation, a slider elsewhere. Now a device it waits for is done once no command to it runs,
+  and a command that starts later doesn't hold it back, including one of the same call that
+  starts after it looked (Home Assistant starts a call's lights a few loop steps apart).
+- **A background poll no longer runs in the middle of commands that started while it waited.**
+  A background poll waits for one of the two poll places and at the connect gate, which can take
+  a while just as a burst of commands to several devices ends and its held polls are released.
+  One still waiting as commands start (a new burst, or one to its own device) now looks again
+  once it has its place: it is held, reads nothing, and runs 25 s after those commands end, or at
+  the 2-minute cap, which still counts from when it came due. The first poll after setup and the
+  return poll stay held apart, as before. A manual refresh, and a poll the cap released, still
+  run anyway.
+- Tests: a context without a user is checked to be no person's without the user store being
+  asked. Home Assistant answers "no user" for no id today, so dropping that check in
+  `helpers.async_context_is_person` passed every test. No change to the integration itself.
 - **Rejected commands and secret keys are back in the diagnostics.** Since `govee-ble-local` 1.5.0
   the library logs a refused write only at DEBUG and raises `GoveeBleCommandRejected` instead, so
   refusals had dropped out of `recent_warnings`. The integration now logs a refused command and a
