@@ -1054,7 +1054,8 @@ async def test_a_power_switch_carried_over_stays_a_light_through_later_setups(
         labels={label.label_id},
         aliases=["Desk light"],
     )
-    exposed_entities.async_expose_entity(hass, "conversation", old.entity_id, True)
+    # Unexposed: a light is exposed by default, so only the switch's setting can unexpose it.
+    exposed_entities.async_expose_entity(hass, "conversation", old.entity_id, False)
 
     async def _hear_the_pact() -> None:
         heard = _record((10, 1))
@@ -1069,8 +1070,11 @@ async def test_a_power_switch_carried_over_stays_a_light_through_later_setups(
     with _served({None: pactless, (10, 1): ONOFF}), fake_transport():
         assert await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done(wait_background_tasks=True)
-        switch = registry.async_get_entity_id("switch", DOMAIN, f"{ADDRESS}_power")
-        assert (switch is not None) is pactless.relay
+        switch_id = registry.async_get_entity_id("switch", DOMAIN, f"{ADDRESS}_power")
+        light_id = registry.async_get_entity_id("light", DOMAIN, f"{ADDRESS}_light")
+        # A relay plug keeps its switch, and gets no light, until the reload.
+        assert (switch_id is not None) is pactless.relay
+        assert (light_id is None) is pactless.relay
         for later_setup in (_hear_the_pact, _reload):
             await later_setup()
             assert entry.state is ConfigEntryState.LOADED
@@ -1087,7 +1091,7 @@ async def test_a_power_switch_carried_over_stays_a_light_through_later_setups(
                 area.id,
             )
             assert (light.labels, light.aliases) == ({label.label_id}, old.aliases)
-            assert exposed_entities.async_should_expose(hass, "conversation", "light.desk")
+            assert not exposed_entities.async_should_expose(hass, "conversation", "light.desk")
             assert hass.states.get("light.desk").attributes["friendly_name"] == "Desk"
             assert hass.states.async_entity_ids("switch") == []
         assert await hass.config_entries.async_unload(entry.entry_id)
