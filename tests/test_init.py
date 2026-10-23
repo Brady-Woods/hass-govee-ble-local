@@ -1007,6 +1007,92 @@ async def test_a_header_heard_after_setup(
         assert await hass.config_entries.async_unload(entry.entry_id)
 
 
+# A power-only light: POWER alone on a profile that isn't a relay plug's.
+ONOFF = dataclasses.replace(LIGHT, capabilities=frozenset({Capability.POWER}))
+
+
+@pytest.mark.parametrize(
+    # The model's profile without a pact: another power-only light (as PACTLESS is another
+    # LIGHT), or a relay plug, which no model is today.
+    "pactless",
+    [dataclasses.replace(ONOFF, brightness_range=(0, 254)), dataclasses.replace(ONOFF, relay=True)],
+    ids=["light_without_a_pact", "relay_plug_without_a_pact"],
+)
+async def test_a_power_switch_carried_over_stays_a_light_through_later_setups(
+    hass: HomeAssistant,
+    presence: SimpleNamespace,
+    mock_bluetooth: SimpleNamespace,
+    *,
+    pactless: DeviceProfile,
+) -> None:
+    """An earlier version's power switch moves to the power-only light once, whichever setup
+    first builds the light; every later setup keeps that light as it is.
+
+    Set up without a pact, the device has its model's pact-less profile, and its first pact
+    reloads the entry at the power-only light. A pact-less profile that is a light carries
+    the switch over at the first setup; a relay plug's keeps the switch until the reload.
+    Then the light has the switch's object id, settings and voice exposure, through that
+    reload and a later one, and nothing is created twice.
+    """
+    assert await async_setup_component(hass, "homeassistant", {})
+    registry = er.async_get(hass)
+    area = ar.async_get(hass).async_create("Office")
+    label = lr.async_get(hass).async_create("Desk")
+    presence.service_info = mock_bluetooth.last_info.return_value = _record(None)
+    entry = MockConfigEntry(
+        domain=DOMAIN, title=TITLE, unique_id=ADDRESS, data={"address": ADDRESS, CONF_SKU: SKU}
+    )
+    entry.add_to_hass(hass)
+    old = registry.async_get_or_create(
+        "switch", DOMAIN, f"{ADDRESS}_power", config_entry=entry, suggested_object_id="desk"
+    )
+    old = registry.async_update_entity(
+        old.entity_id,
+        name="Desk",
+        icon="mdi:desk",
+        area_id=area.id,
+        labels={label.label_id},
+        aliases=["Desk light"],
+    )
+    exposed_entities.async_expose_entity(hass, "conversation", old.entity_id, True)
+
+    async def _hear_the_pact() -> None:
+        heard = _record((10, 1))
+        presence.service_info = mock_bluetooth.last_info.return_value = heard
+        advertisement_callback(mock_bluetooth)(heard, BluetoothChange.ADVERTISEMENT)
+        await hass.async_block_till_done(wait_background_tasks=True)
+
+    async def _reload() -> None:
+        assert await hass.config_entries.async_reload(entry.entry_id)
+        await hass.async_block_till_done(wait_background_tasks=True)
+
+    with _served({None: pactless, (10, 1): ONOFF}), fake_transport():
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done(wait_background_tasks=True)
+        switch = registry.async_get_entity_id("switch", DOMAIN, f"{ADDRESS}_power")
+        assert (switch is not None) is pactless.relay
+        for later_setup in (_hear_the_pact, _reload):
+            await later_setup()
+            assert entry.state is ConfigEntryState.LOADED
+            assert entry.runtime_data.device.profile is ONOFF
+            entities = er.async_entries_for_config_entry(registry, entry.entry_id)
+            assert [e.entity_id for e in entities if e.domain in ("light", "switch")] == [
+                "light.desk"
+            ]
+            light = registry.async_get("light.desk")
+            assert (light.unique_id, light.name, light.icon, light.area_id) == (
+                f"{ADDRESS}_light",
+                "Desk",
+                "mdi:desk",
+                area.id,
+            )
+            assert (light.labels, light.aliases) == ({label.label_id}, old.aliases)
+            assert exposed_entities.async_should_expose(hass, "conversation", "light.desk")
+            assert hass.states.get("light.desk").attributes["friendly_name"] == "Desk"
+            assert hass.states.async_entity_ids("switch") == []
+        assert await hass.config_entries.async_unload(entry.entry_id)
+
+
 async def test_setup_passes_secret_to_library(
     hass: HomeAssistant, mock_device: Device, mock_bluetooth: SimpleNamespace
 ) -> None:
