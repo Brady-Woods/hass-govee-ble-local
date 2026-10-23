@@ -60,11 +60,11 @@ from custom_components.govee_ble_local.coordinator import (
 )
 
 from .conftest import (
-    FakeConnection,
     advance,
     advertisement_callback,
     allow_adverts,
     connection,
+    fake_transport,
     make_device,
     make_service_info,
     unavailable_callback,
@@ -180,10 +180,10 @@ async def test_the_library_takes_the_poll_connect_budget() -> None:
     The coordinator tests mock update(), and a poll that raises is only logged, so without
     this a library lacking the keywords would fail every poll unnoticed.
     """
-    device = create_device(
-        BLEDevice(address=ADDRESS, name="GVH60A6ABCD", details={}), "H60A6", None
-    )
-    device._conn = FakeConnection()  # type: ignore[assignment]
+    with fake_transport():
+        device = create_device(
+            BLEDevice(address=ADDRESS, name="GVH60A6ABCD", details={}), "H60A6", None
+        )
     await device.update(
         connect_attempts=POLL_CONNECT_ATTEMPTS, connect_timeout=POLL_CONNECT_TIMEOUT_SECONDS
     )

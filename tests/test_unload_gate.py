@@ -14,7 +14,7 @@ so the gate holds the command until it is released.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncGenerator, Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable, Generator
 import logging
 from typing import Any
 from unittest.mock import patch
@@ -32,7 +32,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from custom_components.govee_ble_local import connect_gate
 from custom_components.govee_ble_local.connect_gate import _GATE
 
-from .conftest import FakeConnection, connection
+from .conftest import FakeConnection, connection, make_device
 from .const import ADDRESS
 from .test_connect_gate import ATHOM, MAIN, Radio, tick
 
@@ -52,10 +52,13 @@ class ClosingConnection(FakeConnection):
 
 
 @pytest.fixture
-def mock_device(mock_device: Device) -> Device:
+def mock_device(device_sku: str, allow_modelled: bool) -> Generator[Device]:
     """The device under test, on a transport that refuses I/O after its close."""
-    mock_device._conn = ClosingConnection()  # type: ignore[assignment]
-    return mock_device
+    device = make_device(
+        device_sku, allow_modelled=allow_modelled, connection_class=ClosingConnection
+    )
+    with patch("custom_components.govee_ble_local.create_device", return_value=device):
+        yield device
 
 
 @pytest.fixture

@@ -52,10 +52,10 @@ from custom_components.govee_ble_local.const import (
 )
 
 from .conftest import (
-    FakeConnection,
     advertisement_callback,
     allow_adverts,
     connection,
+    fake_transport,
     make_device,
     make_service_info,
     runtime_segment_count,
@@ -2004,8 +2004,10 @@ async def test_the_library_confirms_an_acked_zone_write_and_only_that_zone() -> 
 async def test_an_unanswered_poll_confirms_nothing(sku: str) -> None:
     """A real update() whose reads all go unanswered leaves zone power and its confirmations
     exactly as they were."""
-    device = create_device(BLEDevice(address=ADDRESS, name=f"GV{sku}ABCD", details={}), sku, None)
-    device._conn = FakeConnection()  # type: ignore[assignment]
+    with fake_transport():
+        device = create_device(
+            BLEDevice(address=ADDRESS, name=f"GV{sku}ABCD", details={}), sku, None
+        )
     device.state.zone_power = {0: True, 1: False}
     device.state.zone_power_confirmed = {0: time.monotonic() - 200}
     confirmed = dict(device.state.zone_power_confirmed)
