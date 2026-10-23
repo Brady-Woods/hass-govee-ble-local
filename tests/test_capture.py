@@ -251,7 +251,7 @@ async def test_full_surface_run_on_h60a6() -> None:
     assert report["restore_errors"] == []
     assert report["address"] == ADDRESS
     assert report["sku"] == "H60A6"
-    assert report["encryption"] == "none"
+    assert report["encryption"] == device.encryption.value  # the device's own mode
     assert report["capabilities"] == [
         "brightness",
         "color_temp",

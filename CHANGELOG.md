@@ -17,6 +17,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   error for a failed poll, a rejected secret included), as well as the library's.
 
 ### Changed
+- Tests: the stand-in for the library's connection (`tests/conftest.py` `FakeConnection`) is now
+  the library's own `GoveeConnection` with only its Bluetooth I/O replaced, instead of a
+  hand-written copy put on the library's private `Device._conn`. A method the library adds that
+  does no I/O (`set_advertised_encryption` on the library's unreleased `master`, which failed 53
+  test cases at library commit aa89aa9) needs no test change. `tests/test_fake_transport.py`
+  fails by name when the library adds an I/O method, or a name the fake uses for its own
+  bookkeeping, and a test whose library code still reaches for a real Bluetooth link fails
+  instead of trying one. No change to the integration itself.
 - `scripts/check.sh` in a dev checkout: when `../govee-ble-local` no longer tracks its generated
   Kaitai classes (it then builds them from `spec/*.ksy` on install), the gate requires the JVM
   `kaitai-struct-compiler` 0.11 and stops with install instructions if it is missing, instead of
