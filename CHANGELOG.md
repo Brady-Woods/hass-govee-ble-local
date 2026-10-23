@@ -20,9 +20,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   name, icon, area, labels, voice aliases and voice-assistant exposure, and stays hidden or
   disabled if you hid or disabled the switch. An entity can't change domain, so automations,
   scripts and dashboards that used the switch need the light instead. If you made the switch a
-  light with a Switch as X helper, delete the helper before you update: the helper goes away with
-  the switch anyway, and while it's there the new light gets `_2` on its entity ID and none of
-  the helper's name, area or voice-assistant exposure.
+  light with a Switch as X helper, delete the helper before you update: once the switch is gone
+  the helper is either removed with it or left unavailable, depending on which sets up first.
+  Deleted first, it hands its voice-assistant exposure back to the switch, so the new light gets
+  the helper's entity ID and that exposure, but not a name or area you gave the helper: set
+  those on the light. Left in place, it makes the new light's entity ID end in `_2`.
 
 ## [1.6.1] - 2026-10-22
 
