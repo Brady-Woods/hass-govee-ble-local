@@ -55,12 +55,12 @@ from custom_components.govee_ble_local.const import (
 from custom_components.govee_ble_local.coordinator import GoveeBleLocalCoordinator
 
 from .conftest import (
-    FakeConnection,
     ModelledCase,
     advance,
     advertisement_callback,
     allow_adverts,
     connection,
+    fake_transport,
     make_device,
     make_service_info,
     unavailable_callback,
@@ -706,10 +706,7 @@ async def test_unsupported_model_is_a_permanent_error(
 
 def _fake_transport() -> Any:
     """Build every library Device on a FakeConnection: the only fake in a real-library setup."""
-    return patch(
-        "govee_ble_local.devices.device.GoveeConnection",
-        side_effect=lambda *_a, **_k: FakeConnection(),
-    )
+    return fake_transport()
 
 
 @pytest.mark.parametrize(
@@ -753,12 +750,12 @@ async def test_setup_with_the_real_library_routes_by_the_advertised_pact(
         if state is ConfigEntryState.LOADED:
             device = entry.runtime_data.device
             assert device.profile == profile_for("H6009", pact=pact)
-            assert isinstance(device._conn, FakeConnection)
+            assert len(transport) == 1  # built on the fake: no radio
             # The advert's encrypted Govee block decides, whatever the name: library 1.6.1
             # (the floor) does so for a renamed record too; 1.6.0 fell back to the profile's
-            # cipher. (The fake transport reports none of its own: check what it was built with.)
+            # cipher. Read through the public Device.encryption (the fake is the real class).
             assert device.pact == pact
-            assert transport.call_args.kwargs["encryption"] is Encryption.AES_RC4_PSK
+            assert device.encryption is Encryption.AES_RC4_PSK
             assert await hass.config_entries.async_unload(entry.entry_id)
         else:
             assert entry.error_reason_translation_domain == DOMAIN

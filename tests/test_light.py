@@ -10,7 +10,7 @@ import operator
 import time
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import PropertyMock, patch
+from unittest.mock import MagicMock, PropertyMock, call, patch
 
 from bleak.backends.device import BLEDevice
 from bleak.exc import BleakError
@@ -52,10 +52,10 @@ from custom_components.govee_ble_local.const import (
 )
 
 from .conftest import (
-    FakeConnection,
     advertisement_callback,
     allow_adverts,
     connection,
+    fake_transport,
     make_device,
     make_service_info,
     runtime_segment_count,
@@ -337,7 +337,6 @@ async def test_plain_turn_on_sends_power_even_when_already_on(
     _seed(entry, is_on=True, optimistic=False)
     await _call(hass, "turn_on", MAIN)
     assert mock_device.turn_on.await_args.kwargs["power"] is True
-    assert connection(mock_device).sent == [build.switch(True)]
     assert hass.states.get(MAIN).state == STATE_ON
 
 
@@ -693,13 +692,14 @@ async def test_partial_failure_still_publishes_state(
     """Power + brightness land, the scene fails: the error is raised AND the state shows on."""
     _seed(entry, is_on=False)
     assert hass.states.get(MAIN).state == STATE_OFF
-    _fail(mock_device, GoveeBleConnectionError("link dropped"), after=2)
+    mock_device.set_scene_by_name.side_effect = GoveeBleConnectionError("link dropped")
 
     with pytest.raises(HomeAssistantError) as exc:
         await _call(hass, "turn_on", MAIN, effect="Aurora", brightness=128)
 
     assert exc.value.translation_key == "ble_command_failed"
-    assert connection(mock_device).sent == [build.switch(True), build.brightness(50)]
+    mock_device.turn_on.assert_awaited_once()
+    assert mock_device.turn_on.await_args.kwargs["brightness"] == 50
     state = hass.states.get(MAIN)
     assert state.state == STATE_ON
     assert state.attributes["brightness"] == 128
@@ -1160,11 +1160,16 @@ async def test_segment_brightness_only_turn_on_relights_blacked_out_segment(
     seg = _segment(hass, SEG)
     await _call(hass, "turn_on", seg, rgb_color=GREEN)
     await _call(hass, "turn_off", seg)
-    connection(mock_device).sent.clear()
+    calls = MagicMock()
+    calls.attach_mock(mock_device.set_segment_rgb, "set_segment_rgb")
+    calls.attach_mock(mock_device.set_segment_brightness, "set_segment_brightness")
 
     await _call(hass, "turn_on", seg, brightness=200)
 
-    assert connection(mock_device).sent == [_seg_rgb_frame(GREEN), _seg_bri_frame(78)]
+    assert calls.mock_calls == [
+        call.set_segment_rgb([SEG], GREEN),
+        call.set_segment_brightness([SEG], 78),
+    ]
     state = hass.states.get(seg)
     assert state.state == STATE_ON
     assert state.attributes["rgb_color"] == GREEN
@@ -1177,11 +1182,12 @@ async def test_segment_brightness_only_on_lit_segment_keeps_colour(
     """Brightness-only turn_on on a lit segment sends only the brightness frame."""
     seg = _segment(hass, SEG)
     await _call(hass, "turn_on", seg, rgb_color=GREEN)
-    connection(mock_device).sent.clear()
+    mock_device.set_segment_rgb.reset_mock()
 
     await _call(hass, "turn_on", seg, brightness=51)
 
-    assert connection(mock_device).sent == [_seg_bri_frame(20)]
+    mock_device.set_segment_rgb.assert_not_awaited()
+    mock_device.set_segment_brightness.assert_awaited_once_with([SEG], 20)
     assert hass.states.get(seg).attributes["rgb_color"] == GREEN
 
 
@@ -2004,8 +2010,10 @@ async def test_the_library_confirms_an_acked_zone_write_and_only_that_zone() -> 
 async def test_an_unanswered_poll_confirms_nothing(sku: str) -> None:
     """A real update() whose reads all go unanswered leaves zone power and its confirmations
     exactly as they were."""
-    device = create_device(BLEDevice(address=ADDRESS, name=f"GV{sku}ABCD", details={}), sku, None)
-    device._conn = FakeConnection()  # type: ignore[assignment]
+    with fake_transport():
+        device = create_device(
+            BLEDevice(address=ADDRESS, name=f"GV{sku}ABCD", details={}), sku, None
+        )
     device.state.zone_power = {0: True, 1: False}
     device.state.zone_power_confirmed = {0: time.monotonic() - 200}
     confirmed = dict(device.state.zone_power_confirmed)
