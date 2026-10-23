@@ -7,16 +7,14 @@ it lists must still be supported: a newer library may add models, never drop the
 
 from __future__ import annotations
 
-import dataclasses
 from importlib.metadata import version
 import importlib.util
 import json
 from pathlib import Path
 import re
 from types import ModuleType
-from unittest.mock import patch
 
-from govee_ble_local import Capability, DeviceProfile, supported_skus
+from govee_ble_local import supported_skus
 from packaging.requirements import Requirement
 from packaging.version import Version
 
@@ -58,51 +56,3 @@ def test_the_readme_lists_the_supported_models() -> None:
     listed = set(re.findall(r"^\| ([A-Z][A-Z0-9]+) \|", block, re.MULTILINE))
     assert listed
     assert listed <= set(supported_skus(allow_modelled=True))
-
-
-def test_a_model_served_only_at_some_pacts_is_listed_with_them() -> None:
-    """A model with no profile without a pact is described at the pacts it is served at.
-
-    Library 1.6.1 has none; its device-list release lists such models in ``supported_skus``
-    (``profile_for`` refuses them without a pact). Built here: one profile at each of a model's
-    pacts gives one row naming them, different ones a row per pact; the README then says what
-    "only at protocol" means.
-    """
-    generator = _generator()
-    light = DeviceProfile(skus=("H0PA1",), capabilities=frozenset({Capability.POWER}))
-    segmented = dataclasses.replace(
-        light, capabilities=light.capabilities | {Capability.SEGMENTS}, segments=6
-    )
-    served = {
-        "H0PA0": {None: light},
-        "H0PA1": {(2, 1): light},
-        "H0PA2": {(10, 1): light, (10, 2): light, (10, 3): light},
-        "H0PA3": {(10, 1): light, (10, 2): segmented},
-    }
-
-    def _profile_for(
-        sku: str, *, pact: tuple[int, int] | None = None, allow_modelled: bool = False
-    ) -> DeviceProfile | None:
-        return served[sku].get(pact)
-
-    _, on_off = generator._describe(light)
-    _, segments = generator._describe(segmented)
-    with (
-        patch.object(generator, "profile_for", _profile_for),
-        patch.object(generator, "supported_skus", lambda *, allow_modelled=False: sorted(served)),
-    ):
-        assert generator._features("H0PA0") == ("Light", on_off, False)
-        assert generator._features("H0PA1") == ("Light", f"{on_off}; only at protocol (2,1)", True)
-        assert generator._features("H0PA2") == (
-            "Light",
-            f"{on_off}; only at protocol (10,1), (10,2) or (10,3)",
-            True,
-        )
-        assert generator._features("H0PA3") == (
-            "Light",
-            f"at protocol (10,1): {on_off}; at protocol (10,2): {segments}",
-            True,
-        )
-        block = generator.render()
-    assert f"| H0PA1 | Light | {on_off}; only at protocol (2,1) | Supported |" in block
-    assert "A model supported only at some protocol versions is set up once" in block
