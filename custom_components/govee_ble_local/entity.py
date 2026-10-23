@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 import logging
 from typing import TYPE_CHECKING, Any
 
-from govee_ble_local import GoveeBleAuthError, GoveeBleNotSupported
+from govee_ble_local import GoveeBleAuthError, GoveeBleCommandRejected, GoveeBleNotSupported
 from homeassistant.const import CONF_ADDRESS, EntityCategory
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers.device_registry import DeviceInfo
@@ -214,6 +214,10 @@ class GoveeBleLocalEntity(CoordinatorEntity[GoveeBleLocalCoordinator]):
         ``last``: a turn-off of a device already off, which the gate serves after
         the other commands. ``keeps_power``: it says nothing about the device's
         power (a zone's turn-off), so the device's last power word stands.
+
+        A command the device refuses is logged at WARNING, where the always-on
+        diagnostics capture (capture.LogCapture) sees it: the library logs it
+        only at DEBUG. ``async_secret_rejected`` logs a rejected secret.
         """
         try:
             async with (
@@ -222,7 +226,7 @@ class GoveeBleLocalEntity(CoordinatorEntity[GoveeBleLocalCoordinator]):
             ):
                 result = await coro
         except GoveeBleAuthError as err:
-            raise async_secret_rejected(self.hass, self.coordinator.config_entry) from err
+            raise async_secret_rejected(self.hass, self.coordinator.config_entry, err) from err
         except GoveeBleNotSupported as err:
             raise ServiceValidationError(
                 translation_domain=DOMAIN,
@@ -230,7 +234,10 @@ class GoveeBleLocalEntity(CoordinatorEntity[GoveeBleLocalCoordinator]):
                 translation_placeholders={"device_name": self._device_name, "error": str(err)},
             ) from err
         except BLE_ERRORS as err:
-            _LOGGER.debug("BLE command to %s failed: %s", self._address, err)
+            if isinstance(err, GoveeBleCommandRejected):
+                _LOGGER.warning("%s rejected a command: %s", self._address, err)
+            else:
+                _LOGGER.debug("BLE command to %s failed: %s", self._address, err)
             raise HomeAssistantError(
                 translation_domain=DOMAIN,
                 translation_key="ble_command_failed",

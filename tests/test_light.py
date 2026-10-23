@@ -37,6 +37,10 @@ from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import entity_registry as er
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
+from pytest_homeassistant_custom_component.components.diagnostics import (
+    get_diagnostics_for_config_entry,
+)
+from pytest_homeassistant_custom_component.typing import ClientSessionGenerator
 
 from custom_components.govee_ble_local.const import (
     DEFAULT_MAX_KELVIN,
@@ -52,6 +56,7 @@ from .conftest import (
     connection,
     fake_transport,
     make_device,
+    make_power_only_light,
     make_service_info,
     runtime_segment_count,
 )
@@ -743,9 +748,14 @@ async def test_turn_off_failure_keeps_light_on(
     ids=lambda e: type(e).__name__,
 )
 async def test_ble_errors_become_ble_command_failed(
-    hass: HomeAssistant, entry: MockConfigEntry, mock_device: Device, error: BaseException
+    hass: HomeAssistant,
+    hass_client: ClientSessionGenerator,
+    entry: MockConfigEntry,
+    mock_device: Device,
+    error: BaseException,
 ) -> None:
-    """Transport failures surface as one translated HomeAssistantError, without reauth."""
+    """Transport failures surface as one translated HomeAssistantError, without reauth, and
+    add no line to the diagnostics' recent warnings (only rejections are logged there)."""
     _fail(mock_device, error)
     with pytest.raises(HomeAssistantError) as exc:
         await _call(hass, "turn_on", MAIN)
@@ -758,6 +768,8 @@ async def test_ble_errors_become_ble_command_failed(
     assert exc.value.__cause__ is error
     await hass.async_block_till_done()
     assert _govee_flows(hass) == []
+    diagnostics = await get_diagnostics_for_config_entry(hass, hass_client, entry)
+    assert diagnostics["recent_warnings"] == []
 
 
 async def test_bare_timeout_error_is_named(
@@ -784,14 +796,26 @@ async def test_not_supported_is_a_validation_error(
 
 
 async def test_auth_error_starts_reauth(
-    hass: HomeAssistant, entry: MockConfigEntry, mock_device: Device
+    hass: HomeAssistant,
+    entry: MockConfigEntry,
+    mock_device: Device,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """A rejected secret raises secret_rejected and starts a reauth flow."""
+    """A rejected secret raises secret_rejected, starts a reauth flow and is logged once.
+
+    The library logs the rejection only at DEBUG: the integration's WARNING, naming
+    the address, is what its diagnostics capture keeps.
+    """
     _fail(mock_device, GoveeBleAuthError("secret rejected"))
     with pytest.raises(HomeAssistantError) as exc:
         await _call(hass, "turn_on", MAIN)
     assert exc.value.translation_key == "secret_rejected"
     assert not isinstance(exc.value, ServiceValidationError)
+    assert [
+        r.getMessage()
+        for r in caplog.records
+        if r.name.startswith("custom_components.govee_ble_local") and r.levelno >= logging.WARNING
+    ] == [f"{ADDRESS} rejected its secret key: secret rejected"]
     await hass.async_block_till_done()
     flows = _govee_flows(hass)
     assert len(flows) == 1
@@ -2697,3 +2721,30 @@ async def test_a_spared_zone_off_is_no_command(
     assert f"Zone main of {ADDRESS} was just confirmed off; not sending its power-off" in (
         caplog.text
     )
+
+
+# -- 10. power-only lights ------------------------------------------------------------
+
+
+async def test_power_only_light_is_an_on_off_light(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_bluetooth: SimpleNamespace
+) -> None:
+    """Power alone, not a relay plug: one on/off light and no switch; on and off are the
+    device's own power calls."""
+    device = make_power_only_light()
+    entry = await _setup_custom(hass, mock_config_entry, device, mock_bluetooth)
+    entities = er.async_entries_for_config_entry(er.async_get(hass), entry.entry_id)
+    assert {(e.domain, e.unique_id) for e in entities if e.domain in ("light", "switch")} == {
+        ("light", f"{ADDRESS}_light")
+    }
+    _seed(entry, is_on=False, optimistic=False)
+    assert hass.states.get(MAIN).attributes["supported_color_modes"] == ["onoff"]
+
+    await _call(hass, "turn_on", MAIN)
+    device.turn_on.assert_awaited_once_with(power=True, brightness=None, rgb=None, kelvin=None)
+    state = hass.states.get(MAIN)
+    assert (state.state, state.attributes["color_mode"]) == (STATE_ON, "onoff")
+
+    await _call(hass, "turn_off", MAIN)
+    device.turn_off.assert_awaited_once_with()
+    assert hass.states.get(MAIN).state == STATE_OFF

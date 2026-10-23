@@ -38,8 +38,15 @@ from homeassistant.helpers.selector import (
 )
 import probatio as vol
 
-from .const import CONF_ALLOW_MODELLED, CONF_CLEAR_SECRET, CONF_SECRET, CONF_SKU, DOMAIN
-from .helpers import BLE_ERRORS, advertised_pact, parse_secret
+from .const import (
+    CONF_ALLOW_MODELLED,
+    CONF_BROADCAST,
+    CONF_CLEAR_SECRET,
+    CONF_SECRET,
+    CONF_SKU,
+    DOMAIN,
+)
+from .helpers import BLE_ERRORS, Broadcast, advertised_broadcast, parse_secret
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -63,13 +70,19 @@ class _PendingDevice:
     address: str
     sku: str
     title: str
-    # The advertised (pact_type, pact_code): the library serves some models only at their
-    # row's pacts, so support and the profile are looked up at it. None (an advert with no
-    # parseable pact, or reauth) looks the SKU up at any pact. _finish() re-checks the
-    # device at the pact of the advert setup will route by, when that one differs.
-    pact: tuple[int, int] | None = None
+    # The advertised Govee broadcast header, whose pact the library routes the model by: it
+    # serves some models only at their rows' pacts, so support and the profile are looked up
+    # at it. None (an advert with no parseable pact, or reauth) looks the SKU up at any pact.
+    # _finish() re-checks the device at the pact of the advert setup will route by, when that
+    # one differs, and the entry stores the header for setup (CONF_BROADCAST).
+    broadcast: Broadcast | None = None
     # Supported only as "modelled" (allow_modelled): set up only after the user confirms.
     modelled: bool = False
+
+    @property
+    def pact(self) -> tuple[int, int] | None:
+        """The advertised ``(pact_type, pact_code)``, or None (any pact)."""
+        return self.broadcast.pact if self.broadcast is not None else None
 
 
 class _CloudSecretError(Exception):
@@ -97,7 +110,12 @@ def _supported_device(info: BluetoothServiceInfoBleak) -> _PendingDevice | None:
     else:
         return None
     return _PendingDevice(
-        address=info.address, sku=adv.sku, title=info.name, pact=adv.pact, modelled=modelled
+        address=info.address,
+        sku=adv.sku,
+        title=info.name,
+        # identify() takes its pact from the same parse.
+        broadcast=advertised_broadcast(info),
+        modelled=modelled,
     )
 
 
@@ -214,29 +232,33 @@ class GoveeBleLocalConfigFlow(ConfigFlow, domain=DOMAIN):
 
     async def _finish(self, device: _PendingDevice) -> ConfigFlowResult:
         """Create the entry, or first collect the secret key if the device needs one."""
-        if (pact := self._setup_pact(device.address)) is not None and pact != device.pact:
+        if (setup := self._setup_broadcast(device.address)) is not None:
             # Setup routes by the latest connectable advert, whose pact can differ from the
             # flow's (which may have had none: any pact), so don't create an entry it would
-            # refuse. Without one, setup waits for the device and the flow's pact stands.
-            if not is_supported_sku(device.sku, pact=pact, allow_modelled=device.modelled):
+            # refuse. Without one, setup waits for the device and the flow's header stands.
+            if setup.pact != device.pact and not is_supported_sku(
+                device.sku, pact=setup.pact, allow_modelled=device.modelled
+            ):
                 return self.async_abort(reason="protocol_not_supported")
-            device = replace(device, pact=pact)
+            device = replace(device, broadcast=setup)
         if _requires_secret(device.sku, device.pact, allow_modelled=device.modelled):
             self._pending = device
             return await self.async_step_secret()
         return self._create_entry(device)
 
-    def _setup_pact(self, address: str) -> tuple[int, int] | None:
-        """Return the pact of the advert setup will route by (the latest connectable one)."""
-        return advertised_pact(async_last_service_info(self.hass, address, connectable=True))
+    def _setup_broadcast(self, address: str) -> Broadcast | None:
+        """Return the header of the advert setup will route by (the latest connectable one)."""
+        return advertised_broadcast(async_last_service_info(self.hass, address, connectable=True))
 
     def _create_entry(self, device: _PendingDevice, secret: str | None = None) -> ConfigFlowResult:
-        """Create the entry for ``device``, with its secret key if it has one."""
+        """Create the entry for ``device``, with its secret key and broadcast header if known."""
         data: dict[str, Any] = {CONF_ADDRESS: device.address, CONF_SKU: device.sku}
         if secret:
             data[CONF_SECRET] = secret
         if device.modelled:
             data[CONF_ALLOW_MODELLED] = True
+        if device.broadcast is not None:
+            data[CONF_BROADCAST] = device.broadcast.as_data()
         return self.async_create_entry(title=device.title, data=data)
 
     # -- secret -------------------------------------------------------------

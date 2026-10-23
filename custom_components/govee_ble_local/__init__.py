@@ -7,22 +7,26 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 import logging
 from pathlib import Path
+from typing import NoReturn
 import zlib
 
+from bleak.backends.scanner import AdvertisementData
 import govee_ble_local
 from govee_ble_local import (
     Capability,
     Device,
+    GoveeAdvertisement,
     GoveeBleError,
     GoveeBleNotSupported,
     create_device,
-    is_supported_sku,
+    supported_skus,
 )
 from govee_ble_local.identify import identify
 from homeassistant.components import bluetooth
+from homeassistant.components.homeassistant import exposed_entities
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_ADDRESS, EVENT_HOMEASSISTANT_STOP, Platform
-from homeassistant.core import Event, HomeAssistant, callback
+from homeassistant.core import Event, HomeAssistant, callback, split_entity_id
 from homeassistant.exceptions import (
     ConfigEntryAuthFailed,
     ConfigEntryError,
@@ -41,6 +45,7 @@ from .capture import LogCapture, SelfTestReport
 from .connect_gate import async_release_waiters
 from .const import (
     CONF_ALLOW_MODELLED,
+    CONF_BROADCAST,
     CONF_SECRET,
     CONF_SKU,
     DOMAIN,
@@ -55,7 +60,16 @@ from .const import (
     STOP_CLOSE_TIMEOUT_SECONDS,
 )
 from .coordinator import GoveeBleLocalCoordinator
-from .helpers import advertised_pact, clean_mac, clean_text, is_colour_zone, parse_secret
+from .helpers import (
+    Broadcast,
+    advertised_broadcast,
+    async_store_broadcast,
+    clean_mac,
+    clean_text,
+    has_fixture_light,
+    is_colour_zone,
+    parse_secret,
+)
 from .services import async_register_services
 
 _LOGGER = logging.getLogger(__name__)
@@ -167,6 +181,56 @@ def _stored_secret(entry: GoveeBleLocalConfigEntry) -> bytes | None:
     return bytes.fromhex(secret_hex) if secret_hex else None
 
 
+@callback
+def _async_broadcast(
+    hass: HomeAssistant, entry: GoveeBleLocalConfigEntry, advertised: Broadcast | None
+) -> Broadcast | None:
+    """Return the device's Govee broadcast header: the ``advertised`` one, else the stored one.
+
+    An advertised header that differs from the stored one replaces it, so the entry keeps
+    the latest the device has shown: one that the library refuses included, since a later
+    restart without a record should wait for the device rather than route it by an older
+    pact. An entry set up before the header was stored gets one this way, or from the first
+    advertisement that carries it (the coordinator's advertisement path).
+    """
+    if advertised is None:
+        return Broadcast.from_data(entry.data.get(CONF_BROADCAST))
+    async_store_broadcast(hass, entry, advertised)
+    return advertised
+
+
+def _raise_not_supported(
+    sku: str, broadcast: Broadcast | None, *, allow_modelled: bool, err: GoveeBleNotSupported
+) -> NoReturn:
+    """Raise the setup error for a model ``create_device`` refused.
+
+    The library lists every model it serves at some pact (``supported_skus``), and some
+    only at their rows' pacts, so a refusal is final only for a model it doesn't list.
+    """
+    if sku.upper() not in supported_skus(allow_modelled=allow_modelled):
+        # Permanent: retrying can't make an unsupported model supported.
+        raise ConfigEntryError(
+            translation_domain=DOMAIN,
+            translation_key="model_not_supported",
+            translation_placeholders={"sku": sku},
+        ) from err
+    if broadcast is None:
+        # The library serves this model only at the pact it advertises, and none has been
+        # heard yet: the next advertisement carries it.
+        raise ConfigEntryNotReady(
+            translation_domain=DOMAIN,
+            translation_key="protocol_unknown",
+            translation_placeholders={"sku": sku},
+        ) from err
+    # The library serves the model, only not at the pact the device advertises now.
+    # A later advert can carry another, so retry instead of giving up for good.
+    raise ConfigEntryNotReady(
+        translation_domain=DOMAIN,
+        translation_key="protocol_not_supported",
+        translation_placeholders={"sku": sku, "protocol": "{},{}".format(*broadcast.pact)},
+    ) from err
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: GoveeBleLocalConfigEntry) -> bool:
     """Set up a Govee BLE device from a config entry."""
     address: str = entry.data[CONF_ADDRESS]
@@ -179,10 +243,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: GoveeBleLocalConfigEntry
         )
 
     # The raw advertisement drives the library's encryption decision (the app's
-    # `encrypt` flag), so pass it through when we have it.
+    # `encrypt` flag) and routes the model by its pact, so pass it through when we have it.
     service_info = bluetooth.async_last_service_info(hass, address, connectable=True)
-    advertisement = service_info.advertisement if service_info else None
+    advertisement: AdvertisementData | GoveeAdvertisement | None = (
+        service_info.advertisement if service_info else None
+    )
     sku = _resolve_sku(entry, service_info)
+    advertised = advertised_broadcast(service_info)
+    broadcast = _async_broadcast(hass, entry, advertised)
+    if advertised is None and broadcast is not None:
+        # Home Assistant's record of the device has no Govee block (none heard since a
+        # restart, or one merged with a record without it): build it from the last one heard.
+        advertisement = broadcast.advertisement(sku, service_info.name if service_info else "")
     # Some devices (smart plugs) gate commands behind an 8-byte secret key,
     # stored as hex in the config entry (see config_flow's secret steps).
     secret = _stored_secret(entry)
@@ -200,21 +272,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: GoveeBleLocalConfigEntry
             allow_modelled=allow_modelled,
         )
     except GoveeBleNotSupported as err:
-        pact = advertised_pact(service_info)
-        if pact is not None and is_supported_sku(sku, allow_modelled=allow_modelled):
-            # The library serves the model, only not at the pact the device advertises now.
-            # A later advert can carry another, so retry instead of giving up for good.
-            raise ConfigEntryNotReady(
-                translation_domain=DOMAIN,
-                translation_key="protocol_not_supported",
-                translation_placeholders={"sku": sku, "protocol": "{},{}".format(*pact)},
-            ) from err
-        # Permanent: retrying can't make an unsupported model supported.
-        raise ConfigEntryError(
-            translation_domain=DOMAIN,
-            translation_key="model_not_supported",
-            translation_placeholders={"sku": sku},
-        ) from err
+        _raise_not_supported(sku, broadcast, allow_modelled=allow_modelled, err=err)
     # Close the link whenever the entry goes away (a failed setup included).
     # HA runs on-unload jobs last in, first out, so registering this before the
     # coordinator exists means polling is shut down first. HA cancels only entry
@@ -241,13 +299,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: GoveeBleLocalConfigEntry
             _async_report_scene_store(hass, err)
 
     _async_remove_legacy_zone_entities(hass, address, device)
+    _async_move_power_switch_to_light(hass, entry, address, device)
 
-    # Always-on WARNING+ capture so unrecognised frames / rejections surface in the
-    # downloadable diagnostics without the user having to enable debug logging.
+    # Always-on WARNING+ capture so problems surface in the downloadable diagnostics
+    # without the user having to enable debug logging: unrecognised frames and empty
+    # status reads from the library's WARNING log; refused commands, rejected secrets
+    # and Home Assistant's error for a failed poll from this integration's own.
     log_capture = LogCapture(address)
     entry.async_on_unload(log_capture.detach)
 
-    coordinator = GoveeBleLocalCoordinator(hass, entry, device)
+    coordinator = GoveeBleLocalCoordinator(
+        hass, entry, device, set_up_without_pact=broadcast is None
+    )
     entry.runtime_data = GoveeBleLocalRuntimeData(
         device=device,
         coordinator=coordinator,
@@ -459,6 +522,61 @@ def _async_remove_legacy_zone_entities(hass: HomeAssistant, address: str, device
         if entity_id is not None:
             _LOGGER.debug("Removing orphaned zone switch %s", entity_id)
             registry.async_remove(entity_id)
+
+
+@callback
+def _async_move_power_switch_to_light(
+    hass: HomeAssistant, entry: GoveeBleLocalConfigEntry, address: str, device: Device
+) -> None:
+    """Carry an earlier version's power switch over to the light that replaces it.
+
+    Earlier versions made every power-only device a switch ({address}_power),
+    so a power-only light (from the govee-ble-local release after 1.6.1:
+    H1162 / H1163 / H1167 / H1168 / H7004) set up by one of them, as their
+    ``<2`` range allows, has a switch no platform provides now. An entity can't
+    change domain, so the light's entry is created from the switch's: the same
+    object id and device, the user's name, icon, area, labels and voice aliases,
+    and its voice-assistant exposure. Hidden or disabled carries over only when
+    the user set it: an integration's (Switch as X hides the switch it wraps)
+    belongs to the switch. A light entry that already exists keeps its own
+    settings. Then the switch's entry is removed.
+    """
+    if not has_fixture_light(device):
+        return
+    registry = er.async_get(hass)
+    switch_id = registry.async_get_entity_id(Platform.SWITCH, DOMAIN, f"{address}_power")
+    if switch_id is None or (switch := registry.async_get(switch_id)) is None:
+        return
+    if registry.async_get_entity_id(Platform.LIGHT, DOMAIN, f"{address}_light") is None:
+        light = registry.async_get_or_create(
+            Platform.LIGHT,
+            DOMAIN,
+            f"{address}_light",
+            config_entry=entry,
+            device_id=switch.device_id,
+            suggested_object_id=split_entity_id(switch.entity_id)[1],
+        )
+        registry.async_update_entity(
+            light.entity_id,
+            name=switch.name,
+            icon=switch.icon,
+            area_id=switch.area_id,
+            labels=switch.labels,
+            aliases=switch.aliases,
+            hidden_by=switch.hidden_by if switch.hidden_by is er.RegistryEntryHider.USER else None,
+            disabled_by=(
+                switch.disabled_by if switch.disabled_by is er.RegistryEntryDisabler.USER else None
+            ),
+        )
+        # As Switch as X carries exposure between the switch and its wrapper.
+        exposure = exposed_entities.async_get_entity_settings(hass, switch.entity_id)
+        for assistant, settings in exposure.items():
+            if (should_expose := settings.get("should_expose")) is not None:
+                exposed_entities.async_expose_entity(
+                    hass, assistant, light.entity_id, should_expose
+                )
+        _LOGGER.debug("Moving power switch %s over to %s", switch.entity_id, light.entity_id)
+    registry.async_remove(switch.entity_id)
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: GoveeBleLocalConfigEntry) -> bool:

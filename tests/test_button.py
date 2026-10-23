@@ -15,6 +15,10 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
+from pytest_homeassistant_custom_component.components.diagnostics import (
+    get_diagnostics_for_config_entry,
+)
+from pytest_homeassistant_custom_component.typing import ClientSessionGenerator
 
 from custom_components.govee_ble_local import capture
 from custom_components.govee_ble_local.const import DOMAIN
@@ -176,9 +180,13 @@ async def test_press_fails_fast_when_no_scanner_sees_the_device(
 
 
 async def test_press_with_rejected_secret_starts_reauth(
-    hass: HomeAssistant, setup_integration: MockConfigEntry, mock_device: Device
+    hass: HomeAssistant,
+    hass_client: ClientSessionGenerator,
+    setup_integration: MockConfigEntry,
+    mock_device: Device,
 ) -> None:
-    """A rejected secret raises a translated error and starts the reauth flow."""
+    """A rejected secret raises a translated error, starts the reauth flow, and shows once in
+    the diagnostics' recent warnings, its address scrubbed (the self-test's path logs it too)."""
     mock_device.set_brightness.side_effect = GoveeBleAuthError("rejected")
 
     with pytest.raises(HomeAssistantError) as exc_info:
@@ -191,4 +199,8 @@ async def test_press_with_rejected_secret_starts_reauth(
     flows = hass.config_entries.flow.async_progress_by_handler(DOMAIN)
     assert [(f["context"]["source"], f["context"]["entry_id"]) for f in flows] == [
         (SOURCE_REAUTH, setup_integration.entry_id)
+    ]
+    diagnostics = await get_diagnostics_for_config_entry(hass, hass_client, setup_integration)
+    assert diagnostics["recent_warnings"] == [
+        "WARNING **REDACTED** rejected its secret key: rejected"
     ]

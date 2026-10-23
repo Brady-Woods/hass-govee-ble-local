@@ -8,6 +8,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- **A light that only switches on and off is a light, not a switch:** a model with power alone
+  that isn't a relay smart plug (by its library profile) gets an on/off light, so it joins light
+  groups, an area's lights and "turn off all the lights", which skipped it as a switch. The next
+  `govee-ble-local` release (after 1.6.1) adds five such models: the H1162, H1163, H1167 and
+  H1168 Music Sync boxes and the H7004 grow light. No model in 1.6.1 or earlier is one, so no
+  device set up today changes. Smart plugs (the H5083 family) keep their outlet switch. An
+  earlier version of the integration that got that library release (its `<2` range allows that,
+  on a fresh install or after a container rebuild) set these models up as switches. That switch
+  now becomes the light: the light takes its entity ID with `light.` in place of `switch.`, its
+  name, icon, area, labels, voice aliases and voice-assistant exposure, and stays hidden or
+  disabled if you hid or disabled the switch. An entity can't change domain, so automations,
+  scripts and dashboards that used the switch need the light instead. If you made the switch a
+  light with a Switch as X helper, delete the helper before you update: once the switch is gone
+  the helper is either removed with it or left unavailable, depending on which sets up first.
+  Deleted first, it hands its voice-assistant exposure back to the switch, so the new light gets
+  the helper's entity ID and that exposure, but not a name or area you gave the helper: set
+  those on the light. Left in place, it makes the new light's entity ID end in `_2`.
 - Tests: the stand-in for the library's connection (`tests/conftest.py` `FakeConnection`) is now
   the library's own `GoveeConnection` with only its Bluetooth I/O replaced, instead of a
   hand-written copy put on the library's private `Device._conn`. A method the library adds that
@@ -17,18 +34,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bookkeeping, and a test whose library code still reaches for a real Bluetooth link fails
   instead of trying one. No change to the integration itself.
 - Tests: the suite no longer breaks when `govee-ble-local` changes its model data. With the
-  connection stand-in above, it passes against 1.6.1 and against three unreleased library builds:
-  master at aa89aa9 and at 55f3c52, and the catalogue update (Brady-Woods/govee-ble-local#45) at
-  b79c3c7, where 53, 88 and 75 test cases failed before. Gone or rebuilt on a profile built in the
-  test: the relay-entity test that ran once per model in the library's catalogue, the two H61A8
-  colour-temperature tests, and the six H60A6 segment colour-temperature tests. 1053 test cases
-  instead of 1161; other tests still check some models' library data (the H60A6 and H61A8 self-test
-  steps, the H6047's zones and segments, the H61A8's Kelvin range). The poll-policy tests check what
-  Home Assistant shows (entity states, the poll interval sensor, diagnostics) and how often a light
-  is polled, not the coordinator's internals or Home Assistant's timer handles. A test now fails
-  when a poll ends in the coordinator's catch-all for unexpected errors, which had let two broken
-  tests pass. The README's supported-models table is checked by `scripts/check.sh` on the floor
-  release (CI's `floor` job) instead of by a test. No change to the integration itself.
+  connection stand-in above, it passes against 1.6.1 and against four unreleased library builds:
+  master at aa89aa9, d17b4ea and e052b17, and the catalogue update (Brady-Woods/govee-ble-local#45)
+  at b79c3c7, where the suite before this change fails 9, 9 and 3 test cases on d17b4ea, e052b17 and
+  b79c3c7. Gone or rebuilt on a profile built in the test: the relay-entity test that ran once per
+  model in the library's catalogue, the two H61A8 colour-temperature tests, and the six H60A6
+  segment colour-temperature tests. 1076 test cases instead of 1187; other tests still check some
+  models' library data (the H60A6 and H61A8 self-test steps, the H6047's zones and segments, the
+  H61A8's Kelvin range). The poll-policy tests check what Home Assistant shows (entity states, the
+  poll interval sensor, diagnostics) and how often a light is polled, not the coordinator's
+  internals or Home Assistant's timer handles. A test now fails when a poll ends in the
+  coordinator's catch-all for unexpected errors, which had let two broken tests pass. The README's
+  supported-models table is checked by `scripts/check.sh` on the floor release (CI's `floor` job)
+  instead of by a test. No change to the integration itself.
+- `scripts/check.sh` in a dev checkout: when `../govee-ble-local` no longer tracks its generated
+  Kaitai classes (it then builds them from `spec/*.ksy` on install), the gate requires the JVM
+  `kaitai-struct-compiler` 0.11 and stops with install instructions if it is missing, instead of
+  failing inside a quiet `pip install`. CI and `FROM_MANIFEST=1` install released packages, which
+  ship the classes, so they need no compiler.
+
+### Fixed
+- **Rejected commands and secret keys are back in the diagnostics.** Since `govee-ble-local` 1.4.0
+  the library logs a refused write only at DEBUG and raises `GoveeBleCommandRejected` instead, so
+  refusals had dropped out of `recent_warnings`. The integration now logs at WARNING, with the
+  device address, a light or switch command the device refuses and a rejected secret key (from a
+  command, the **Run self-test** button or `capture_session`). The always-on capture also keeps this
+  integration's own WARNING+ lines for the device (these rejections, and Home Assistant's error for
+  a failed poll, a rejected secret included), as well as the library's, with the device's address
+  and name scrubbed from them like the rest of the diagnostics.
+- **Setup remembers a light's protocol version and encryption.** The entry keeps the last Govee
+  broadcast header Home Assistant heard from the light (its protocol version, encrypt flag and
+  broadcast version), from the config flow and each setup, from the record setup routes by once it
+  shows another protocol version (after a firmware update, say), and from the first advertisement
+  that carries one while none is stored, as the Govee app keeps it for a light already added. When
+  Home Assistant's record of the light carries no Govee data (after a restart, before the light
+  advertises again, or with another device's advertisement merged in), setup builds the light from
+  the stored header instead of the model's defaults. So an H6008, whose firmware encrypts although
+  its model's profile says plain text, stays encrypted after such a restart, and a model whose
+  protocol version picks its profile or brightness range gets the right one: without it,
+  `govee-ble-local`'s coming device-list release would give the H6118 / H6179 / H6194 the wrong
+  brightness byte, and refuse brightness on a light whose range depends on the protocol version. An
+  entry added before this version gets the header from the first advertisement that carries it. A
+  light set up before any was heard reloads once then, if its protocol version gives the model
+  another profile. Diagnostics show the stored header.
+- **A model whose rows need a protocol version waits for one instead of failing for good.** The
+  coming device-list release of `govee-ble-local` serves some models (H6159, the H6145 family,
+  H6076, the opt-in H70B3 and others) only at the protocol versions their rows list, and not at all
+  without one. Setup reported such a light as unsupported (a permanent error) when no protocol
+  version had been heard, or one the model isn't served at. It now retries ("protocol unknown", or
+  "protocol not supported"), and keeps the permanent "model not supported" for a model the library
+  doesn't list at all. Today's models are all served without a protocol version, so nothing changes
+  for them.
+- The README's model list generator no longer fails on such a model: its row names the protocol
+  versions it is served at, as "(10,1), (10,2) or (10,3)".
 
 ## [1.6.1] - 2026-10-22
 

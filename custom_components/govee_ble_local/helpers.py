@@ -2,22 +2,32 @@
 
 from __future__ import annotations
 
+import logging
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from bleak.exc import BleakError
-from govee_ble_local import Capability, GoveeBleError
+from govee_ble_local import Capability, GoveeAdvertisement, GoveeBleError
 from govee_ble_local.identify import parse_manufacturer_data
+from homeassistant.const import CONF_ADDRESS
 from homeassistant.core import Context, HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 
-from .const import DEFAULT_MAX_KELVIN, DEFAULT_MIN_KELVIN, DOMAIN, ZONE_OFF_FRESH_SECONDS
+from .const import (
+    CONF_BROADCAST,
+    DEFAULT_MAX_KELVIN,
+    DEFAULT_MIN_KELVIN,
+    DOMAIN,
+    ZONE_OFF_FRESH_SECONDS,
+)
 
 if TYPE_CHECKING:
-    from govee_ble_local import Device, Zone
+    from govee_ble_local import Device, GoveeBleAuthError, Zone
     from homeassistant.components.bluetooth import BluetoothServiceInfoBleak
 
     from . import GoveeBleLocalConfigEntry
+
+_LOGGER = logging.getLogger(__name__)
 
 # Errors that mean "the BLE operation didn't land" rather than a bug: bleak's own,
 # the library's (connect/handshake/timeout/not-supported - not BleakError
@@ -27,16 +37,61 @@ BLE_ERRORS: tuple[type[Exception], ...] = (BleakError, GoveeBleError, TimeoutErr
 SECRET_BYTES = 8
 
 # Which platform owns a device or a zone is decided once, below, for light.py,
-# switch.py and the legacy zone-switch cleanup in __init__.py, so each relay gets
-# exactly one entity. Any of these capabilities makes a device a light fixture;
-# one with none of them (e.g. a smart plug) is a switch instead.
+# switch.py and the legacy-switch handling in __init__.py, so each relay gets
+# exactly one entity. Any of these capabilities makes a device a light fixture,
+# and so does power alone on a device that isn't a relay plug (it gets an
+# on/off light). A relay plug with none of them (the H5083 family) is a switch
+# instead.
 _FIXTURE_LIGHT_CAPABILITIES = frozenset(
     {Capability.BRIGHTNESS, Capability.RGB, Capability.COLOR_TEMP}
 )
 
 
-def advertised_pact(service_info: BluetoothServiceInfoBleak | None) -> tuple[int, int] | None:
-    """Return the ``(pact_type, pact_code)`` a set-up device's advertisement carries, or None.
+class Broadcast(NamedTuple):
+    """A device's Govee broadcast header: its encrypt flag, broadcast version and pact.
+
+    The fields ``parse_manufacturer_data`` reads, in its order. The config entry keeps the
+    last one heard (CONF_BROADCAST), as the app keeps a bound device's encrypt flag per
+    address (``BleBroadVersionCache``), so setup can route the device by its pact and pick
+    its cipher while Home Assistant's record of it carries none: before any advertisement
+    since a restart, or one merged with a record without the Govee block.
+    """
+
+    encrypted: bool
+    version: int
+    pact_type: int
+    pact_code: int
+
+    @property
+    def pact(self) -> tuple[int, int]:
+        """The ``(pact_type, pact_code)`` the library routes the model by."""
+        return self.pact_type, self.pact_code
+
+    def advertisement(self, sku: str, name: str) -> GoveeAdvertisement:
+        """Return it as the library's parsed advertisement of ``sku``, for ``create_device``."""
+        return GoveeAdvertisement(
+            sku.upper(), name, self.encrypted, self.version, self.pact_type, self.pact_code
+        )
+
+    def as_data(self) -> dict[str, Any]:
+        """Return it as stored in the config entry."""
+        return {"pact": list(self.pact), "encrypted": self.encrypted, "version": self.version}
+
+    @classmethod
+    def from_data(cls, data: object) -> Broadcast | None:
+        """Return the header stored in the config entry, or None (none stored, or malformed)."""
+        match data:
+            case {
+                "pact": [int() as pact_type, int() as pact_code],
+                "encrypted": bool() as encrypted,
+                "version": int() as version,
+            }:
+                return cls(encrypted, version, pact_type, pact_code)
+        return None
+
+
+def advertised_broadcast(service_info: BluetoothServiceInfoBleak | None) -> Broadcast | None:
+    """Return the Govee broadcast header a set-up device's advertisement carries, or None.
 
     The name plays no part: a device already set up may show any name in Home Assistant's
     merged record (another device's advertisement merged in, say), and its Govee
@@ -49,22 +104,37 @@ def advertised_pact(service_info: BluetoothServiceInfoBleak | None) -> tuple[int
     """
     if service_info is None:
         return None
-    if (fields := parse_manufacturer_data(service_info.manufacturer_data)) is not None:
-        _encrypted, _version, pact_type, pact_code = fields
-        return pact_type, pact_code
-    return None
+    if (fields := parse_manufacturer_data(service_info.manufacturer_data)) is None:
+        return None
+    return Broadcast(*fields)
+
+
+@callback
+def async_store_broadcast(
+    hass: HomeAssistant, entry: GoveeBleLocalConfigEntry, broadcast: Broadcast
+) -> None:
+    """Store ``broadcast`` as the entry's header (CONF_BROADCAST), unless it already is."""
+    if entry.data.get(CONF_BROADCAST) != (data := broadcast.as_data()):
+        hass.config_entries.async_update_entry(entry, data={**entry.data, CONF_BROADCAST: data})
 
 
 def has_fixture_light(device: Device) -> bool:
-    """Return True if the device gets a whole-fixture light."""
-    return bool(device.capabilities & _FIXTURE_LIGHT_CAPABILITIES)
+    """Return True if the device gets a whole-fixture light.
+
+    One with a light capability, or a power-only light: power on a device whose
+    profile isn't a relay plug's (``profile.relay``), which gets an on/off light.
+    """
+    caps = device.capabilities
+    if caps & _FIXTURE_LIGHT_CAPABILITIES:
+        return True
+    return Capability.POWER in caps and not device.profile.relay
 
 
 def has_power_switch(device: Device) -> bool:
     """Return True if the device gets a whole-device power switch.
 
     Only a device that is neither a light fixture nor zoned (a zoned device is
-    switched per zone).
+    switched per zone): a relay plug.
     """
     return (
         not device.zones
@@ -173,13 +243,17 @@ def parse_secret(raw: str) -> str | None:
 
 @callback
 def async_secret_rejected(
-    hass: HomeAssistant, entry: GoveeBleLocalConfigEntry
+    hass: HomeAssistant, entry: GoveeBleLocalConfigEntry, err: GoveeBleAuthError
 ) -> HomeAssistantError:
-    """Start reauth for a device that rejected its secret; return the error to raise.
+    """Log a rejected secret, start reauth for its device; return the error to raise.
 
-    Shared by every command path (entity commands, the self-test) so they map a
-    ``GoveeBleAuthError`` the same way.
+    Shared by every command path (entity commands, the self-test and the
+    ``capture_session`` service) so they map a ``GoveeBleAuthError`` the same
+    way. It is logged at WARNING, with the address, where the always-on
+    diagnostics capture (capture.LogCapture) sees it: the library logs it only
+    at DEBUG.
     """
+    _LOGGER.warning("%s rejected its secret key: %s", entry.data[CONF_ADDRESS], err)
     entry.async_start_reauth(hass)
     return HomeAssistantError(
         translation_domain=DOMAIN,

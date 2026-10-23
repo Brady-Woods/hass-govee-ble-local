@@ -7,8 +7,11 @@ Consumes the library's logging surfaces (v3):
 
 Two consumers:
   * :class:`LogCapture` — an always-on, address-scoped ring buffer of WARNING+ records
-    surfaced in the downloadable diagnostics (closes the library's silent-drop gap: an
-    unrecognised RX frame / empty status / rejection now shows up).
+    surfaced in the downloadable diagnostics (closes the library's silent-drop gap). It
+    listens on the library's logger, which logs unrecognised RX frames and empty status
+    reads at WARNING, and on this integration's own: the library logs a rejected command
+    or secret only at DEBUG and raises it (``GoveeBleCommandRejected`` /
+    ``GoveeBleAuthError``), so the integration logs those at WARNING itself.
   * :func:`async_run_self_test` — an in-HA device integration test that exercises the full
     capability surface (power, brightness, RGB, colour temperature, scenes, segments, zones,
     the gradual flag) with per-step ACK/read-back tracking. It captures the device's full
@@ -44,6 +47,10 @@ _LOGGER = logging.getLogger(__name__)
 
 _ROOT_LOGGER = "govee_ble_local"
 _FRAMES_LOGGER = "govee_ble_local.frames"
+# Where LogCapture listens: the library, and this integration (custom_components.govee_ble_local),
+# which logs refused commands and rejected secrets, and through whose coordinator logger Home
+# Assistant logs a failed poll.
+_CAPTURED_LOGGERS = (_ROOT_LOGGER, __package__)
 
 # Cap scene coverage: scene upload is the most failure-prone path, but activating every scene
 # would be slow, so exercise a representative sample.
@@ -99,17 +106,17 @@ _ROUTER = _WarningRouter()
 class LogCapture:
     """Always-on, address-scoped WARNING+ ring buffer for one device.
 
-    Registered on the ``govee_ble_local`` logger for the life of the config entry;
-    keeps only lines mentioning this device's address (so a noisy neighbour can't
-    evict them).
+    Registered on the ``govee_ble_local`` logger and this integration's own for the
+    life of the config entry; keeps only lines mentioning this device's address (so a
+    noisy neighbour can't evict them).
     """
 
     def __init__(self, address: str, *, maxlen: int = 200) -> None:
         """Start capturing WARNING+ records that mention ``address``."""
         self.buffer: deque[str] = deque(maxlen=maxlen)
-        logger = logging.getLogger(_ROOT_LOGGER)
         if not _ROUTER.captures:
-            logger.addHandler(_ROUTER)
+            for name in _CAPTURED_LOGGERS:
+                logging.getLogger(name).addHandler(_ROUTER)
         _ROUTER.captures[self] = address
 
     def records(self) -> list[str]:
@@ -120,7 +127,8 @@ class LogCapture:
         """Stop capturing (idempotent)."""
         _ROUTER.captures.pop(self, None)
         if not _ROUTER.captures:
-            logging.getLogger(_ROOT_LOGGER).removeHandler(_ROUTER)
+            for name in _CAPTURED_LOGGERS:
+                logging.getLogger(name).removeHandler(_ROUTER)
 
 
 class _RingHandler(logging.Handler):

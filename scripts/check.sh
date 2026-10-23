@@ -24,16 +24,38 @@
 #   newest           - the newest release in the range (what a fresh install gets)
 # CI runs both. In a dev checkout (no CI) with ../govee-ble-local present, that working
 # tree is installed instead - unless FROM_MANIFEST=1 - and must still satisfy the range.
+# A library checkout that no longer tracks its generated Kaitai classes
+# (src/govee_ble_local/_generated/) builds them from spec/*.ksy on every install, which
+# needs the JVM kaitai-struct-compiler 0.11 on PATH (or KSC=/path/to/it); without it the
+# gate stops before installing. Released wheels and sdists ship the classes, so CI and
+# FROM_MANIFEST=1 need no compiler.
 #
 # Env overrides: PYTHON (default python3), VENV (default .venv-check),
 #                COV_MIN (default 95), FROM_MANIFEST (default unset),
-#                LIB_VERSION (floor | newest, default floor).
+#                LIB_VERSION (floor | newest, default floor),
+#                KSC (the JVM Kaitai compiler, for a library checkout that generates it).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 PYTHON="${PYTHON:-python3}"
 VENV="${VENV:-.venv-check}"
 COV_MIN="${COV_MIN:-95}"
+
+# Print the JVM kaitai-struct-compiler 0.11.x that ../govee-ble-local's build would use
+# (the candidates its tools/gen_kaitai.sh tries), or nothing.
+find_jvm_ksc() {
+  local cand path ver
+  for cand in ${KSC:+"$KSC"} kaitai-struct-compiler ksc; do
+    path="$(command -v "$cand" 2>/dev/null)" || continue
+    ver="$("$path" --version 2>/dev/null | head -n 1)" || continue
+    case "$ver" in
+      "kaitai-struct-compiler 0.11" | "kaitai-struct-compiler 0.11."*)
+        echo "$path ($ver)"
+        return 0
+        ;;
+    esac
+  done
+}
 
 if [ ! -x "$VENV/bin/python" ]; then
   echo ">> creating venv: $VENV"
@@ -52,6 +74,21 @@ FLOOR_RELEASE=""
 REQ="$(python -c 'import json;print(json.load(open("custom_components/govee_ble_local/manifest.json"))["requirements"][0])')"
 if [ -d ../govee-ble-local ] && [ -z "${CI:-}" ] && [ -z "${FROM_MANIFEST:-}" ]; then
   echo "   ../govee-ble-local working tree ($(git -C ../govee-ble-local rev-parse --short HEAD 2>/dev/null || echo '?')) - set FROM_MANIFEST=1 to test the pin itself"
+  # Untracked generated classes = the checkout builds them at install time. No silent
+  # fallback to the manifest pin: this branch exists to test the working tree.
+  if ! git -C ../govee-ble-local ls-files --error-unmatch \
+    src/govee_ble_local/_generated/govee_ble_frame.py >/dev/null 2>&1; then
+    if ! KSC_FOUND="$(find_jvm_ksc)" || [ -z "$KSC_FOUND" ]; then
+      {
+        echo "error: ../govee-ble-local generates its Kaitai classes at build time and needs the"
+        echo "       JVM kaitai-struct-compiler 0.11 (brew install kaitai-struct-compiler;"
+        echo "       Debian/Ubuntu: bash ../govee-ble-local/scripts/install_ksc.sh), or set"
+        echo "       FROM_MANIFEST=1 to test the released pin instead."
+      } >&2
+      exit 1
+    fi
+    echo "   generates its Kaitai classes at build time with $KSC_FOUND"
+  fi
   python -m pip install --quiet ../govee-ble-local
 else
   case "${LIB_VERSION:-floor}" in

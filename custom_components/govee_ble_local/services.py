@@ -85,7 +85,7 @@ async def async_self_test_entry(
             translation_domain=DOMAIN, translation_key="self_test_busy"
         ) from err
     except GoveeBleAuthError as err:
-        raise async_secret_rejected(hass, entry) from err
+        raise async_secret_rejected(hass, entry, err) from err
     finally:
         data.coordinator.async_note_device_io()
         data.coordinator.async_publish_device_state()
