@@ -29,7 +29,7 @@ real device.
 
 | Model | Status |
 | --- | --- |
-| **H60A6** (Ceiling Light Pro) | ✅ power, brightness, RGB, color temp, scenes; two **independently controllable zones** (main panel / background ring) with per-zone RGB **and** kelvin; 13 addressable segments; full status read-back. One that advertises protocol version 1,1 (reported on firmware 1.00.24) is controlled as the Govee app controls it, from the `govee-ble-local` release after 1.6.1: whole-light colour and kelvin, the two zones on/off only, no segments |
+| **H60A6** (Ceiling Light Pro) | ✅ power, brightness, RGB, color temp, scenes; two **independently controllable zones** (main panel / background ring) with per-zone RGB **and** kelvin; 13 addressable segments; full status read-back. One that advertises protocol version 1,1 (reported on firmware 1.00.24) is controlled as the Govee app controls it, from the `govee-ble-local` release after 1.6.1: whole-light colour and kelvin, the two zones on/off only, no segments (source-traced from the Govee app, not yet verified on a (1,1) unit, [#30](https://github.com/Brady-Woods/hass-govee-ble-local/issues/30)) |
 | **H6047** (light bar) | ✅ power, brightness, RGB, color temp, scenes; left/right bar zones; 10 segments |
 | **H6641** (RGBIC strip) | ✅ power, brightness, RGB, color temp, scenes; addressable segments |
 | **H61A8** (LED rope) | ✅ power, brightness, RGB, color temp, scenes; 15 addressable segments |

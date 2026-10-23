@@ -103,7 +103,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   lights are only removed from a light whose profile has no segments at all, never by the segment
   count it reads. A light set up before its protocol version was heard gets this profile when the
   entry reloads, once the protocol version is first heard. With `govee-ble-local` 1.6.1 nothing
-  changes: it has no route for protocol version 1,1.
+  changes: it has no route for protocol version 1,1. The profile is source-traced from the Govee
+  app, not yet verified on a (1,1) unit (#30).
 
 ## [1.6.1] - 2026-10-22
 

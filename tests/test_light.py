@@ -314,25 +314,6 @@ async def test_segment_lights_use_the_librarys_set_segment_count(
     assert {u for u in lights if "_segment_" in u} == {f"{ADDRESS}_segment_{i}" for i in range(10)}
 
 
-async def test_segment_lights_registered_earlier_are_kept_while_the_device_has_segments(
-    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_bluetooth: SimpleNamespace
-) -> None:
-    """Segment lights an earlier setup registered are kept while the device has segments, one
-    past a count read short too: only a device without segments drops them (section 11)."""
-    mock_config_entry.add_to_hass(hass)
-    earlier = {f"{ADDRESS}_segment_0", f"{ADDRESS}_segment_12"}
-    for unique_id in earlier:
-        er.async_get(hass).async_get_or_create(
-            "light", DOMAIN, unique_id, config_entry=mock_config_entry
-        )
-    device = make_device("H60A6")
-    device.set_segment_count(10)
-
-    await _setup_custom(hass, mock_config_entry, device, mock_bluetooth)
-
-    assert earlier <= set(_lights(hass, mock_config_entry))
-
-
 @KELVIN_RANGES
 async def test_main_light_supported_features(
     hass: HomeAssistant, entry: MockConfigEntry, lo: int, hi: int
@@ -2784,23 +2765,34 @@ def _zones_without_segments(device: Device) -> Device:
     return device
 
 
-async def test_a_light_fixtures_zones_without_segments_are_on_off_lights(
-    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_bluetooth: SimpleNamespace
+@pytest.mark.parametrize(
+    ("segments", "segment_lights"),
+    [(False, set()), (True, {*range(10), 12})],
+    ids=["without_segments", "with_segments"],
+)
+async def test_a_light_fixtures_zones_are_lights_and_its_segment_lights_go_only_without_segments(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_bluetooth: SimpleNamespace,
+    segments: bool,
+    segment_lights: set[int],
 ) -> None:
-    """A light fixture's zones without segments are on/off lights on the zone lights' unique
-    ids, with no zone switch and no segment light. An earlier setup's zone switch (earlier
-    versions made a zone without segments one) and segment lights are removed."""
+    """A light fixture's zones are lights on the zone lights' unique ids, on/off ones where
+    they have no segments, and an earlier setup's zone switch is removed (earlier versions made
+    a zone without segments one). Its earlier segment lights are removed only from a device
+    without segments: one with them keeps them all, one past a count read short (10 of 13) too."""
     mock_config_entry.add_to_hass(hass)
     registry = er.async_get(hass)
-    stale = [
+    for domain, unique_id in (
+        ("switch", f"{ADDRESS}_zone_main"),
+        ("light", f"{ADDRESS}_segment_0"),
+        ("light", f"{ADDRESS}_segment_12"),
+    ):
         registry.async_get_or_create(domain, DOMAIN, unique_id, config_entry=mock_config_entry)
-        for domain, unique_id in (
-            ("switch", f"{ADDRESS}_zone_main"),
-            ("light", f"{ADDRESS}_segment_0"),
-            ("light", f"{ADDRESS}_segment_12"),
-        )
-    ]
-    device = _zones_without_segments(make_device("H60A6"))
+    device = make_device("H60A6")
+    device.set_segment_count(10)
+    if not segments:
+        device = _zones_without_segments(device)
 
     entry = await _setup_custom(hass, mock_config_entry, device, mock_bluetooth)
 
@@ -2809,13 +2801,15 @@ async def test_a_light_fixtures_zones_without_segments_are_on_off_lights(
         ("light", f"{ADDRESS}_light"),
         ("light", f"{ADDRESS}_zone_main_light"),
         ("light", f"{ADDRESS}_zone_background_light"),
+        *(("light", f"{ADDRESS}_segment_{i}") for i in segment_lights),
     }
-    assert [registry.async_get(e.entity_id) for e in stale] == [None] * len(stale)
     _seed(entry, is_on=True, zone_power={0: True, 1: True})
+    zone_modes = {"rgb", "color_temp"} if segments else {"onoff"}
     for name in ("main", "background"):
         state = hass.states.get(_zone(hass, name))
-        assert state.attributes["supported_color_modes"] == ["onoff"]
-        assert (state.state, state.attributes["color_mode"]) == (STATE_ON, "onoff")
+        assert set(state.attributes["supported_color_modes"]) == zone_modes
+        assert state.state == STATE_ON
+        assert state.attributes["color_mode"] in zone_modes
 
 
 async def test_an_on_off_zone_light_switches_its_zone_alone(
