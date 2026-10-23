@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Rejected commands and secret keys are back in the diagnostics.** Since `govee-ble-local` 1.4.0
+  the library logs a refused write only at DEBUG and raises `GoveeBleCommandRejected` instead, so
+  refusals had dropped out of `recent_warnings`. The integration now logs at WARNING, with the
+  device address, a light or switch command the device refuses and a rejected secret key (from a
+  command, the **Run self-test** button or `capture_session`). The always-on capture also keeps this
+  integration's own WARNING+ lines for the device (these rejections, and Home Assistant's error for
+  a failed poll, a rejected secret included), as well as the library's, with the device's address
+  and name scrubbed from them like the rest of the diagnostics.
+
 ### Changed
 - **A light that only switches on and off is a light, not a switch:** a model with power alone
   that isn't a relay smart plug (by its library profile) gets an on/off light, so it joins light
@@ -33,6 +43,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fails by name when the library adds an I/O method, or a name the fake uses for its own
   bookkeeping, and a test whose library code still reaches for a real Bluetooth link fails
   instead of trying one. No change to the integration itself.
+- `scripts/check.sh` in a dev checkout: when `../govee-ble-local` no longer tracks its generated
+  Kaitai classes (it then builds them from `spec/*.ksy` on install), the gate requires the JVM
+  `kaitai-struct-compiler` 0.11 and stops with install instructions if it is missing, instead of
+  failing inside a quiet `pip install`. CI and `FROM_MANIFEST=1` install released packages, which
+  ship the classes, so they need no compiler.
 
 ## [1.6.1] - 2026-10-22
 

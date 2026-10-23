@@ -39,6 +39,10 @@ from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import entity_registry as er
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
+from pytest_homeassistant_custom_component.components.diagnostics import (
+    get_diagnostics_for_config_entry,
+)
+from pytest_homeassistant_custom_component.typing import ClientSessionGenerator
 
 from custom_components.govee_ble_local.const import (
     CONF_ALLOW_MODELLED,
@@ -746,9 +750,14 @@ async def test_turn_off_failure_keeps_light_on(
     ids=lambda e: type(e).__name__,
 )
 async def test_ble_errors_become_ble_command_failed(
-    hass: HomeAssistant, entry: MockConfigEntry, mock_device: Device, error: BaseException
+    hass: HomeAssistant,
+    hass_client: ClientSessionGenerator,
+    entry: MockConfigEntry,
+    mock_device: Device,
+    error: BaseException,
 ) -> None:
-    """Transport failures surface as one translated HomeAssistantError, without reauth."""
+    """Transport failures surface as one translated HomeAssistantError, without reauth, and
+    add no line to the diagnostics' recent warnings (only rejections are logged there)."""
     _fail(mock_device, error)
     with pytest.raises(HomeAssistantError) as exc:
         await _call(hass, "turn_on", MAIN)
@@ -761,6 +770,8 @@ async def test_ble_errors_become_ble_command_failed(
     assert exc.value.__cause__ is error
     await hass.async_block_till_done()
     assert _govee_flows(hass) == []
+    diagnostics = await get_diagnostics_for_config_entry(hass, hass_client, entry)
+    assert diagnostics["recent_warnings"] == []
 
 
 async def test_bare_timeout_error_is_named(
@@ -787,14 +798,26 @@ async def test_not_supported_is_a_validation_error(
 
 
 async def test_auth_error_starts_reauth(
-    hass: HomeAssistant, entry: MockConfigEntry, mock_device: Device
+    hass: HomeAssistant,
+    entry: MockConfigEntry,
+    mock_device: Device,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """A rejected secret raises secret_rejected and starts a reauth flow."""
+    """A rejected secret raises secret_rejected, starts a reauth flow and is logged once.
+
+    The library logs the rejection only at DEBUG: the integration's WARNING, naming
+    the address, is what its diagnostics capture keeps.
+    """
     _fail(mock_device, GoveeBleAuthError("secret rejected"))
     with pytest.raises(HomeAssistantError) as exc:
         await _call(hass, "turn_on", MAIN)
     assert exc.value.translation_key == "secret_rejected"
     assert not isinstance(exc.value, ServiceValidationError)
+    assert [
+        r.getMessage()
+        for r in caplog.records
+        if r.name.startswith("custom_components.govee_ble_local") and r.levelno >= logging.WARNING
+    ] == [f"{ADDRESS} rejected its secret key: secret rejected"]
     await hass.async_block_till_done()
     flows = _govee_flows(hass)
     assert len(flows) == 1
