@@ -45,7 +45,7 @@ from custom_components.govee_ble_local.const import (
 from custom_components.govee_ble_local.coordinator import GoveeBleLocalCoordinator
 from custom_components.govee_ble_local.helpers import Broadcast
 
-from .const import ADDRESS, LOCAL_NAME, TITLE, govee_mfg, pact_mfg
+from .const import ADDRESS, LOCAL_NAME, TITLE, broadcast_data, govee_mfg, pact_mfg
 
 pytest_plugins = ["pytest_homeassistant_custom_component"]
 
@@ -159,6 +159,13 @@ class FakeConnection:
         yield
 
 
+def _header(pact: tuple[int, int]) -> Broadcast:
+    """The broadcast header the tests' adverts carry at ``pact`` (pact_mfg's)."""
+    header = Broadcast.from_data(broadcast_data(*pact))
+    assert header is not None
+    return header
+
+
 def make_device(
     sku: str = "H60A6",
     *,
@@ -177,7 +184,7 @@ def make_device(
     device = create_device(
         BLEDevice(address=address, name=name, details={}),
         sku,
-        None if pact is None else Broadcast(False, 1, *pact).advertisement(sku, name),
+        None if pact is None else _header(pact).advertisement(sku, name),
         secret=secret,
         allow_modelled=allow_modelled,
     )
@@ -470,7 +477,7 @@ def allow_modelled() -> bool:
 
 @pytest.fixture
 def device_pact() -> tuple[int, int] | None:
-    """The pact the device under test advertises (override per test), None: none known.
+    """The pact the device under test is built at (override per test), None: none known.
 
     A model the library serves only at its rows' pacts needs one.
     """
@@ -501,11 +508,7 @@ def mock_config_entry(
             "address": ADDRESS,
             CONF_SKU: device_sku,
             **({CONF_ALLOW_MODELLED: True} if allow_modelled else {}),
-            **(
-                {}
-                if device_pact is None
-                else {CONF_BROADCAST: Broadcast(False, 1, *device_pact).as_data()}
-            ),
+            **({} if device_pact is None else {CONF_BROADCAST: broadcast_data(*device_pact)}),
         },
     )
 

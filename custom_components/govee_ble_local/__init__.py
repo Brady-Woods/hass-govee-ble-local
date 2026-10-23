@@ -303,7 +303,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: GoveeBleLocalConfigEntry
     log_capture = LogCapture(address)
     entry.async_on_unload(log_capture.detach)
 
-    coordinator = GoveeBleLocalCoordinator(hass, entry, device)
+    coordinator = GoveeBleLocalCoordinator(
+        hass, entry, device, set_up_without_pact=broadcast is None
+    )
     entry.runtime_data = GoveeBleLocalRuntimeData(
         device=device,
         coordinator=coordinator,

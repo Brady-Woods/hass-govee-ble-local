@@ -70,6 +70,7 @@ from .const import (
     ADVERT_POWER_FRESH_SECONDS,
     COMMAND_RELEASE_DELAY_SECONDS,
     CONF_ALLOW_MODELLED,
+    CONF_BROADCAST,
     DOMAIN,
     EXCLUDED_FROM_ADVERT_POLICY,
     MAX_CONCURRENT_POLLS,
@@ -87,7 +88,13 @@ from .const import (
     UNAVAILABLE_AFTER_UNHEARD_SECONDS,
     WEAK_SIGNAL_RSSI,
 )
-from .helpers import BLE_ERRORS, advertised_broadcast, async_store_broadcast, kelvin_range
+from .helpers import (
+    BLE_ERRORS,
+    Broadcast,
+    advertised_broadcast,
+    async_store_broadcast,
+    kelvin_range,
+)
 
 if TYPE_CHECKING:
     from . import GoveeBleLocalConfigEntry
@@ -387,8 +394,14 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         hass: HomeAssistant,
         entry: GoveeBleLocalConfigEntry,
         device: Device,
+        *,
+        set_up_without_pact: bool = False,
     ) -> None:
-        """Initialize the coordinator for one config entry's device."""
+        """Initialize the coordinator for one config entry's device.
+
+        ``set_up_without_pact``: setup knew no pact for it (its record had no Govee block and
+        none was stored), so the first one heard may route its model elsewhere.
+        """
         address: str = entry.data[CONF_ADDRESS]
         super().__init__(
             hass,
@@ -399,6 +412,7 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         )
         self._device = device
         self._address = address
+        self._set_up_without_pact = set_up_without_pact
         self.consecutive_failures = 0
         # The failures of the current streak that drive its backoff: all but the
         # slow ones (a timeout after SLOW_POLL_SECONDS, ``_async_note_failure``).
@@ -688,7 +702,7 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         was_on = self._device.state.is_on
         learned_before = self._advert_learned()
         changed = self._device.ingest_advertisement(service_info.advertisement)
-        self._async_keep_broadcast(service_info, pact_before=learned_before[0])
+        self._async_keep_broadcast(service_info)
         if changed and self._device.state.is_on != was_on:
             # The return poll already reads what a turn-on poll would.
             self._async_handle_power_flip(was_on, schedule_poll=not return_poll)
@@ -704,24 +718,24 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
             self.async_update_diagnostics()
 
     @callback
-    def _async_keep_broadcast(
-        self,
-        service_info: bluetooth.BluetoothServiceInfoBleak,
-        *,
-        pact_before: tuple[int, int] | None,
-    ) -> None:
-        """Keep the entry's broadcast header current, for a later setup without a record.
+    def _async_keep_broadcast(self, service_info: bluetooth.BluetoothServiceInfoBleak) -> None:
+        """Store the first broadcast header heard for an entry without one, for a later setup.
 
-        A device built without a pact (none stored, none in the record at setup) has its
-        model's pact-less profile. When the pact it now advertises routes the model to another
-        profile, the entry reloads, so setup builds the device at that pact. Only then: a device
-        built at a pact keeps its profile through a later one, as the library does.
+        Only a first one: setup keeps the header current from the record it routes by, and
+        this callback hears every scanner, whose records can lead with different headers, so
+        rewriting here would flip it each time another scanner's advert arrives. A device set
+        up without a pact (none stored, none in the record at setup) has its model's pact-less
+        profile. When the first pact it advertises routes the model to another profile, the
+        entry reloads, so setup builds the device at that pact. Only then: a device set up at
+        a pact keeps its profile through a later one, as the library does.
         """
         if (advertised := advertised_broadcast(service_info)) is None:
             return
-        async_store_broadcast(self.hass, self.config_entry, advertised)
-        if pact_before is not None or self._device.pact is None:
+        if Broadcast.from_data(self.config_entry.data.get(CONF_BROADCAST)) is None:
+            async_store_broadcast(self.hass, self.config_entry, advertised)
+        if not self._set_up_without_pact or self._device.pact is None:
             return
+        self._set_up_without_pact = False  # the first pact heard decides
         routed = profile_for(
             self._device.sku,
             pact=self._device.pact,
