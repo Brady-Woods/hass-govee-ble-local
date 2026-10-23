@@ -41,10 +41,16 @@ from pytest_homeassistant_custom_component.common import (
 )
 
 from custom_components.govee_ble_local import capture as capture_module
-from custom_components.govee_ble_local.const import CONF_ALLOW_MODELLED, CONF_SKU, DOMAIN
+from custom_components.govee_ble_local.const import (
+    CONF_ALLOW_MODELLED,
+    CONF_BROADCAST,
+    CONF_SKU,
+    DOMAIN,
+)
 from custom_components.govee_ble_local.coordinator import GoveeBleLocalCoordinator
+from custom_components.govee_ble_local.helpers import Broadcast
 
-from .const import ADDRESS, LOCAL_NAME, TITLE, govee_mfg, pact_mfg
+from .const import ADDRESS, LOCAL_NAME, TITLE, broadcast_data, govee_mfg, pact_mfg
 
 pytest_plugins = ["pytest_homeassistant_custom_component"]
 
@@ -175,6 +181,13 @@ def fake_transport(
 _CONNECTIONS: weakref.WeakKeyDictionary[Device, FakeConnection] = weakref.WeakKeyDictionary()
 
 
+def _header(pact: tuple[int, int]) -> Broadcast:
+    """The broadcast header the tests' adverts carry at ``pact`` (pact_mfg's)."""
+    header = Broadcast.from_data(broadcast_data(*pact))
+    assert header is not None
+    return header
+
+
 def make_device(
     sku: str = "H60A6",
     *,
@@ -183,17 +196,19 @@ def make_device(
     secret: bytes | None = None,
     allow_modelled: bool = False,
     connection_class: type[FakeConnection] = FakeConnection,
+    pact: tuple[int, int] | None = None,
 ) -> Device:
     """Build a real library Device for ``sku`` on a FakeConnection.
 
     ``allow_modelled`` builds an opt-in-only ("modelled") model, as setup does for an entry
-    that opted in.
+    that opted in. ``pact`` builds it as advertising that pact, as a model served only at its
+    rows' pacts needs (``device_pact``).
     """
     with fake_transport(connection_class) as built:
         device = create_device(
             BLEDevice(address=address, name=name, details={}),
             sku,
-            None,
+            None if pact is None else _header(pact).advertisement(sku, name),
             secret=secret,
             allow_modelled=allow_modelled,
         )
@@ -539,16 +554,30 @@ def allow_modelled() -> bool:
 
 
 @pytest.fixture
-def mock_device(device_sku: str, allow_modelled: bool) -> Generator[Device]:
+def device_pact() -> tuple[int, int] | None:
+    """The pact the device under test is built at (override per test), None: none known.
+
+    A model the library serves only at its rows' pacts needs one.
+    """
+    return None
+
+
+@pytest.fixture
+def mock_device(
+    device_sku: str, allow_modelled: bool, device_pact: tuple[int, int] | None
+) -> Generator[Device]:
     """Patch create_device to return a real Device on a fake transport."""
-    device = make_device(device_sku, allow_modelled=allow_modelled)
+    device = make_device(device_sku, allow_modelled=allow_modelled, pact=device_pact)
     with patch("custom_components.govee_ble_local.create_device", return_value=device):
         yield device
 
 
 @pytest.fixture
-def mock_config_entry(device_sku: str, allow_modelled: bool) -> MockConfigEntry:
-    """A config entry for the device under test (with the opt-in, for a modelled model)."""
+def mock_config_entry(
+    device_sku: str, allow_modelled: bool, device_pact: tuple[int, int] | None
+) -> MockConfigEntry:
+    """A config entry for the device under test (with the opt-in, for a modelled model,
+    and the stored header of its pact, where it has one)."""
     return MockConfigEntry(
         domain=DOMAIN,
         title=TITLE,
@@ -557,6 +586,7 @@ def mock_config_entry(device_sku: str, allow_modelled: bool) -> MockConfigEntry:
             "address": ADDRESS,
             CONF_SKU: device_sku,
             **({CONF_ALLOW_MODELLED: True} if allow_modelled else {}),
+            **({} if device_pact is None else {CONF_BROADCAST: broadcast_data(*device_pact)}),
         },
     )
 

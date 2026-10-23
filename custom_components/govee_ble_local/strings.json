@@ -169,6 +169,9 @@
     "protocol_not_supported": {
       "message": "The Govee {sku} advertises protocol version {protocol}, which this version of the integration doesn't support for that model. Setup will be retried in case the device advertises another."
     },
+    "protocol_unknown": {
+      "message": "Setting up the Govee {sku} needs the protocol version it advertises, and its advertisements haven't carried one. Setup will be retried in case a later one does."
+    },
     "secret_malformed": {
       "message": "The stored secret key for {device_name} is malformed; enter it again via the re-authentication prompt."
     },

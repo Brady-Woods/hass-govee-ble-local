@@ -22,6 +22,10 @@ CONF_CLEAR_SECRET = "clear_secret"  # noqa: S105 - a config key
 # True when the user chose to set up a model the library supports only as "modelled" (inferred
 # from the app, not traced or hardware-verified); absent means False.
 CONF_ALLOW_MODELLED = "allow_modelled"
+# The last Govee broadcast header the config flow or setup heard from the device (its pact,
+# encrypt flag and broadcast version; helpers.Broadcast). Setup builds the device from it while
+# Home Assistant's record of the device carries none; absent until one is heard.
+CONF_BROADCAST = "broadcast"
 
 # Colour-temperature range assumed when the library's profile doesn't give one.
 DEFAULT_MIN_KELVIN = 2700

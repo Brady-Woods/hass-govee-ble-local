@@ -4,16 +4,22 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from bleak.exc import BleakError
-from govee_ble_local import Capability, GoveeBleError
+from govee_ble_local import Capability, GoveeAdvertisement, GoveeBleError
 from govee_ble_local.identify import parse_manufacturer_data
 from homeassistant.const import CONF_ADDRESS
 from homeassistant.core import Context, HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 
-from .const import DEFAULT_MAX_KELVIN, DEFAULT_MIN_KELVIN, DOMAIN, ZONE_OFF_FRESH_SECONDS
+from .const import (
+    CONF_BROADCAST,
+    DEFAULT_MAX_KELVIN,
+    DEFAULT_MIN_KELVIN,
+    DOMAIN,
+    ZONE_OFF_FRESH_SECONDS,
+)
 
 if TYPE_CHECKING:
     from govee_ble_local import Device, GoveeBleAuthError, Zone
@@ -41,8 +47,51 @@ _FIXTURE_LIGHT_CAPABILITIES = frozenset(
 )
 
 
-def advertised_pact(service_info: BluetoothServiceInfoBleak | None) -> tuple[int, int] | None:
-    """Return the ``(pact_type, pact_code)`` a set-up device's advertisement carries, or None.
+class Broadcast(NamedTuple):
+    """A device's Govee broadcast header: its encrypt flag, broadcast version and pact.
+
+    The fields ``parse_manufacturer_data`` reads, in its order. The config entry keeps the
+    last one heard (CONF_BROADCAST), as the app keeps a bound device's encrypt flag per
+    address (``BleBroadVersionCache``), so setup can route the device by its pact and pick
+    its cipher while Home Assistant's record of it carries none: before any advertisement
+    since a restart, or one merged with a record without the Govee block.
+    """
+
+    encrypted: bool
+    version: int
+    pact_type: int
+    pact_code: int
+
+    @property
+    def pact(self) -> tuple[int, int]:
+        """The ``(pact_type, pact_code)`` the library routes the model by."""
+        return self.pact_type, self.pact_code
+
+    def advertisement(self, sku: str, name: str) -> GoveeAdvertisement:
+        """Return it as the library's parsed advertisement of ``sku``, for ``create_device``."""
+        return GoveeAdvertisement(
+            sku.upper(), name, self.encrypted, self.version, self.pact_type, self.pact_code
+        )
+
+    def as_data(self) -> dict[str, Any]:
+        """Return it as stored in the config entry."""
+        return {"pact": list(self.pact), "encrypted": self.encrypted, "version": self.version}
+
+    @classmethod
+    def from_data(cls, data: object) -> Broadcast | None:
+        """Return the header stored in the config entry, or None (none stored, or malformed)."""
+        match data:
+            case {
+                "pact": [int() as pact_type, int() as pact_code],
+                "encrypted": bool() as encrypted,
+                "version": int() as version,
+            }:
+                return cls(encrypted, version, pact_type, pact_code)
+        return None
+
+
+def advertised_broadcast(service_info: BluetoothServiceInfoBleak | None) -> Broadcast | None:
+    """Return the Govee broadcast header a set-up device's advertisement carries, or None.
 
     The name plays no part: a device already set up may show any name in Home Assistant's
     merged record (another device's advertisement merged in, say), and its Govee
@@ -55,10 +104,18 @@ def advertised_pact(service_info: BluetoothServiceInfoBleak | None) -> tuple[int
     """
     if service_info is None:
         return None
-    if (fields := parse_manufacturer_data(service_info.manufacturer_data)) is not None:
-        _encrypted, _version, pact_type, pact_code = fields
-        return pact_type, pact_code
-    return None
+    if (fields := parse_manufacturer_data(service_info.manufacturer_data)) is None:
+        return None
+    return Broadcast(*fields)
+
+
+@callback
+def async_store_broadcast(
+    hass: HomeAssistant, entry: GoveeBleLocalConfigEntry, broadcast: Broadcast
+) -> None:
+    """Store ``broadcast`` as the entry's header (CONF_BROADCAST), unless it already is."""
+    if entry.data.get(CONF_BROADCAST) != (data := broadcast.as_data()):
+        hass.config_entries.async_update_entry(entry, data={**entry.data, CONF_BROADCAST: data})
 
 
 def has_fixture_light(device: Device) -> bool:

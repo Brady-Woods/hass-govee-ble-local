@@ -17,10 +17,10 @@ from pytest_homeassistant_custom_component.components.diagnostics import (
 )
 from pytest_homeassistant_custom_component.typing import ClientSessionGenerator
 
-from custom_components.govee_ble_local.const import CONF_SECRET, CONF_SKU, DOMAIN
+from custom_components.govee_ble_local.const import CONF_BROADCAST, CONF_SECRET, CONF_SKU, DOMAIN
 
 from .conftest import connection
-from .const import ADDRESS, SECRET_HEX, TITLE
+from .const import ADDRESS, SECRET_HEX, TITLE, broadcast_data
 
 REDACTED = "**REDACTED**"
 WIFI_MAC = "11:22:33:44:55:66"
@@ -103,7 +103,13 @@ async def test_diagnostics_structure(
     # The title defaults to the advertised name, which ends in MAC bytes.
     assert diagnostics["entry"] == {
         "title": REDACTED,
-        "data": {"address": REDACTED, "sku": "H60A6", "secret": REDACTED},
+        "data": {
+            "address": REDACTED,
+            "sku": "H60A6",
+            "secret": REDACTED,
+            # Stored by setup from the advert: not identifying.
+            CONF_BROADCAST: broadcast_data(),
+        },
     }
     assert diagnostics["device"] == {
         "sku": "H60A6",
@@ -176,7 +182,11 @@ async def test_diagnostics_entry_without_secret(
 
     diagnostics = await get_diagnostics_for_config_entry(hass, hass_client, entry)
 
-    assert diagnostics["entry"]["data"] == {"address": REDACTED, "sku": "H60A6"}
+    assert diagnostics["entry"]["data"] == {
+        "address": REDACTED,
+        "sku": "H60A6",
+        CONF_BROADCAST: broadcast_data(),
+    }
     assert diagnostics["last_self_test"] is None
 
 

@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
+import dataclasses
 import logging
 from types import SimpleNamespace
 from typing import Any
@@ -12,13 +15,16 @@ import zlib
 from bleak.backends.device import BLEDevice
 import govee_ble_local
 from govee_ble_local import (
+    Capability,
     Device,
+    DeviceProfile,
     Encryption,
     GoveeBleConnectionError,
     GoveeBleError,
     create_device,
     profile_for,
 )
+import govee_ble_local.registry
 from homeassistant.components.bluetooth import (
     BluetoothChange,
     BluetoothScanningMode,
@@ -52,6 +58,7 @@ from custom_components.govee_ble_local import (
 )
 from custom_components.govee_ble_local.const import (
     CONF_ALLOW_MODELLED,
+    CONF_BROADCAST,
     CONF_SECRET,
     CONF_SKU,
     DOMAIN,
@@ -74,7 +81,7 @@ from .conftest import (
     make_service_info,
     unavailable_callback,
 )
-from .const import ADDRESS, LOCAL_NAME, SECRET_HEX, TITLE, pact_mfg
+from .const import ADDRESS, LOCAL_NAME, SECRET_HEX, TITLE, broadcast_data, pact_mfg
 
 MAIN_LIGHT = "light.test_ceiling"
 SELF_TEST_BUTTON = "button.test_ceiling_run_self_test"
@@ -826,6 +833,183 @@ async def test_setup_with_the_real_library_takes_the_modelled_opt_in(
                 "sku": modelled.sku,
                 "protocol": "{},{}".format(*modelled.unlisted_pact),
             }
+
+
+# -- the stored broadcast header -------------------------------------------------
+#
+# The device-list library release serves some models only at the pact their rows list (none
+# without one), and picks other models' profile by it. These tests build such routing for a
+# made-up model: a profile of its own, served at the pacts each case names. The real
+# create_device and Device run; only the library's route table is replaced.
+
+SKU = "H0PA1"
+NAME = f"Govee_{SKU}_ABCD"
+LIGHT = DeviceProfile(
+    skus=(SKU,),
+    capabilities=frozenset({Capability.POWER, Capability.BRIGHTNESS}),
+    encryption=Encryption.NONE,
+)
+# Another profile for the same model: a BK unit's pact-less one, say (another brightness byte).
+PACTLESS = dataclasses.replace(LIGHT, brightness_range=(0, 254))
+HEADER_2_1, HEADER_9_9 = broadcast_data(2, 1), broadcast_data(9, 9)
+_LOADED, _RETRY, _ERROR = (
+    ConfigEntryState.LOADED,
+    ConfigEntryState.SETUP_RETRY,
+    ConfigEntryState.SETUP_ERROR,
+)
+
+
+@contextmanager
+def _served(routes: Mapping[tuple[int, int] | None, DeviceProfile] | None) -> Iterator[None]:
+    """Make the library serve SKU with ``routes[pact]`` (None: no pact), listing it unless None."""
+    real_profile_for = govee_ble_local.registry.profile_for
+    real_supported = govee_ble_local.supported_skus
+
+    def _profile_for(
+        name: str, *, pact: tuple[int, int] | None = None, **kwargs: Any
+    ) -> DeviceProfile | None:
+        if name.upper() == SKU:
+            return None if routes is None else routes.get(pact)
+        return real_profile_for(name, pact=pact, **kwargs)
+
+    def _supported(*, allow_modelled: bool = False) -> list[str]:
+        listed = real_supported(allow_modelled=allow_modelled)
+        return listed if routes is None else sorted({*listed, SKU})
+
+    with (
+        patch("govee_ble_local.registry.profile_for", _profile_for),
+        patch("custom_components.govee_ble_local.coordinator.profile_for", _profile_for),
+        patch("custom_components.govee_ble_local.supported_skus", _supported),
+    ):
+        yield
+
+
+async def _set_up(
+    hass: HomeAssistant,
+    presence: SimpleNamespace,
+    mock_bluetooth: SimpleNamespace,
+    record: BluetoothServiceInfoBleak,
+    stored: dict[str, Any] | None = None,
+) -> MockConfigEntry:
+    """Set an entry for SKU up while Home Assistant's record of the device is ``record``."""
+    presence.service_info = mock_bluetooth.last_info.return_value = record
+    data: dict[str, Any] = {"address": ADDRESS, CONF_SKU: SKU}
+    if stored is not None:
+        data[CONF_BROADCAST] = stored
+    entry = MockConfigEntry(domain=DOMAIN, title=TITLE, unique_id=ADDRESS, data=data)
+    entry.add_to_hass(hass)
+    await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    return entry
+
+
+def _record(pact: tuple[int, int] | None) -> BluetoothServiceInfoBleak:
+    """Home Assistant's record of the device: its advert at ``pact``, or one without the
+    Govee block (None), as a record restored at startup or merged with another can be."""
+    mfg = {} if pact is None else pact_mfg(*pact)
+    return make_service_info(name=NAME, manufacturer_data=mfg, advertisement=True)
+
+
+@pytest.mark.parametrize(
+    ("routes", "stored", "advertised", "state", "error", "kept"),
+    [
+        # A model served only at (2,1).
+        ({(2, 1): LIGHT}, None, None, _RETRY, "protocol_unknown", None),
+        ({(2, 1): LIGHT}, HEADER_2_1, None, _LOADED, None, HEADER_2_1),
+        ({(2, 1): LIGHT}, None, (2, 1), _LOADED, None, HEADER_2_1),
+        ({(2, 1): LIGHT}, HEADER_2_1, (2, 1), _LOADED, None, HEADER_2_1),
+        ({(2, 1): LIGHT}, HEADER_2_1, (9, 9), _RETRY, "protocol_not_supported", HEADER_9_9),
+        ({(2, 1): LIGHT}, HEADER_9_9, None, _RETRY, "protocol_not_supported", HEADER_9_9),
+        # A model whose pact picks its profile.
+        ({None: PACTLESS, (2, 1): LIGHT}, HEADER_2_1, None, _LOADED, None, HEADER_2_1),
+        # Served without a pact, as every model is today: set up as before, nothing stored.
+        ({None: LIGHT}, None, None, _LOADED, None, None),
+        # Not listed at any pact: no advert can serve it.
+        (None, HEADER_2_1, None, _ERROR, "model_not_supported", HEADER_2_1),
+    ],
+    ids=[
+        "nothing_known",
+        "stored",
+        "advertised",
+        "advertised_as_stored",
+        "advertised_refused",
+        "stored_refused",
+        "stored_picks_the_profile",
+        "served_without_a_pact",
+        "not_listed",
+    ],
+)
+async def test_setup_routes_by_the_advertised_else_the_stored_header(
+    hass: HomeAssistant,
+    presence: SimpleNamespace,
+    mock_bluetooth: SimpleNamespace,
+    *,
+    routes: Mapping[tuple[int, int] | None, DeviceProfile] | None,
+    stored: dict[str, Any] | None,
+    advertised: tuple[int, int] | None,
+    state: ConfigEntryState,
+    error: str | None,
+    kept: dict[str, Any] | None,
+) -> None:
+    """The advertised header routes the model, else the stored one; the entry keeps the latest.
+
+    A restart's record can carry no Govee block until the device advertises again. A model
+    the library lists but can't serve at the known pact, or with none known, retries: a later
+    advert can serve it. Only a model it doesn't list fails for good. The stored encrypt flag
+    picks the cipher, as the advertised one does.
+    """
+    with _served(routes), _fake_transport():
+        entry = await _set_up(hass, presence, mock_bluetooth, _record(advertised), stored)
+        assert entry.state is state
+        assert entry.error_reason_translation_key == error
+        assert entry.data.get(CONF_BROADCAST) == kept
+        if state is _LOADED:
+            assert routes is not None
+            pact = advertised or (tuple(stored["pact"]) if stored else None)
+            device = entry.runtime_data.device
+            assert device.profile is routes[pact]
+            assert device.pact == pact
+            assert device.encryption is (
+                Encryption.NONE if pact is None else Encryption.AES_RC4_PSK
+            )
+            assert await hass.config_entries.async_unload(entry.entry_id)
+
+
+@pytest.mark.parametrize(
+    ("routes", "stored", "reloaded"),
+    [
+        ({None: PACTLESS, (10, 1): LIGHT}, None, True),
+        ({None: LIGHT, (10, 1): LIGHT}, None, False),
+        ({(2, 1): LIGHT, (10, 1): LIGHT}, HEADER_2_1, False),
+    ],
+    ids=["routes_elsewhere", "same_profile", "stale_stored"],
+)
+async def test_a_header_heard_after_setup(
+    hass: HomeAssistant,
+    presence: SimpleNamespace,
+    mock_bluetooth: SimpleNamespace,
+    *,
+    routes: Mapping[tuple[int, int] | None, DeviceProfile],
+    stored: dict[str, Any] | None,
+    reloaded: bool,
+) -> None:
+    """The header of the record setup routes by is stored once heard, replacing a stored one
+    of another pact (a firmware update's). A device set up without a pact reloads when that
+    pact routes the model to another profile, so setup builds it there."""
+    set_up_at = tuple(stored["pact"]) if stored else None
+    with _served(routes), _fake_transport():
+        entry = await _set_up(hass, presence, mock_bluetooth, _record(None), stored)
+        device = entry.runtime_data.device
+        assert device.profile is routes[set_up_at]
+        heard = _record((10, 1))
+        presence.service_info = mock_bluetooth.last_info.return_value = heard
+        advertisement_callback(mock_bluetooth)(heard, BluetoothChange.ADVERTISEMENT)
+        await hass.async_block_till_done(wait_background_tasks=True)
+        assert entry.data[CONF_BROADCAST] == broadcast_data(10, 1)
+        assert entry.state is ConfigEntryState.LOADED
+        assert (entry.runtime_data.device is not device) is reloaded
+        assert entry.runtime_data.device.profile is (LIGHT if reloaded else routes[set_up_at])
+        assert await hass.config_entries.async_unload(entry.entry_id)
 
 
 async def test_setup_passes_secret_to_library(

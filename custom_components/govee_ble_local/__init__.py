@@ -7,16 +7,19 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 import logging
 from pathlib import Path
+from typing import NoReturn
 import zlib
 
+from bleak.backends.scanner import AdvertisementData
 import govee_ble_local
 from govee_ble_local import (
     Capability,
     Device,
+    GoveeAdvertisement,
     GoveeBleError,
     GoveeBleNotSupported,
     create_device,
-    is_supported_sku,
+    supported_skus,
 )
 from govee_ble_local.identify import identify
 from homeassistant.components import bluetooth
@@ -42,6 +45,7 @@ from .capture import LogCapture, SelfTestReport
 from .connect_gate import async_release_waiters
 from .const import (
     CONF_ALLOW_MODELLED,
+    CONF_BROADCAST,
     CONF_SECRET,
     CONF_SKU,
     DOMAIN,
@@ -57,7 +61,9 @@ from .const import (
 )
 from .coordinator import GoveeBleLocalCoordinator
 from .helpers import (
-    advertised_pact,
+    Broadcast,
+    advertised_broadcast,
+    async_store_broadcast,
     clean_mac,
     clean_text,
     has_fixture_light,
@@ -175,6 +181,56 @@ def _stored_secret(entry: GoveeBleLocalConfigEntry) -> bytes | None:
     return bytes.fromhex(secret_hex) if secret_hex else None
 
 
+@callback
+def _async_broadcast(
+    hass: HomeAssistant, entry: GoveeBleLocalConfigEntry, advertised: Broadcast | None
+) -> Broadcast | None:
+    """Return the device's Govee broadcast header: the ``advertised`` one, else the stored one.
+
+    An advertised header that differs from the stored one replaces it, so the entry keeps
+    the latest the device has shown: one that the library refuses included, since a later
+    restart without a record should wait for the device rather than route it by an older
+    pact. An entry set up before the header was stored gets one this way, or from the first
+    advertisement that carries it (the coordinator's advertisement path).
+    """
+    if advertised is None:
+        return Broadcast.from_data(entry.data.get(CONF_BROADCAST))
+    async_store_broadcast(hass, entry, advertised)
+    return advertised
+
+
+def _raise_not_supported(
+    sku: str, broadcast: Broadcast | None, *, allow_modelled: bool, err: GoveeBleNotSupported
+) -> NoReturn:
+    """Raise the setup error for a model ``create_device`` refused.
+
+    The library lists every model it serves at some pact (``supported_skus``), and some
+    only at their rows' pacts, so a refusal is final only for a model it doesn't list.
+    """
+    if sku.upper() not in supported_skus(allow_modelled=allow_modelled):
+        # Permanent: retrying can't make an unsupported model supported.
+        raise ConfigEntryError(
+            translation_domain=DOMAIN,
+            translation_key="model_not_supported",
+            translation_placeholders={"sku": sku},
+        ) from err
+    if broadcast is None:
+        # The library serves this model only at the pact it advertises, and none has been
+        # heard yet: the next advertisement carries it.
+        raise ConfigEntryNotReady(
+            translation_domain=DOMAIN,
+            translation_key="protocol_unknown",
+            translation_placeholders={"sku": sku},
+        ) from err
+    # The library serves the model, only not at the pact the device advertises now.
+    # A later advert can carry another, so retry instead of giving up for good.
+    raise ConfigEntryNotReady(
+        translation_domain=DOMAIN,
+        translation_key="protocol_not_supported",
+        translation_placeholders={"sku": sku, "protocol": "{},{}".format(*broadcast.pact)},
+    ) from err
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: GoveeBleLocalConfigEntry) -> bool:
     """Set up a Govee BLE device from a config entry."""
     address: str = entry.data[CONF_ADDRESS]
@@ -187,10 +243,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: GoveeBleLocalConfigEntry
         )
 
     # The raw advertisement drives the library's encryption decision (the app's
-    # `encrypt` flag), so pass it through when we have it.
+    # `encrypt` flag) and routes the model by its pact, so pass it through when we have it.
     service_info = bluetooth.async_last_service_info(hass, address, connectable=True)
-    advertisement = service_info.advertisement if service_info else None
+    advertisement: AdvertisementData | GoveeAdvertisement | None = (
+        service_info.advertisement if service_info else None
+    )
     sku = _resolve_sku(entry, service_info)
+    advertised = advertised_broadcast(service_info)
+    broadcast = _async_broadcast(hass, entry, advertised)
+    if advertised is None and broadcast is not None:
+        # Home Assistant's record of the device has no Govee block (none heard since a
+        # restart, or one merged with a record without it): build it from the last one heard.
+        advertisement = broadcast.advertisement(sku, service_info.name if service_info else "")
     # Some devices (smart plugs) gate commands behind an 8-byte secret key,
     # stored as hex in the config entry (see config_flow's secret steps).
     secret = _stored_secret(entry)
@@ -208,21 +272,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: GoveeBleLocalConfigEntry
             allow_modelled=allow_modelled,
         )
     except GoveeBleNotSupported as err:
-        pact = advertised_pact(service_info)
-        if pact is not None and is_supported_sku(sku, allow_modelled=allow_modelled):
-            # The library serves the model, only not at the pact the device advertises now.
-            # A later advert can carry another, so retry instead of giving up for good.
-            raise ConfigEntryNotReady(
-                translation_domain=DOMAIN,
-                translation_key="protocol_not_supported",
-                translation_placeholders={"sku": sku, "protocol": "{},{}".format(*pact)},
-            ) from err
-        # Permanent: retrying can't make an unsupported model supported.
-        raise ConfigEntryError(
-            translation_domain=DOMAIN,
-            translation_key="model_not_supported",
-            translation_placeholders={"sku": sku},
-        ) from err
+        _raise_not_supported(sku, broadcast, allow_modelled=allow_modelled, err=err)
     # Close the link whenever the entry goes away (a failed setup included).
     # HA runs on-unload jobs last in, first out, so registering this before the
     # coordinator exists means polling is shut down first. HA cancels only entry
@@ -258,7 +308,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: GoveeBleLocalConfigEntry
     log_capture = LogCapture(address)
     entry.async_on_unload(log_capture.detach)
 
-    coordinator = GoveeBleLocalCoordinator(hass, entry, device)
+    coordinator = GoveeBleLocalCoordinator(
+        hass, entry, device, set_up_without_pact=broadcast is None
+    )
     entry.runtime_data = GoveeBleLocalRuntimeData(
         device=device,
         coordinator=coordinator,
