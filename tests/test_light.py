@@ -1141,8 +1141,16 @@ async def cct_segment_entry(
     """
     lo, hi = (2000, 9000) if kelvin_range is None else kelvin_range
     device = make_device()
+    # A library whose profiles say whether segments take colour temperature says so of this
+    # one too (the model the profile starts from may say no).
+    takes_segment_kelvin = (
+        {"segment_color_temp": True}
+        if "segment_color_temp" in {field.name for field in dataclasses.fields(device.profile)}
+        else {}
+    )
     device.profile = dataclasses.replace(
         device.profile,
+        **takes_segment_kelvin,
         capabilities=frozenset(
             {
                 Capability.POWER,

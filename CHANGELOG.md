@@ -19,15 +19,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Tests: the suite no longer breaks when `govee-ble-local` changes its model data. With the
   connection stand-in above, it passes against 1.6.1 and against three unreleased library builds:
   master at aa89aa9 and at 55f3c52, and the catalogue update (Brady-Woods/govee-ble-local#45) at
-  b79c3c7, where 53, 88 and 75 test cases failed before. Tests that ran once per supported model,
-  or pinned one model's library data (the H61A8's, and the H60A6's segment colour temperature),
-  are gone or build the profile they need: 1053 test cases instead of 1161. The poll-policy tests
-  check what Home Assistant shows (entity states, the poll interval sensor, diagnostics) and how
-  often a light is polled, not the coordinator's internals or Home Assistant's timer handles. A
-  test now fails when a poll ends in the coordinator's catch-all for unexpected errors, which had
-  let two broken tests pass. The README's supported-models table is checked by `scripts/check.sh`
-  on the floor release (CI's `floor` job) instead of by a test. No change to the integration
-  itself.
+  b79c3c7, where 53, 88 and 75 test cases failed before. Gone or rebuilt on a profile built in the
+  test: the relay-entity test that ran once per model in the library's catalogue, the two H61A8
+  colour-temperature tests, and the six H60A6 segment colour-temperature tests. 1053 test cases
+  instead of 1161; other tests still check some models' library data (the H60A6 and H61A8 self-test
+  steps, the H6047's zones and segments, the H61A8's Kelvin range). The poll-policy tests check what
+  Home Assistant shows (entity states, the poll interval sensor, diagnostics) and how often a light
+  is polled, not the coordinator's internals or Home Assistant's timer handles. A test now fails
+  when a poll ends in the coordinator's catch-all for unexpected errors, which had let two broken
+  tests pass. The README's supported-models table is checked by `scripts/check.sh` on the floor
+  release (CI's `floor` job) instead of by a test. No change to the integration itself.
 
 ## [1.6.1] - 2026-10-22
 
