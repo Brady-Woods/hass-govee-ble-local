@@ -8,6 +8,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- **A light that only switches on and off is a light, not a switch:** a model with power alone
+  that isn't a relay smart plug (by its library profile) gets an on/off light, so it joins light
+  groups, an area's lights and "turn off all the lights", which skipped it as a switch. The next
+  `govee-ble-local` release (after 1.6.1) adds five such models: the H1162, H1163, H1167 and
+  H1168 Music Sync boxes and the H7004 grow light. No model in 1.6.1 or earlier is one, so no
+  device set up today changes. Smart plugs (the H5083 family) keep their outlet switch. An
+  earlier version of the integration that got that library release (its `<2` range allows that,
+  on a fresh install or after a container rebuild) set these models up as switches. That switch
+  now becomes the light: the light takes its entity ID with `light.` in place of `switch.`, its
+  name, icon, area, labels, voice aliases and voice-assistant exposure, and stays hidden or
+  disabled if you hid or disabled the switch. An entity can't change domain, so automations,
+  scripts and dashboards that used the switch need the light instead. If you made the switch a
+  light with a Switch as X helper, delete the helper before you update: once the switch is gone
+  the helper is either removed with it or left unavailable, depending on which sets up first.
+  Deleted first, it hands its voice-assistant exposure back to the switch, so the new light gets
+  the helper's entity ID and that exposure, but not a name or area you gave the helper: set
+  those on the light. Left in place, it makes the new light's entity ID end in `_2`.
 - Tests: the stand-in for the library's connection (`tests/conftest.py` `FakeConnection`) is now
   the library's own `GoveeConnection` with only its Bluetooth I/O replaced, instead of a
   hand-written copy put on the library's private `Device._conn`. A method the library adds that

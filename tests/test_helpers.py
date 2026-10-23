@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+import dataclasses
 import json
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
 from bleak.exc import BleakError
-from govee_ble_local import GoveeBleConnectionError, GoveeBleError
+from govee_ble_local import Capability, Device, GoveeBleConnectionError, GoveeBleError, Zone
 from homeassistant.core import Context, HomeAssistant
 import pytest
 from pytest_homeassistant_custom_component.common import MockUser
@@ -20,12 +22,57 @@ from custom_components.govee_ble_local.helpers import (
     brightness_to_pct,
     clean_mac,
     clean_text,
+    has_fixture_light,
+    has_power_switch,
     parse_secret,
     pct_to_brightness,
 )
 
-from .conftest import make_service_info
+from .conftest import make_device, make_power_only_light, make_service_info
 from .const import SECRET_HEX, pact_mfg
+
+
+def _with(sku: str, **profile: object) -> Callable[[], Device]:
+    """Build ``sku``'s device with these profile fields replaced."""
+
+    def build() -> Device:
+        device = make_device(sku)
+        device.profile = dataclasses.replace(device.profile, **profile)
+        return device
+
+    return build
+
+
+@pytest.mark.parametrize(
+    ("build", "light", "switch"),
+    [
+        (_with("H5083"), False, True),
+        (make_power_only_light, True, False),
+        (_with("H6006"), True, False),
+        (_with("H6006", capabilities=frozenset({Capability.BRIGHTNESS}), relay=True), True, False),
+        (_with("H5083", zones=(Zone("a", power_index=0), Zone("b", power_index=1))), False, False),
+        (_with("H6006", capabilities=frozenset({Capability.SCENES})), False, False),
+    ],
+    ids=[
+        "relay_plug",
+        "power_only_light",
+        "light_fixture",
+        "dimmable_relay",
+        "zoned_relay_plug",
+        "no_power",
+    ],
+)
+def test_fixture_light_or_power_switch(
+    build: Callable[[], Device], light: bool, switch: bool
+) -> None:
+    """A light capability, or power without a relay, makes a light; only a relay plug a switch.
+
+    A zoned relay plug is switched per zone, and a device with neither power nor a light
+    capability gets neither. No device gets both.
+    """
+    device = build()
+    assert has_fixture_light(device) is light
+    assert has_power_switch(device) is switch
 
 
 @pytest.mark.parametrize(

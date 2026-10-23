@@ -37,9 +37,11 @@ BLE_ERRORS: tuple[type[Exception], ...] = (BleakError, GoveeBleError, TimeoutErr
 SECRET_BYTES = 8
 
 # Which platform owns a device or a zone is decided once, below, for light.py,
-# switch.py and the legacy zone-switch cleanup in __init__.py, so each relay gets
-# exactly one entity. Any of these capabilities makes a device a light fixture;
-# one with none of them (e.g. a smart plug) is a switch instead.
+# switch.py and the legacy-switch handling in __init__.py, so each relay gets
+# exactly one entity. Any of these capabilities makes a device a light fixture,
+# and so does power alone on a device that isn't a relay plug (it gets an
+# on/off light). A relay plug with none of them (the H5083 family) is a switch
+# instead.
 _FIXTURE_LIGHT_CAPABILITIES = frozenset(
     {Capability.BRIGHTNESS, Capability.RGB, Capability.COLOR_TEMP}
 )
@@ -117,15 +119,22 @@ def async_store_broadcast(
 
 
 def has_fixture_light(device: Device) -> bool:
-    """Return True if the device gets a whole-fixture light."""
-    return bool(device.capabilities & _FIXTURE_LIGHT_CAPABILITIES)
+    """Return True if the device gets a whole-fixture light.
+
+    One with a light capability, or a power-only light: power on a device whose
+    profile isn't a relay plug's (``profile.relay``), which gets an on/off light.
+    """
+    caps = device.capabilities
+    if caps & _FIXTURE_LIGHT_CAPABILITIES:
+        return True
+    return Capability.POWER in caps and not device.profile.relay
 
 
 def has_power_switch(device: Device) -> bool:
     """Return True if the device gets a whole-device power switch.
 
     Only a device that is neither a light fixture nor zoned (a zoned device is
-    switched per zone).
+    switched per zone): a relay plug.
     """
     return (
         not device.zones
