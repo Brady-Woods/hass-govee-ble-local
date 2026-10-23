@@ -59,6 +59,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `kaitai-struct-compiler` 0.11 and stops with install instructions if it is missing, instead of
   failing inside a quiet `pip install`. CI and `FROM_MANIFEST=1` install released packages, which
   ship the classes, so they need no compiler.
+- Tests: the zone-switch tests run on a relay plug switched per zone, the one device left with
+  zone switches, instead of a ceiling light whose zones had no segments. Three tests of a light
+  fixture's zone switches during its own turn-off are gone: a light fixture has no zone switches
+  now, and the zone lights' tests cover the same zone turn-off path.
 
 ### Fixed
 - **Rejected commands and secret keys are back in the diagnostics.** Since `govee-ble-local` 1.4.0
@@ -94,6 +98,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for them.
 - The README's model list generator no longer fails on such a model: its row names the protocol
   versions it is served at, as "(10,1), (10,2) or (10,3)".
+- **An H60A6 that advertises protocol version 1,1 keeps its Main light and Background light
+  entities, now on/off only** (#30). From the `govee-ble-local` release after 1.6.1, such a light
+  (reported on firmware 1.00.24) gets the Govee app's profile for it. The whole light's colour and
+  colour temperature go out in the app's form; earlier, colour, colour temperature and section
+  brightness did nothing on it. Its main panel and background ring are switched on and off only, as
+  in the app, and it has no segments. Earlier versions of the integration made a zone without
+  segments a switch, so the zone lights would have been replaced by new switches. The zone lights now
+  stay, with the same entity IDs, as on/off lights, and an earlier version's zone switches are
+  removed. The light's segment lights are removed: on that profile they control nothing. Segment
+  lights are only removed from a light whose profile has no segments at all, never by the segment
+  count it reads. A light set up before its protocol version was heard gets this profile when the
+  entry reloads, once the protocol version is first heard. With `govee-ble-local` 1.6.1 nothing
+  changes: it has no route for protocol version 1,1. The profile is source-traced from the Govee
+  app, not yet verified on a (1,1) unit (#30).
 
 ## [1.6.1] - 2026-10-22
 
