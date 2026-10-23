@@ -35,6 +35,10 @@ from pytest_homeassistant_custom_component.common import (
     MockConfigEntry,
     async_fire_time_changed,
 )
+from pytest_homeassistant_custom_component.components.diagnostics import (
+    get_diagnostics_for_config_entry,
+)
+from pytest_homeassistant_custom_component.typing import ClientSessionGenerator
 
 from custom_components.govee_ble_local.const import (
     CONF_SKU,
@@ -329,11 +333,17 @@ async def test_skipped_poll_error_is_translated(
 
 async def test_auth_error_starts_reauth_and_stops_polling(
     hass: HomeAssistant,
+    hass_client: ClientSessionGenerator,
     setup_integration: MockConfigEntry,
     coordinator: GoveeBleLocalCoordinator,
     mock_device: Device,
 ) -> None:
-    """A rejected secret starts reauth, isn't a poll failure and cancels further polling."""
+    """A rejected secret starts reauth, isn't a poll failure and cancels further polling.
+
+    Home Assistant's own ERROR for the failed refresh names the device (the coordinator is named
+    after its address, the message by its title), so it reaches the diagnostics' recent warnings,
+    both scrubbed.
+    """
     fail(mock_device, GoveeBleAuthError("secret rejected"))
     await coordinator.async_refresh()
     await hass.async_block_till_done()
@@ -350,6 +360,12 @@ async def test_auth_error_starts_reauth_and_stops_polling(
     assert isinstance(error, ConfigEntryAuthFailed)
     assert (error.translation_domain, error.translation_key) == (DOMAIN, "secret_rejected")
     assert error.translation_placeholders == {"device_name": TITLE}
+    diagnostics = await get_diagnostics_for_config_entry(hass, hass_client, setup_integration)
+    assert diagnostics["recent_warnings"] == [
+        "ERROR Authentication failed while fetching govee_ble_local_**REDACTED** data: **REDACTED**"
+        " rejected its secret key. Update it via the re-authentication prompt in Settings >"
+        " Devices & services"
+    ]
 
     mock_device.update.reset_mock()  # type: ignore[attr-defined]
     await advance(hass, 3 * 3600)

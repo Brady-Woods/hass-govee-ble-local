@@ -96,10 +96,12 @@ async def async_get_config_entry_diagnostics(
     # Key-based redaction can't reach identifiers embedded in log lines, frame
     # hex or error messages, so every string is also scrubbed by value. Hex runs
     # in captured text go first: an identifier match inside a run would leave
-    # its neighbours' fragments behind.
+    # its neighbours' fragments behind. The title is among them: Home Assistant's
+    # error for a failed poll names the device by it.
     identifiers = [
         value
         for value in (
+            entry.title,
             entry.data[CONF_ADDRESS],
             entry.data.get(CONF_SECRET),
             state.ble_mac,

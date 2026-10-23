@@ -7,8 +7,9 @@ import logging
 import time
 from types import SimpleNamespace
 
-from govee_ble_local import Device
+from govee_ble_local import Device, GoveeBleCommandRejected
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 from pytest_homeassistant_custom_component.components.diagnostics import (
@@ -18,6 +19,7 @@ from pytest_homeassistant_custom_component.typing import ClientSessionGenerator
 
 from custom_components.govee_ble_local.const import CONF_SECRET, CONF_SKU, DOMAIN
 
+from .conftest import connection
 from .const import ADDRESS, SECRET_HEX, TITLE
 
 REDACTED = "**REDACTED**"
@@ -336,6 +338,29 @@ async def test_non_hex_identifier_is_scrubbed_as_written(
     assert diagnostics["last_self_test"]["log"] == [f"INFO serial {REDACTED}"] * 2
 
 
+async def test_rejected_command_reaches_the_diagnostics(
+    hass: HomeAssistant,
+    hass_client: ClientSessionGenerator,
+    setup_integration: MockConfigEntry,
+    mock_device: Device,
+) -> None:
+    """A command the device refuses shows in recent_warnings, its address scrubbed.
+
+    The library logs the rejection only at DEBUG; the line comes from the
+    integration's own WARNING.
+    """
+    connection(mock_device).error = GoveeBleCommandRejected(f"{ADDRESS}: write refused")
+    with pytest.raises(HomeAssistantError):
+        await hass.services.async_call(
+            "light", "turn_on", {"entity_id": "light.test_ceiling"}, blocking=True
+        )
+
+    diagnostics = await get_diagnostics_for_config_entry(hass, hass_client, setup_integration)
+    assert diagnostics["recent_warnings"] == [
+        f"WARNING {REDACTED} rejected a command: {REDACTED}: write refused"
+    ]
+
+
 async def test_short_identifiers_do_not_over_redact(
     hass: HomeAssistant,
     hass_client: ClientSessionGenerator,
@@ -370,10 +395,11 @@ async def test_entry_with_only_short_identifiers_is_left_unscrubbed(
     mock_device: Device,
     mock_bluetooth: SimpleNamespace,
 ) -> None:
-    """With nothing long enough to match, text is passed through (keys are still redacted)."""
+    """With nothing long enough to match (a short address and title), text is passed through
+    (keys are still redacted)."""
     entry = MockConfigEntry(
         domain=DOMAIN,
-        title=TITLE,
+        title="Lamp",
         unique_id="A:1",
         data={"address": "A:1", CONF_SKU: "H60A6"},
     )
