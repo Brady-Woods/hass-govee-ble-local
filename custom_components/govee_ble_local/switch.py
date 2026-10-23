@@ -10,7 +10,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .entity import GoveeBleLocalEntity
-from .helpers import has_power_switch, is_colour_zone
+from .helpers import has_power_switch, has_zone_lights
 
 if TYPE_CHECKING:
     from . import GoveeBleLocalConfigEntry
@@ -29,25 +29,23 @@ async def async_setup_entry(
 ) -> None:
     """Set up switches.
 
-    One on/off switch per on/off-only zone (a zone with no segments;
-    colour-controllable zones are lights instead - see light.py), or - for a
+    One on/off switch per zone of a device without a fixture light (a light
+    fixture's zones are lights, on/off ones too - see light.py), or - for a
     relay plug with no zones (the H5083 family) - a single whole-device power
     switch. A power-only light is a light instead (see helpers.py).
     """
     device = entry.runtime_data.device
 
-    entities: list[SwitchEntity] = [
-        GoveeBleLocalZoneSwitch(entry, zone.name)
-        for zone in device.zones
-        if not is_colour_zone(zone)
-    ]
+    entities: list[SwitchEntity] = []
+    if not has_zone_lights(device):
+        entities.extend(GoveeBleLocalZoneSwitch(entry, zone.name) for zone in device.zones)
     if has_power_switch(device):
         entities.append(GoveeBleLocalPowerSwitch(entry))
     async_add_entities(entities)
 
 
 class GoveeBleLocalZoneSwitch(GoveeBleLocalEntity, SwitchEntity):
-    """On/off control for a single named on/off-only zone."""
+    """On/off control for one zone of a device without a fixture light (helpers.has_zone_lights)."""
 
     def __init__(self, entry: GoveeBleLocalConfigEntry, zone_name: str) -> None:
         """Initialize the switch for the named zone."""

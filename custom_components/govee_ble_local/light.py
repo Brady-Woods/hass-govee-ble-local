@@ -7,7 +7,7 @@ import logging
 import time
 from typing import TYPE_CHECKING, Any
 
-from govee_ble_local import Capability, Device
+from govee_ble_local import Capability, Device, Zone
 from homeassistant.components.light import (
     ATTR_BRIGHTNESS,
     ATTR_COLOR_TEMP_KELVIN,
@@ -27,10 +27,11 @@ from .entity import GoveeBleLocalEntity
 from .helpers import (
     brightness_to_pct,
     has_fixture_light,
-    is_colour_zone,
+    has_zone_lights,
     kelvin_range,
     mid_kelvin,
     pct_to_brightness,
+    zone_takes_colour,
 )
 
 if TYPE_CHECKING:
@@ -66,12 +67,15 @@ def _apply_kelvin_range(light: LightEntity, device: Device) -> None:
         light._attr_min_color_temp_kelvin, light._attr_max_color_temp_kelvin = kelvin_range(device)
 
 
-def _sub_light_modes(device: Device) -> set[ColorMode]:
+def _sub_light_modes(device: Device, *, colour: bool) -> set[ColorMode]:
     """Return the colour modes of a zone/segment sub-light.
 
-    Always RGB, plus COLOR_TEMP when the fixture supports colour temperature (the
+    RGB, plus COLOR_TEMP when the fixture supports colour temperature (the
     library exposes masked, independently-addressable per-zone/segment kelvin).
+    On/off alone for a zone that takes no colour (``zone_takes_colour``).
     """
+    if not colour:
+        return {ColorMode.ONOFF}
     modes = {ColorMode.RGB}
     if Capability.COLOR_TEMP in device.capabilities:
         modes.add(ColorMode.COLOR_TEMP)
@@ -87,8 +91,8 @@ async def async_setup_entry(
 
     - the whole-fixture light (power/brightness/colour/scene; on/off only for a
       power-only light),
-    - one light per colour-controllable zone (a zone that has segments; on/off-only
-      zones are switches instead - see switch.py),
+    - one light per zone (on/off only for a zone without segments; the zones of a
+      device without a fixture light are switches instead - see switch.py),
     - one light per addressable segment (disabled by default).
 
     A relay plug (the H5083 family) gets none: it is a switch (see helpers.py).
@@ -98,9 +102,8 @@ async def async_setup_entry(
     entities: list[LightEntity] = []
     if has_fixture_light(device):
         entities.append(GoveeBleLocalLight(entry))
-    entities.extend(
-        GoveeBleLocalZoneLight(entry, zone.name) for zone in device.zones if is_colour_zone(zone)
-    )
+    if has_zone_lights(device):
+        entities.extend(GoveeBleLocalZoneLight(entry, zone) for zone in device.zones)
     if Capability.SEGMENTS in device.capabilities:
         entities.extend(
             GoveeBleLocalSegmentLight(entry, index) for index in range(device.segment_count)
@@ -112,14 +115,14 @@ class _SubLight(GoveeBleLocalEntity, LightEntity):
     """Shared colour handling for zone and segment lights.
 
     Colour/brightness are read back best-effort from the device's segments and
-    tracked optimistically on each command.
+    tracked optimistically on each command. ``colour`` False: an on/off light.
     """
 
-    def __init__(self, entry: GoveeBleLocalConfigEntry, key: str) -> None:
+    def __init__(self, entry: GoveeBleLocalConfigEntry, key: str, *, colour: bool = True) -> None:
         super().__init__(entry, key)
-        self._attr_supported_color_modes = _sub_light_modes(self._device)
+        self._attr_supported_color_modes = _sub_light_modes(self._device, colour=colour)
         _apply_kelvin_range(self, self._device)
-        self._attr_color_mode = ColorMode.RGB  # updated on command
+        self._attr_color_mode = ColorMode.RGB if colour else ColorMode.ONOFF  # updated on command
 
     @abstractmethod
     def _sync_from_readback(self) -> None:
@@ -501,25 +504,23 @@ class GoveeBleLocalSegmentLight(_SubLight):
 
 
 class GoveeBleLocalZoneLight(_SubLight):
-    """A colour-controllable physical zone (e.g. H60A6 background, H6047 bars).
+    """A physical zone of a light fixture (e.g. H60A6 main panel / background ring, H6047 bars).
 
     On/off is a real per-zone command (read back into ``state.zone_power``);
     colour targets the zone's segment mask (``set_zone_rgb``) and brightness the
-    same mask (``set_segment_brightness``). Only created for zones that actually
-    have segments; on/off-only zones are switches (switch.py).
+    same mask (``set_segment_brightness``). A zone without segments (an H60A6 at
+    pact 1,1) is an on/off light: Home Assistant drops a colour or brightness
+    asked of it, so its turn-on is the zone's power alone. The zones of a device
+    without a fixture light are switches (switch.py).
     """
 
-    def __init__(self, entry: GoveeBleLocalConfigEntry, zone_name: str) -> None:
-        """Initialize the light for the named zone."""
-        super().__init__(entry, f"zone_{zone_name}_light")
-        self._zone_name = zone_name
-        self._segments = next(
-            (tuple(z.segments) for z in self._device.zones if z.name == zone_name), ()
-        )
-        self._power_index = next(
-            (z.power_index for z in self._device.zones if z.name == zone_name), None
-        )
-        self._set_zone_name(zone_name)
+    def __init__(self, entry: GoveeBleLocalConfigEntry, zone: Zone) -> None:
+        """Initialize the light for ``zone``."""
+        super().__init__(entry, f"zone_{zone.name}_light", colour=zone_takes_colour(zone))
+        self._zone_name = zone.name
+        self._segments = tuple(zone.segments)
+        self._power_index = zone.power_index
+        self._set_zone_name(zone.name)
         self._sync_from_readback()
 
     def _sync_from_readback(self) -> None:
@@ -553,7 +554,7 @@ class GoveeBleLocalZoneLight(_SubLight):
         in the Govee app while the fixture stays on reads "on" here until the next
         read-back.
         """
-        if self.is_on is not True or self._power_index is None:
+        if self.is_on is not True:
             return False
         confirmed = self._device.state.zone_power_confirmed.get(self._power_index)
         return confirmed is not None and time.monotonic() - confirmed < ZONE_STATE_FRESH_SECONDS

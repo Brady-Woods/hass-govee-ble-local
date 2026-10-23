@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import dataclasses
-import logging
-import time
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
@@ -20,7 +18,6 @@ from govee_ble_local import (
     Zone,
 )
 from govee_ble_local.wire import build
-from homeassistant.components.light import DATA_COMPONENT as LIGHT_DATA_COMPONENT
 from homeassistant.components.switch import SwitchDeviceClass
 from homeassistant.const import STATE_OFF, STATE_ON, STATE_UNAVAILABLE, STATE_UNKNOWN
 from homeassistant.core import HomeAssistant
@@ -32,7 +29,6 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from custom_components.govee_ble_local.const import (
     DOMAIN,
     UNAVAILABLE_AFTER_FAILURES,
-    ZONE_OFF_FRESH_SECONDS,
 )
 
 from .conftest import connection, make_device
@@ -252,8 +248,8 @@ async def test_light_fixtures_have_no_power_switch(
 async def zone_entry(
     hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_bluetooth: SimpleNamespace
 ) -> MockConfigEntry:
-    """An entry around a device whose zones are on/off-only (no shipped SKU has any)."""
-    device = make_device("H60A6")
+    """An entry around a relay plug switched per zone (no shipped SKU is one)."""
+    device = make_device("H5083")
     device.profile = dataclasses.replace(
         device.profile,
         zones=(Zone("main", power_index=0), Zone("mystery", power_index=1)),
@@ -270,32 +266,16 @@ def _device(entry: MockConfigEntry) -> Device:
     return device
 
 
-async def test_one_switch_per_on_off_zone(hass: HomeAssistant, zone_entry: MockConfigEntry) -> None:
-    """Each segment-less zone becomes a switch; no whole-device power switch is added."""
-    switches = _switches(hass, zone_entry)
-    assert set(switches) == {f"{ADDRESS}_zone_main", f"{ADDRESS}_zone_mystery"}
-    # Segment-less zones are not lights either.
-    assert not any("_zone_" in e.unique_id for e in _lights(hass, zone_entry))
-
-
 async def test_zoned_power_only_device_has_no_whole_device_switch(
-    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_bluetooth: SimpleNamespace
+    hass: HomeAssistant, zone_entry: MockConfigEntry
 ) -> None:
-    """A power-only device with on/off zones (a multi-outlet plug) is switched per zone only.
+    """A power-only device with zones (a multi-outlet plug) is switched per zone only.
 
-    Unlike ``zone_entry`` (a light fixture, which never gets a power switch),
-    this is the case the "no zones" condition of the power switch exists for.
+    The case the "no zones" condition of the power switch exists for, and the only
+    one with zone switches: a light fixture's zones are lights.
     """
-    device = make_device("H5083")
-    device.profile = dataclasses.replace(
-        device.profile, zones=(Zone("a", power_index=0), Zone("b", power_index=1))
-    )
-    mock_config_entry.add_to_hass(hass)
-    with patch("custom_components.govee_ble_local.create_device", return_value=device):
-        assert await hass.config_entries.async_setup(mock_config_entry.entry_id)
-        await hass.async_block_till_done(wait_background_tasks=True)
-    assert set(_switches(hass, mock_config_entry)) == {f"{ADDRESS}_zone_a", f"{ADDRESS}_zone_b"}
-    assert _lights(hass, mock_config_entry) == []
+    assert set(_switches(hass, zone_entry)) == {f"{ADDRESS}_zone_main", f"{ADDRESS}_zone_mystery"}
+    assert _lights(hass, zone_entry) == []
 
 
 async def test_zone_switch_names(hass: HomeAssistant, zone_entry: MockConfigEntry) -> None:
@@ -406,83 +386,3 @@ async def test_zone_switch_not_supported(hass: HomeAssistant, zone_entry: MockCo
     with pytest.raises(ServiceValidationError) as exc:
         await _call(hass, "turn_off", _eid(hass, "switch", f"{ADDRESS}_zone_main"))
     assert exc.value.translation_key == "not_supported"
-
-
-async def test_zone_switches_send_nothing_right_after_the_fixtures_power_off(
-    hass: HomeAssistant, zone_entry: MockConfigEntry, caplog: pytest.LogCaptureFixture
-) -> None:
-    """The fixture's power-off, acked, confirms every zone off: the zone switches turned off
-    right after it send nothing more and are no command (no poll hold-off, no device I/O
-    noted, no backoff reset); their state is written, and a debug line says why."""
-    caplog.set_level(logging.DEBUG, logger="custom_components.govee_ble_local.switch")
-    device = _device(zone_entry)
-    coordinator = zone_entry.runtime_data.coordinator
-    switches = [_eid(hass, "switch", f"{ADDRESS}_zone_{zone}") for zone in ("main", "mystery")]
-    _seed(zone_entry, is_on=True, zone_power={0: True, 1: True})
-    await hass.services.async_call(
-        "light", "turn_off", {"entity_id": "light.test_ceiling"}, blocking=True
-    )
-    written = {entity_id: hass.states.get(entity_id).last_reported for entity_id in switches}
-    with (
-        patch.object(coordinator, "async_note_command_started") as started,
-        patch.object(coordinator, "async_note_device_io") as device_io,
-        patch.object(coordinator, "async_handle_command_success") as success,
-    ):
-        for entity_id in switches:
-            await _call(hass, "turn_off", entity_id)
-    started.assert_not_called()
-    device_io.assert_not_called()
-    success.assert_not_called()
-    assert connection(device).sent == [build.switch(False)]
-    device.set_zone_power.assert_not_awaited()
-    for entity_id in switches:
-        assert hass.states.get(entity_id).state == STATE_OFF
-        assert hass.states.get(entity_id).last_reported > written[entity_id]
-    assert f"Zone mystery of {ADDRESS} was just confirmed off; not sending its power-off" in (
-        caplog.text
-    )
-
-
-@pytest.mark.parametrize("case", ["fixture_on", "confirmed_too_long_ago", "unconfirmed"])
-async def test_zone_switch_off_goes_out_unless_the_device_just_confirmed_it(
-    hass: HomeAssistant, zone_entry: MockConfigEntry, case: str
-) -> None:
-    """A zone switch's turn_off is spared only while the fixture isn't known on and the
-    device confirmed the zone off less than ZONE_OFF_FRESH_SECONDS ago."""
-    device = _device(zone_entry)
-    _seed(zone_entry, is_on=True, zone_power={0: True, 1: True})
-    await hass.services.async_call(
-        "light", "turn_off", {"entity_id": "light.test_ceiling"}, blocking=True
-    )
-    state = device.state
-    if case == "fixture_on":
-        _seed(zone_entry, is_on=True)
-    elif case == "confirmed_too_long_ago":
-        state.zone_power_confirmed = dict.fromkeys(
-            state.zone_power_confirmed, time.monotonic() - ZONE_OFF_FRESH_SECONDS
-        )
-    else:
-        _seed(zone_entry, zone_power_confirmed={})
-    connection(device).sent.clear()
-    await _call(hass, "turn_off", _eid(hass, "switch", f"{ADDRESS}_zone_main"))
-    device.set_zone_power.assert_awaited_once_with("main", False)
-    assert connection(device).sent == [build.zone_power(0, False)]
-
-
-async def test_zone_switch_off_while_a_fixture_command_runs_is_sent(
-    hass: HomeAssistant, zone_entry: MockConfigEntry
-) -> None:
-    """The switch platform doesn't wait for the light platform's commands: while one to the
-    fixture is in flight (held open here; a turn-on that would light every zone, say), a
-    zone just confirmed off still gets its zone-off, which then comes after that command."""
-    device = _device(zone_entry)
-    _seed(zone_entry, is_on=True, zone_power={0: True, 1: True})
-    await hass.services.async_call(
-        "light", "turn_off", {"entity_id": "light.test_ceiling"}, blocking=True
-    )
-    fixture = hass.data[LIGHT_DATA_COMPONENT].get_entity("light.test_ceiling")
-    connection(device).sent.clear()
-    async with fixture._command():
-        await _call(hass, "turn_off", _eid(hass, "switch", f"{ADDRESS}_zone_main"))
-    device.set_zone_power.assert_awaited_once_with("main", False)
-    assert connection(device).sent == [build.zone_power(0, False)]

@@ -314,6 +314,25 @@ async def test_segment_lights_use_the_librarys_set_segment_count(
     assert {u for u in lights if "_segment_" in u} == {f"{ADDRESS}_segment_{i}" for i in range(10)}
 
 
+async def test_segment_lights_registered_earlier_are_kept_while_the_device_has_segments(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_bluetooth: SimpleNamespace
+) -> None:
+    """Segment lights an earlier setup registered are kept while the device has segments, one
+    past a count read short too: only a device without segments drops them (section 11)."""
+    mock_config_entry.add_to_hass(hass)
+    earlier = {f"{ADDRESS}_segment_0", f"{ADDRESS}_segment_12"}
+    for unique_id in earlier:
+        er.async_get(hass).async_get_or_create(
+            "light", DOMAIN, unique_id, config_entry=mock_config_entry
+        )
+    device = make_device("H60A6")
+    device.set_segment_count(10)
+
+    await _setup_custom(hass, mock_config_entry, device, mock_bluetooth)
+
+    assert earlier <= set(_lights(hass, mock_config_entry))
+
+
 @KELVIN_RANGES
 async def test_main_light_supported_features(
     hass: HomeAssistant, entry: MockConfigEntry, lo: int, hi: int
@@ -2748,3 +2767,106 @@ async def test_power_only_light_is_an_on_off_light(
     await _call(hass, "turn_off", MAIN)
     device.turn_off.assert_awaited_once_with()
     assert hass.states.get(MAIN).state == STATE_OFF
+
+
+# -- 11. zones without segments ---------------------------------------------------------
+
+
+def _zones_without_segments(device: Device) -> Device:
+    """Give an H60A6 the shape of its profile at pact 1,1 from the govee-ble-local release
+    after 1.6.1 (the Govee app's): no segments, and its two zones (main on power index 0,
+    background on 1) without segments."""
+    device.profile = dataclasses.replace(
+        device.profile,
+        capabilities=device.profile.capabilities - {Capability.SEGMENTS},
+        zones=(Zone("main", power_index=0), Zone("background", power_index=1)),
+    )
+    return device
+
+
+async def test_a_light_fixtures_zones_without_segments_are_on_off_lights(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_bluetooth: SimpleNamespace
+) -> None:
+    """A light fixture's zones without segments are on/off lights on the zone lights' unique
+    ids, with no zone switch and no segment light. An earlier setup's zone switch (earlier
+    versions made a zone without segments one) and segment lights are removed."""
+    mock_config_entry.add_to_hass(hass)
+    registry = er.async_get(hass)
+    stale = [
+        registry.async_get_or_create(domain, DOMAIN, unique_id, config_entry=mock_config_entry)
+        for domain, unique_id in (
+            ("switch", f"{ADDRESS}_zone_main"),
+            ("light", f"{ADDRESS}_segment_0"),
+            ("light", f"{ADDRESS}_segment_12"),
+        )
+    ]
+    device = _zones_without_segments(make_device("H60A6"))
+
+    entry = await _setup_custom(hass, mock_config_entry, device, mock_bluetooth)
+
+    entities = er.async_entries_for_config_entry(registry, entry.entry_id)
+    assert {(e.domain, e.unique_id) for e in entities if e.domain in ("light", "switch")} == {
+        ("light", f"{ADDRESS}_light"),
+        ("light", f"{ADDRESS}_zone_main_light"),
+        ("light", f"{ADDRESS}_zone_background_light"),
+    }
+    assert [registry.async_get(e.entity_id) for e in stale] == [None] * len(stale)
+    _seed(entry, is_on=True, zone_power={0: True, 1: True})
+    for name in ("main", "background"):
+        state = hass.states.get(_zone(hass, name))
+        assert state.attributes["supported_color_modes"] == ["onoff"]
+        assert (state.state, state.attributes["color_mode"]) == (STATE_ON, "onoff")
+
+
+async def test_an_on_off_zone_light_switches_its_zone_alone(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_bluetooth: SimpleNamespace
+) -> None:
+    """An on/off zone light's turn-on is its zone's power-on alone (Home Assistant drops a
+    colour or brightness asked of it), and its turn-off the zone's power-off."""
+    device = _zones_without_segments(make_device("H60A6"))
+    entry = await _setup_custom(hass, mock_config_entry, device, mock_bluetooth)
+    zone = _zone(hass, "background")
+    _seed(entry, is_on=True, zone_power={0: True, 1: False})
+
+    await _call(hass, "turn_on", zone, rgb_color=RED, brightness=128)
+    device.set_zone_power.assert_awaited_once_with("background", True)
+    for colour in (
+        device.set_zone_rgb,
+        device.set_zone_color_temp,
+        device.set_segment_rgb,
+        device.set_segment_brightness,
+    ):
+        colour.assert_not_awaited()
+    state = hass.states.get(zone)
+    assert (state.state, state.attributes["color_mode"]) == (STATE_ON, "onoff")
+
+    device.set_zone_power.reset_mock()
+    await _call(hass, "turn_off", zone)
+    device.set_zone_power.assert_awaited_once_with("background", False)
+    assert hass.states.get(zone).state == STATE_OFF
+
+
+@pytest.mark.parametrize("device_pact", [(1, 1)])
+async def test_an_h60a6_at_pact_1_1_has_whole_light_colour_and_on_off_zones(
+    hass: HomeAssistant, entry: MockConfigEntry, mock_device: Device
+) -> None:
+    """The installed library's H60A6 at pact 1,1: the whole light keeps its colour and colour
+    temperature, its zones are on/off lights on their unique ids, and it has no segment light
+    and no switch. Skipped by a library that gives it segments there (1.6.1 and earlier)."""
+    if Capability.SEGMENTS in mock_device.capabilities:
+        pytest.skip("this govee-ble-local gives the H60A6 segments at pact 1,1")
+    entities = er.async_entries_for_config_entry(er.async_get(hass), entry.entry_id)
+    assert {(e.domain, e.unique_id) for e in entities if e.domain in ("light", "switch")} == {
+        ("light", f"{ADDRESS}_light"),
+        ("light", f"{ADDRESS}_zone_main_light"),
+        ("light", f"{ADDRESS}_zone_background_light"),
+    }
+    _seed(entry, is_on=True, zone_power={0: True, 1: True})
+    for name in ("main", "background"):
+        assert hass.states.get(_zone(hass, name)).attributes["supported_color_modes"] == ["onoff"]
+    assert set(hass.states.get(MAIN).attributes["supported_color_modes"]) == {"rgb", "color_temp"}
+
+    await _call(hass, "turn_on", MAIN, rgb_color=RED)
+    assert hass.states.get(MAIN).attributes["rgb_color"] == RED
+    await _call(hass, "turn_on", MAIN, color_temp_kelvin=4000)
+    assert hass.states.get(MAIN).attributes["color_temp_kelvin"] == 4000

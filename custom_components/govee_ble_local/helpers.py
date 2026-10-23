@@ -143,8 +143,23 @@ def has_power_switch(device: Device) -> bool:
     )
 
 
-def is_colour_zone(zone: Zone) -> bool:
-    """Return True if the zone has segments: a light, else an on/off-only switch."""
+def has_zone_lights(device: Device) -> bool:
+    """Return True if the device's zones are lights, else switches.
+
+    Every zone of a light fixture (``has_fixture_light``) is a light, an on/off
+    one where the zone takes no colour (``zone_takes_colour``). Only a device
+    without a fixture light (a relay plug switched per outlet) has zone switches.
+    """
+    return has_fixture_light(device)
+
+
+def zone_takes_colour(zone: Zone) -> bool:
+    """Return True if the zone has segments, which its colour and brightness go to.
+
+    One without is switched on and off only: an H60A6 advertising pact 1,1, whose
+    two sections the Govee app only switches, has no segments from the
+    govee-ble-local release after 1.6.1.
+    """
     return bool(zone.segments)
 
 

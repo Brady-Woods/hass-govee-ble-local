@@ -29,7 +29,7 @@ real device.
 
 | Model | Status |
 | --- | --- |
-| **H60A6** (Ceiling Light Pro) | ✅ power, brightness, RGB, color temp, scenes; two **independently controllable zones** (main panel / background ring) with per-zone RGB **and** kelvin; 13 addressable segments; full status read-back |
+| **H60A6** (Ceiling Light Pro) | ✅ power, brightness, RGB, color temp, scenes; two **independently controllable zones** (main panel / background ring) with per-zone RGB **and** kelvin; 13 addressable segments; full status read-back. One that advertises protocol version 1,1 (reported on firmware 1.00.24) is controlled as the Govee app controls it, from the `govee-ble-local` release after 1.6.1: whole-light colour and kelvin, the two zones on/off only, no segments |
 | **H6047** (light bar) | ✅ power, brightness, RGB, color temp, scenes; left/right bar zones; 10 segments |
 | **H6641** (RGBIC strip) | ✅ power, brightness, RGB, color temp, scenes; addressable segments |
 | **H61A8** (LED rope) | ✅ power, brightness, RGB, color temp, scenes; 15 addressable segments |
@@ -238,9 +238,9 @@ Per device (depending on its capabilities):
 | Platform | Entity | Notes |
 | --- | --- | --- |
 | `light` | Main light | Whole-fixture power/brightness/RGB/color-temp/effects (on/off only, for a light with power alone) |
-| `light` | Zone light(s) | One per colour-controllable zone (RGB + kelvin); on/off-only zones become switches |
+| `light` | Zone light(s) | One per zone of a light fixture (RGB + kelvin); on/off only for a zone without segments (an H60A6 at protocol version 1,1) |
 | `light` | Segment light(s) | One per addressable segment (RGB + kelvin); **disabled by default** |
-| `switch` | Power / zone switch | Smart plugs (the H5083 family), and on/off-only zones |
+| `switch` | Power / zone switch | Smart plugs (the H5083 family), and the zones of a plug switched per zone |
 | `sensor` | Signal strength, poll interval, connection failures, **last seen**, **last connected**, **connection source** | Diagnostic; signal strength, poll interval, last seen and last connected are **disabled by default** |
 | `binary_sensor` | Connectivity | Advertisement presence (reachable), not connect-poll success |
 | `button` | Run self-test | Runs the full-capability self-test and stores the capture |

@@ -67,7 +67,7 @@ from .helpers import (
     clean_mac,
     clean_text,
     has_fixture_light,
-    is_colour_zone,
+    has_zone_lights,
     parse_secret,
 )
 from .services import async_register_services
@@ -298,7 +298,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: GoveeBleLocalConfigEntry
             scene_store_error = str(err)
             _async_report_scene_store(hass, err)
 
-    _async_remove_legacy_zone_entities(hass, address, device)
+    _async_remove_legacy_zone_entities(hass, entry, address, device)
     _async_move_power_switch_to_light(hass, entry, address, device)
 
     # Always-on WARNING+ capture so problems surface in the downloadable diagnostics
@@ -502,26 +502,46 @@ def _async_track_bluetooth(hass: HomeAssistant, entry: GoveeBleLocalConfigEntry)
 
 
 @callback
-def _async_remove_legacy_zone_entities(hass: HomeAssistant, address: str, device: Device) -> None:
-    """Remove orphaned zone-switch entities left by earlier entity schemes.
+def _async_remove_legacy_zone_entities(
+    hass: HomeAssistant, entry: GoveeBleLocalConfigEntry, address: str, device: Device
+) -> None:
+    """Remove orphaned zone-switch and segment-light entities left by earlier entity schemes.
 
     1. Pre-v0.11 zone switches were keyed by integer index ({address}_zone_0 /
        _zone_1); they are now keyed by zone name (_zone_main / _zone_background).
-    2. A colour-controllable zone (one with segments) is now a light, not a
-       switch, so its old switch entity ({address}_zone_{name}) is orphaned.
+    2. A light fixture's zones are lights (``has_zone_lights``), so a zone's old
+       switch entity ({address}_zone_{name}) is orphaned: earlier versions made a
+       zone a switch unless it had segments.
+    3. A device whose profile has no segments has no segment lights
+       ({address}_segment_{i}): an H60A6 advertising pact 1,1, which the
+       govee-ble-local release after 1.6.1 gives no segments, has them from an
+       earlier library, or from a setup without its pact (the entry is reloaded
+       once the pact is heard).
 
-    Drop both so only the current entities remain.
+    Drop them so only the current entities remain. Segment lights past the
+    device's segment count are kept while it has segments: a count read short
+    must not delete them.
     """
     registry = er.async_get(hass)
     stale_unique_ids = [f"{address}_zone_{i}" for i in ("0", "1")]
-    stale_unique_ids += [
-        f"{address}_zone_{zone.name}" for zone in device.zones if is_colour_zone(zone)
-    ]
+    if has_zone_lights(device):
+        stale_unique_ids += [f"{address}_zone_{zone.name}" for zone in device.zones]
     for unique_id in stale_unique_ids:
         entity_id = registry.async_get_entity_id(Platform.SWITCH, DOMAIN, unique_id)
         if entity_id is not None:
             _LOGGER.debug("Removing orphaned zone switch %s", entity_id)
             registry.async_remove(entity_id)
+    if Capability.SEGMENTS in device.capabilities:
+        return
+    segment = f"{address}_segment_"
+    for reg_entry in er.async_entries_for_config_entry(registry, entry.entry_id):
+        if (
+            reg_entry.domain == Platform.LIGHT
+            and reg_entry.unique_id.startswith(segment)
+            and reg_entry.unique_id.removeprefix(segment).isdigit()
+        ):
+            _LOGGER.debug("Removing orphaned segment light %s", reg_entry.entity_id)
+            registry.async_remove(reg_entry.entity_id)
 
 
 @callback

@@ -20,8 +20,8 @@ profile's capabilities:
 | Entity | Type | Notes |
 | --- | --- | --- |
 | Main light | `light` | power, brightness, RGB, colour temperature, scenes (effects); on/off only for a power-only light |
-| Zone lights | `light` | one per colour-controllable zone (H60A6 main/background, H6047 left/right bar) |
-| Zone switches | `switch` | one per on/off-only zone |
+| Zone lights | `light` | one per zone of a light fixture (H60A6 main/background, H6047 left/right bar); on/off only for a zone without segments (`helpers.zone_takes_colour`: an H60A6 at pact 1,1) |
+| Zone switches | `switch` | one per zone of a device without a fixture light (`helpers.has_zone_lights`: a relay plug switched per zone; none ships) |
 | Segment lights | `light` | one per addressable segment, **disabled by default** |
 | Power switch | `switch` | only for a relay plug (`profile.relay`, the H5083 family); any other power-only device is an on/off main light |
 | Diagnostics | `sensor`/`binary_sensor`/`button` | RSSI, connectivity, failures, poll interval, last seen/connected, connection source, self-test; RSSI, poll interval and last seen/connected are **disabled by default** |
