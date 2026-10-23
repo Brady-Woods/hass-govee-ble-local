@@ -17,6 +17,7 @@ from contextlib import contextmanager
 import dataclasses
 from dataclasses import dataclass
 from datetime import timedelta
+import logging
 import math
 from pathlib import Path
 import time
@@ -53,6 +54,12 @@ from custom_components.govee_ble_local.helpers import Broadcast
 from .const import ADDRESS, LOCAL_NAME, TITLE, broadcast_data, govee_mfg, pact_mfg
 
 pytest_plugins = ["pytest_homeassistant_custom_component"]
+
+# What the coordinator logs when a poll raises an error it doesn't handle as a BLE one
+# (its catch-all for a library bug); no_unexpected_poll_error fails a test on it,
+# unless the test is marked with this.
+UNEXPECTED_POLL_ERROR = "Unexpected error polling"
+EXPECTS_UNEXPECTED_POLL_ERROR = "expects_unexpected_poll_error"
 
 # Public async Device methods wrapped in AsyncMock(wraps=...) so tests can assert
 # calls while the library's real behaviour still runs.
@@ -262,6 +269,23 @@ def allow_adverts(device: Device) -> None:
     device._advert_ignore_until = 0.0
 
 
+def poll_reads_power(device: Device) -> None:
+    """Make each poll of a ``make_device`` device read power back, as a real one does.
+
+    The library then ignores the advertised on/off for its window, as after a command.
+    The fake ``update`` reads nothing from a radio, so this is the one place a test
+    reaches for the library's own bookkeeping of that read (``_mark_authoritative``).
+    """
+    read = device.update.side_effect  # type: ignore[attr-defined]
+
+    async def _update(**kwargs: Any) -> Any:
+        state = await read(**kwargs)
+        device._mark_authoritative()
+        return state
+
+    device.update.side_effect = _update  # type: ignore[attr-defined]
+
+
 def make_service_info(
     *,
     address: str = ADDRESS,
@@ -304,6 +328,15 @@ def make_service_info(
         connectable=connectable,
         time=time.monotonic() if seen_at is None else seen_at,
         tx_power=None,
+    )
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Register this suite's markers (``--strict-markers`` refuses unknown ones)."""
+    config.addinivalue_line(
+        "markers",
+        f"{EXPECTS_UNEXPECTED_POLL_ERROR}: the test makes a poll raise an unexpected error on"
+        " purpose, so the coordinator logging 'Unexpected error polling' doesn't fail it",
     )
 
 
@@ -351,6 +384,45 @@ def auto_enable_custom_integrations(
     ``enable_custom_integrations`` brings in), it ends after HA has stopped, so the unloads
     and the shutdown are covered too.
     """
+
+
+class _UnexpectedPollErrors(logging.Handler):
+    """Collect what the coordinator's catch-all for an unexpected poll error logs."""
+
+    def __init__(self) -> None:
+        super().__init__(logging.ERROR)
+        self.records: list[logging.LogRecord] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if record.getMessage().startswith(UNEXPECTED_POLL_ERROR):
+            self.records.append(record)
+
+
+@pytest.fixture(autouse=True)
+def no_unexpected_poll_error(request: pytest.FixtureRequest) -> Generator[None]:
+    """Fail a test in which a poll raised an error the coordinator didn't expect.
+
+    The coordinator handles such an error like a failed poll ("Unexpected error polling"),
+    so a library bug doesn't hammer the device. A test double raising one (a fake
+    ``update`` that doesn't take the arguments the coordinator passes, say) would then
+    pass the test it broke, silently. A test that raises one on purpose is marked
+    ``expects_unexpected_poll_error``.
+    """
+    errors = _UnexpectedPollErrors()
+    logger = logging.getLogger("custom_components.govee_ble_local")
+    logger.addHandler(errors)
+    try:
+        yield
+    finally:
+        logger.removeHandler(errors)
+    if errors.records and request.node.get_closest_marker(EXPECTS_UNEXPECTED_POLL_ERROR) is None:
+        record = errors.records[0]
+        error = record.exc_info[1] if record.exc_info else None
+        pytest.fail(
+            f"{record.getMessage()}: {error!r} (the coordinator's catch-all for a library bug;"
+            f" mark the test {EXPECTS_UNEXPECTED_POLL_ERROR} if it is meant to)",
+            pytrace=False,
+        )
 
 
 @pytest.fixture(autouse=True)

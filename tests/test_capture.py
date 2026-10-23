@@ -16,6 +16,7 @@ from govee_ble_local import (
     Device,
     GoveeBleAuthError,
     GoveeBleConnectionError,
+    GoveeBleNotSupported,
     Segment,
     Zone,
 )
@@ -120,6 +121,19 @@ def _fail_on_call(mock: AsyncMock, number: int, error: BaseException) -> None:
 
 def _step(report: dict[str, Any], name: str) -> dict[str, Any]:
     return next(s for s in report["steps"] if s["step"] == name)
+
+
+def _steps_that_ran(report: dict[str, Any]) -> list[dict[str, Any]]:
+    """The report's steps that ran; each other one must be a command the library refused.
+
+    Which commands the library refuses as not supported on a model is its call, and moves
+    between its versions (a model's segment colour temperature, say): a run is judged on
+    the steps that ran. How a refused step is recorded is
+    test_a_step_the_library_refuses_as_not_supported_is_skipped_not_failed's.
+    """
+    skipped = [s for s in report["steps"] if "skipped" in s]
+    assert all(s["skipped"].startswith("not supported: ") for s in skipped), skipped
+    return [s for s in report["steps"] if "skipped" not in s]
 
 
 @pytest.fixture
@@ -245,7 +259,7 @@ async def test_full_surface_run_on_h60a6() -> None:
     report = await async_run_self_test(device)
 
     assert [s["step"] for s in report["steps"]] == H60A6_STEPS
-    assert all(s["acked"] and s["ok"] for s in report["steps"])
+    assert all(s["acked"] and s["ok"] for s in _steps_that_ran(report))
     assert report["ok"] is True
     assert report["restored"] is True
     assert report["restore_errors"] == []
@@ -312,30 +326,15 @@ async def test_h61a8_exercises_gradual_without_color_temp() -> None:
     assert device.state.gradual is False
 
 
-async def test_h61a8_exercises_color_temp() -> None:
-    """With the app's 15 01 / 15 02 frames the H61A8 self-test also runs the CCT steps."""
-    device = make_device("H61A8")
-    _prime(device, gradual=False)
-
-    report = await async_run_self_test(device)
-
-    names = [s["step"] for s in report["steps"]]
-    assert {"color_temp", "segment_0_color_temp", "segment_0_brightness"} <= set(names)
-    assert "color_temp" in report["capabilities"]
-    for name in ("color_temp", "segment_0_color_temp", "segment_0_brightness"):
-        assert _step(report, name)["acked"] is True
-    assert report["ok"] is True
-    assert report["restored"] is True
-
-
 async def test_h61a8_self_test_completes_against_real_library() -> None:
-    """The self-test of an H61A8 finishes (an unsupported step is recorded, not fatal)."""
+    """The self-test runs to its end on the library's own H61A8 profile, whatever steps that
+    profile gives it, and puts the device back as it was. Which steps run, and how a step the
+    library refuses is recorded, are checked by the tests that build the profile they need."""
     device = make_device("H61A8")
     _prime(device, gradual=False)
 
     report = await async_run_self_test(device)
 
-    assert "gradual" in [s["step"] for s in report["steps"]]
     assert report["restored"] is True
 
 
@@ -399,6 +398,32 @@ async def test_ble_error_in_step_is_recorded_not_raised() -> None:
     assert len(report["steps"]) == len(H60A6_STEPS)
 
 
+async def test_a_step_the_library_refuses_as_not_supported_is_skipped_not_failed() -> None:
+    """A command the library refuses as not supported on the device is a skipped step, not a
+    failed one: the run stays ok and the device is restored."""
+    device = make_device("H60A6")
+    # Built here so the run reaches the segment colour-temperature step, whatever the
+    # library says of any model; the library then refuses that step.
+    device.profile = replace(
+        device.profile,
+        capabilities=frozenset({Capability.POWER, Capability.COLOR_TEMP, Capability.SEGMENTS}),
+        segments=4,
+        zones=(),
+    )
+    device.set_segment_color_temp.side_effect = GoveeBleNotSupported("no per-segment kelvin")
+    _prime(device)
+
+    report = await async_run_self_test(device)
+
+    step = _step(report, "segment_0_color_temp")
+    assert step["skipped"] == "not supported: no per-segment kelvin"
+    assert step["acked"] is False
+    assert step["error"] is None
+    assert step["ok"] is True
+    assert report["ok"] is True
+    assert report["restored"] is True
+
+
 async def test_ble_errors_on_reads_are_tolerated() -> None:
     """Failing read-backs (initial and per step) leave steps judged on tracked state."""
     device = make_device("H60A6")
@@ -407,7 +432,10 @@ async def test_ble_errors_on_reads_are_tolerated() -> None:
 
     report = await async_run_self_test(device)
 
-    assert device.update.await_count == len(H60A6_STEPS) + 1
+    ran = _steps_that_ran(report)
+    # The initial read, then one after each step that ran (a refused one sends nothing).
+    assert device.update.await_count == len(ran) + 1
+    assert all(s["acked"] and s["error"] is None for s in ran)
     assert report["ok"] is True
     assert _step(report, "brightness")["readback_ok"] is True
 

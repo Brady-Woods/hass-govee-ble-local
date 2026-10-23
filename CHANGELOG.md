@@ -33,6 +33,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fails by name when the library adds an I/O method, or a name the fake uses for its own
   bookkeeping, and a test whose library code still reaches for a real Bluetooth link fails
   instead of trying one. No change to the integration itself.
+- Tests: the suite no longer breaks when `govee-ble-local` changes its model data. With the
+  connection stand-in above, it passes against 1.6.1 and against four unreleased library builds:
+  master at aa89aa9, d17b4ea and e052b17, and the catalogue update (Brady-Woods/govee-ble-local#45)
+  at b79c3c7, where the suite before this change fails 9, 9 and 3 test cases on d17b4ea, e052b17 and
+  b79c3c7. Gone or rebuilt on a profile built in the test: the relay-entity test that ran once per
+  model in the library's catalogue, the two H61A8 colour-temperature tests, and the six H60A6
+  segment colour-temperature tests. 1076 test cases instead of 1187; other tests still check some
+  models' library data (the H60A6 and H61A8 self-test steps, the H6047's zones and segments, the
+  H61A8's Kelvin range). The poll-policy tests check what Home Assistant shows (entity states, the
+  poll interval sensor, diagnostics) and how often a light is polled, not the coordinator's
+  internals or Home Assistant's timer handles. A test now fails when a poll ends in the
+  coordinator's catch-all for unexpected errors, which had let two broken tests pass. The README's
+  supported-models table is checked by `scripts/check.sh` on the floor release (CI's `floor` job)
+  instead of by a test. No change to the integration itself.
 - `scripts/check.sh` in a dev checkout: when `../govee-ble-local` no longer tracks its generated
   Kaitai classes (it then builds them from `spec/*.ksy` on install), the gate requires the JVM
   `kaitai-struct-compiler` 0.11 and stops with install instructions if it is missing, instead of

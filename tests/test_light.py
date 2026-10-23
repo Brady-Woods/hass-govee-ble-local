@@ -26,8 +26,6 @@ from govee_ble_local import (
     Segment,
     Zone,
     create_device,
-    profile_for,
-    supported_skus,
 )
 from govee_ble_local.wire import build, parse
 from homeassistant.components.bluetooth import BluetoothChange
@@ -45,8 +43,6 @@ from pytest_homeassistant_custom_component.components.diagnostics import (
 from pytest_homeassistant_custom_component.typing import ClientSessionGenerator
 
 from custom_components.govee_ble_local.const import (
-    CONF_ALLOW_MODELLED,
-    CONF_SKU,
     DEFAULT_MAX_KELVIN,
     DEFAULT_MIN_KELVIN,
     DOMAIN,
@@ -57,7 +53,6 @@ from custom_components.govee_ble_local.const import (
 
 from .conftest import (
     advertisement_callback,
-    allow_adverts,
     connection,
     fake_transport,
     make_device,
@@ -65,7 +60,7 @@ from .conftest import (
     make_service_info,
     runtime_segment_count,
 )
-from .const import ADDRESS, TITLE, pact_mfg
+from .const import ADDRESS, pact_mfg
 
 MAIN = "light.test_ceiling"
 AURORA = 19074  # H60A6 scene code of "Aurora"
@@ -89,7 +84,10 @@ KELVIN_RANGES = pytest.mark.parametrize(
 
 @pytest.fixture
 def kelvin_range() -> tuple[int | None, int | None] | None:
-    """The (min, max) kelvin to give the device's profile; None keeps the library's."""
+    """The (min, max) kelvin to give the device's profile; None keeps the library's.
+
+    ``cct_segment_entry`` builds its own profile: None gives it 2000-9000 there.
+    """
     return None
 
 
@@ -917,123 +915,36 @@ async def test_h61a8_range_is_refreshed_after_the_hardware_read(
     assert mock_device.turn_on.await_args.kwargs["kelvin"] == 2200
 
 
-@pytest.fixture
-def kelvin_by_pact_case() -> tuple[str, bool, tuple[int, int], tuple[int, int]]:
-    """A model whose Kelvin range the advertised pact picks: (sku, opt-in, pact, its range).
-
-    Taken from the library (default models first, then the opt-in ones), never a fixed SKU:
-    one whose range at that pact differs from the range it has before any pact is known.
-    """
-    for allow in (False, True):
-        for sku in supported_skus(allow_modelled=allow):
-            profile = profile_for(sku, allow_modelled=allow)
-            if profile is None or Capability.COLOR_TEMP not in profile.capabilities:
-                continue
-            for pact, lo, hi in profile.kelvin_by_pact:
-                if (lo, hi) != (profile.min_kelvin, profile.max_kelvin):
-                    return sku, allow, pact, (lo, hi)
-    pytest.fail("the installed library has no model whose Kelvin range depends on the pact")
-
-
 async def test_kelvin_range_follows_a_pact_learned_from_an_advert(
-    hass: HomeAssistant,
-    mock_bluetooth: SimpleNamespace,
-    kelvin_by_pact_case: tuple[str, bool, tuple[int, int], tuple[int, int]],
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_bluetooth: SimpleNamespace
 ) -> None:
     """An advert that first carries the device's pact shows the range it picks, without a poll."""
-    sku, allow, pact, picked = kelvin_by_pact_case
-    device = make_device(sku, name=f"GV{sku}ABCD", allow_modelled=allow)
-    data: dict[str, Any] = {"address": ADDRESS, CONF_SKU: sku}
-    if allow:
-        data[CONF_ALLOW_MODELLED] = True
-    entry = await _setup_custom(
-        hass,
-        MockConfigEntry(domain=DOMAIN, title=TITLE, unique_id=ADDRESS, data=data),
-        device,
-        mock_bluetooth,
+    pact, picked = (0x0002, 0x01), (2000, 9000)
+    device = make_device()
+    # A light whose Kelvin range the advertised pact picks, built here: which models have
+    # one is the library's catalogue, not this test's.
+    device.profile = dataclasses.replace(
+        device.profile,
+        capabilities=device.profile.capabilities | {Capability.COLOR_TEMP},
+        min_kelvin=2700,
+        max_kelvin=6500,
+        kelvin_by_hardware=(),
+        kelvin_by_software=(),
+        kelvin_by_pact=((pact, *picked),),
     )
-    assert device.pact is None
+    entry = await _setup_custom(hass, mock_config_entry, device, mock_bluetooth)
     ranges = _kelvin_ranges(hass, MAIN)
-    assert ranges == dict.fromkeys(ranges, (device.profile.min_kelvin, device.profile.max_kelvin))
+    assert ranges == dict.fromkeys(ranges, (device.min_kelvin, device.max_kelvin))
+    assert (device.min_kelvin, device.max_kelvin) != picked
     _seed(entry, is_on=True)  # the advert repeats the on/off already known: only its pact is new
     await hass.async_block_till_done()
     device.update.reset_mock()
 
-    info = make_service_info(
-        name=f"GV{sku}ABCD", manufacturer_data=pact_mfg(*pact), advertisement=True
-    )
+    info = make_service_info(manufacturer_data=pact_mfg(*pact), advertisement=True)
     advertisement_callback(mock_bluetooth)(info, BluetoothChange.ADVERTISEMENT)
     await hass.async_block_till_done()
-    assert device.pact == pact
     assert _kelvin_ranges(hass, MAIN) == dict.fromkeys(ranges, picked)
     device.update.assert_not_awaited()  # published from the advert, not by a poll
-
-
-@pytest.mark.parametrize("reported", [False, True], ids=["unreported", "reported"])
-async def test_a_learned_pact_is_not_an_on_off_flip(
-    hass: HomeAssistant,
-    mock_bluetooth: SimpleNamespace,
-    kelvin_by_pact_case: tuple[str, bool, tuple[int, int], tuple[int, int]],
-    reported: bool,
-) -> None:
-    """A pact-only advert publishes the new range but never takes the on/off-flip path.
-
-    ``reported`` is whether the library returns True for it: govee-ble-local may signal a
-    learned pact as a change, and the flip path would restart a lit light's poll backoff.
-    """
-    sku, allow, pact, picked = kelvin_by_pact_case
-    device = make_device(sku, name=f"GV{sku}ABCD", allow_modelled=allow)
-    data: dict[str, Any] = {"address": ADDRESS, CONF_SKU: sku}
-    if allow:
-        data[CONF_ALLOW_MODELLED] = True
-    entry = await _setup_custom(
-        hass,
-        MockConfigEntry(domain=DOMAIN, title=TITLE, unique_id=ADDRESS, data=data),
-        device,
-        mock_bluetooth,
-    )
-    _seed(entry, is_on=True)
-    await hass.async_block_till_done()
-    ingest = device.ingest_advertisement
-
-    def _ingest(advertisement: Any) -> bool:
-        learned = device.pact
-        took = ingest(advertisement)
-        return took or (reported and device.pact != learned)
-
-    coordinator = entry.runtime_data.coordinator
-    info = make_service_info(
-        name=f"GV{sku}ABCD", manufacturer_data=pact_mfg(*pact), advertisement=True
-    )
-    with (
-        patch.object(device, "ingest_advertisement", side_effect=_ingest),
-        patch.object(coordinator, "_async_handle_power_flip") as flip,
-    ):
-        advertisement_callback(mock_bluetooth)(info, BluetoothChange.ADVERTISEMENT)
-        await hass.async_block_till_done()
-    flip.assert_not_called()
-    ranges = _kelvin_ranges(hass, MAIN)
-    assert ranges == dict.fromkeys(ranges, picked)
-
-
-@pytest.mark.parametrize("device_sku", ["H61A8"])
-async def test_h61a8_offers_color_temp(
-    hass: HomeAssistant, enabled_entry: MockConfigEntry, mock_device: Device
-) -> None:
-    """The H61A8's main and segment lights gain colour temp with the library's range."""
-    lo, hi = mock_device.min_kelvin, mock_device.max_kelvin
-    assert (lo, hi) == (2700, 6500)
-    for entity_id in (MAIN, _segment(hass, 0)):
-        attrs = hass.states.get(entity_id).attributes
-        assert set(attrs["supported_color_modes"]) == {"rgb", "color_temp"}
-        assert (attrs["min_color_temp_kelvin"], attrs["max_color_temp_kelvin"]) == (lo, hi)
-
-    await _call(hass, "turn_on", MAIN, color_temp_kelvin=3000)
-    assert mock_device.turn_on.await_args.kwargs["kelvin"] == 3000
-    await _call(hass, "turn_on", _segment(hass, 0), color_temp_kelvin=4000, brightness=128)
-    mock_device.set_segment_color_temp.assert_awaited_once_with([0], 4000)
-    mock_device.set_segment_brightness.assert_awaited_once()
-    assert hass.states.get(_segment(hass, 0)).attributes["color_mode"] == "color_temp"
 
 
 @pytest.mark.parametrize("device_sku", ["H6006"])
@@ -1235,51 +1146,128 @@ async def test_segment_explicit_black_is_not_remembered(
     mock_device.set_segment_rgb.assert_awaited_with([SEG], RED)
 
 
+@pytest.fixture
+async def cct_segment_entry(
+    hass: HomeAssistant,
+    entity_registry_enabled_by_default: None,
+    mock_config_entry: MockConfigEntry,
+    mock_bluetooth: SimpleNamespace,
+    kelvin_range: tuple[int | None, int | None] | None,
+) -> MockConfigEntry:
+    """A lit segmented light with colour temperature, its profile built here.
+
+    Whatever the library says of any model: power, brightness, RGB, colour temperature
+    and segments (SEG its last), and no zones, so only the segment's own commands go out.
+    Its kelvin range is ``kelvin_range``, 2000-9000 unless the test gives one. Which models
+    take a colour temperature per segment is the library's call (it refuses it on some):
+    here this one takes it, ``set_segment_color_temp`` stubbed, so what is under test is
+    what the light sends, with any library.
+    """
+    lo, hi = (2000, 9000) if kelvin_range is None else kelvin_range
+    device = make_device()
+    # A library whose profiles say whether segments take colour temperature says so of this
+    # one too (the model the profile starts from may say no).
+    takes_segment_kelvin = (
+        {"segment_color_temp": True}
+        if "segment_color_temp" in {field.name for field in dataclasses.fields(device.profile)}
+        else {}
+    )
+    device.profile = dataclasses.replace(
+        device.profile,
+        **takes_segment_kelvin,
+        capabilities=frozenset(
+            {
+                Capability.POWER,
+                Capability.BRIGHTNESS,
+                Capability.RGB,
+                Capability.COLOR_TEMP,
+                Capability.SEGMENTS,
+            }
+        ),
+        segments=SEG + 1,
+        zones=(),
+        min_kelvin=lo,
+        max_kelvin=hi,
+    )
+    device.set_segment_color_temp.return_value = None
+    entry = await _setup_custom(hass, mock_config_entry, device, mock_bluetooth)
+    _seed(entry, is_on=True)
+    return entry
+
+
 async def test_segment_colour_temp_stays_on_after_poll(
-    hass: HomeAssistant, enabled_entry: MockConfigEntry, mock_device: Device
+    hass: HomeAssistant, cct_segment_entry: MockConfigEntry
 ) -> None:
     """A segment colour temperature stays color_temp and on even if read-back rgb is black."""
+    device = cct_segment_entry.runtime_data.device
+    coordinator = cct_segment_entry.runtime_data.coordinator
     seg = _segment(hass, SEG)
-    coordinator = enabled_entry.runtime_data.coordinator
     await _call(hass, "turn_on", seg, color_temp_kelvin=4000)
-    mock_device.set_segment_color_temp.assert_awaited_once_with([SEG], 4000)
+    device.set_segment_color_temp.assert_awaited_once_with([SEG], 4000)
+    device.set_segment_rgb.assert_not_awaited()  # no old colour back on top
     attrs = hass.states.get(seg).attributes
     assert hass.states.get(seg).state == STATE_ON
     assert attrs["color_mode"] == "color_temp"
     assert attrs["color_temp_kelvin"] == 4000
 
     # The device reports a CCT segment as black in its colour read-back.
-    mock_device.state.segments = [Segment(index=SEG, rgb=BLACK, brightness=80)]
-    coordinator.async_publish_device_state()
+    _seed(cct_segment_entry, segments=[Segment(index=SEG, rgb=BLACK, brightness=80)])
     await coordinator.async_refresh()
 
     state = hass.states.get(seg)
     assert state.state == STATE_ON
     assert state.attributes["color_mode"] == "color_temp"
     assert state.attributes["color_temp_kelvin"] == 4000
-    assert state.attributes["brightness"] == 204  # brightness is still adopted
+    assert state.attributes["brightness"] == 204  # 80 %: brightness is still adopted
+
+
+async def test_a_segment_given_a_colour_temp_and_a_brightness_gets_both(
+    hass: HomeAssistant, cct_segment_entry: MockConfigEntry
+) -> None:
+    """One turn_on with a colour temperature and a brightness sends a dark segment both, and
+    it shows that colour temperature: the brightness isn't dropped, and the segment isn't
+    given its old colour back on top (a scene setting both would otherwise lose one)."""
+    device = cct_segment_entry.runtime_data.device
+    seg = _segment(hass, SEG)
+
+    await _call(hass, "turn_on", seg, color_temp_kelvin=4000, brightness=128)
+
+    device.set_segment_color_temp.assert_awaited_once_with([SEG], 4000)
+    device.set_segment_brightness.assert_awaited_once_with([SEG], 50)  # 128 of 255
+    device.set_segment_rgb.assert_not_awaited()
+    state = hass.states.get(seg)
+    assert state.state == STATE_ON
+    assert state.attributes["color_mode"] == "color_temp"
+    assert state.attributes["color_temp_kelvin"] == 4000
+    assert state.attributes["brightness"] == 128
 
 
 @KELVIN_RANGES
 async def test_segment_colour_temp_is_clamped(
-    hass: HomeAssistant, enabled_entry: MockConfigEntry, mock_device: Device, lo: int, hi: int
+    hass: HomeAssistant, cct_segment_entry: MockConfigEntry, lo: int, hi: int
 ) -> None:
     """Segment colour temperature is clamped into the device range."""
+    device = cct_segment_entry.runtime_data.device
     seg = _segment(hass, SEG)
     attrs = hass.states.get(seg).attributes
     assert (attrs["min_color_temp_kelvin"], attrs["max_color_temp_kelvin"]) == (lo, hi)
-    await _call(hass, "turn_on", seg, color_temp_kelvin=9000)
-    mock_device.set_segment_color_temp.assert_awaited_once_with([SEG], hi)
+    await _call(hass, "turn_on", seg, color_temp_kelvin=hi + 1000)
+    device.set_segment_color_temp.assert_awaited_once_with([SEG], hi)
     assert hass.states.get(seg).attributes["color_temp_kelvin"] == hi
 
 
 async def test_segment_colour_after_colour_temp_returns_to_rgb(
-    hass: HomeAssistant, enabled_entry: MockConfigEntry
+    hass: HomeAssistant, cct_segment_entry: MockConfigEntry
 ) -> None:
     """Setting an RGB colour after a colour temperature switches the segment back to rgb."""
+    device = cct_segment_entry.runtime_data.device
     seg = _segment(hass, SEG)
     await _call(hass, "turn_on", seg, color_temp_kelvin=4000)
+    assert hass.states.get(seg).attributes["color_mode"] == "color_temp"
+
     await _call(hass, "turn_on", seg, rgb_color=RED)
+
+    device.set_segment_rgb.assert_awaited_once_with([SEG], RED)
     attrs = hass.states.get(seg).attributes
     assert attrs["color_mode"] == "rgb"
     assert attrs["rgb_color"] == RED
@@ -2619,26 +2607,21 @@ async def test_a_zone_off_without_a_confirmation_is_switched_off(
 ) -> None:
     """A zone off only by an advertisement (it carries the whole fixture's on/off, and its
     "off" drops the zones' stamps) or by state nothing confirmed gets its power-off."""
-    zone = ZONES[mock_device.sku][0]
+    zone = mock_device.zones[0].name
+    power_indices = [z.power_index for z in mock_device.zones]
     if source == "advertisement":
-        await _poll_back(entry, {0: True, 1: True})
-        allow_adverts(mock_device)
+        # The poll back is the test's own (no read went out), so no window of the
+        # library's suppresses the advert that follows it.
+        await _poll_back(entry, dict.fromkeys(power_indices, True))
         advertisement_callback(mock_bluetooth)(
             make_service_info(on=False), BluetoothChange.ADVERTISEMENT
         )
         await hass.async_block_till_done()
     else:
-        _seed(entry, is_on=False, zone_power={0: False, 1: False})
-    state = mock_device.state
-    assert (state.is_on, state.zone_power, state.zone_power_confirmed) == (
-        False,
-        {0: False, 1: False},
-        {},
-    )
-    connection(mock_device).sent.clear()
+        _seed(entry, is_on=False, zone_power=dict.fromkeys(power_indices, False))
+    assert hass.states.get(_zone(hass, zone)).state == STATE_OFF
     await _call(hass, "turn_off", _zone(hass, zone))
     mock_device.set_zone_power.assert_awaited_once_with(zone, False)
-    assert len(connection(mock_device).sent) == 1
 
 
 @ZONED

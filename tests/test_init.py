@@ -720,11 +720,6 @@ async def test_unsupported_model_is_a_permanent_error(
     assert entry.reason.startswith("The Govee model H9999 is not supported")
 
 
-def _fake_transport() -> Any:
-    """Build every library Device on a FakeConnection: the only fake in a real-library setup."""
-    return fake_transport()
-
-
 @pytest.mark.parametrize(
     ("pact", "name", "state"),
     [
@@ -759,7 +754,7 @@ async def test_setup_with_the_real_library_routes_by_the_advertised_pact(
         domain=DOMAIN, title=TITLE, unique_id=ADDRESS, data={"address": ADDRESS, CONF_SKU: "H6009"}
     )
     entry.add_to_hass(hass)
-    with _fake_transport() as transport:
+    with fake_transport() as transport:
         await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done(wait_background_tasks=True)
         assert entry.state is state
@@ -818,7 +813,7 @@ async def test_setup_with_the_real_library_takes_the_modelled_opt_in(
         data[CONF_ALLOW_MODELLED] = True
     entry = MockConfigEntry(domain=DOMAIN, title=TITLE, unique_id=ADDRESS, data=data)
     entry.add_to_hass(hass)
-    with _fake_transport():
+    with fake_transport():
         await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done(wait_background_tasks=True)
         assert entry.state is state
@@ -958,7 +953,7 @@ async def test_setup_routes_by_the_advertised_else_the_stored_header(
     advert can serve it. Only a model it doesn't list fails for good. The stored encrypt flag
     picks the cipher, as the advertised one does.
     """
-    with _served(routes), _fake_transport():
+    with _served(routes), fake_transport():
         entry = await _set_up(hass, presence, mock_bluetooth, _record(advertised), stored)
         assert entry.state is state
         assert entry.error_reason_translation_key == error
@@ -997,7 +992,7 @@ async def test_a_header_heard_after_setup(
     of another pact (a firmware update's). A device set up without a pact reloads when that
     pact routes the model to another profile, so setup builds it there."""
     set_up_at = tuple(stored["pact"]) if stored else None
-    with _served(routes), _fake_transport():
+    with _served(routes), fake_transport():
         entry = await _set_up(hass, presence, mock_bluetooth, _record(None), stored)
         device = entry.runtime_data.device
         assert device.profile is routes[set_up_at]
