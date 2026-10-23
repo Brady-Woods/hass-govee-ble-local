@@ -47,6 +47,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   coordinator's catch-all for unexpected errors, which had let two broken tests pass. The README's
   supported-models table is checked by `scripts/check.sh` on the floor release (CI's `floor` job)
   instead of by a test. No change to the integration itself.
+- Tests: one test covers the switch-to-light carry-over above together with setup without a
+  stored protocol version (below). A light set up without one reloads when its first advertised
+  protocol version gives the model another profile. The old power switch moves to the light once,
+  at the first setup that builds the light (also when the model was a relay plug until that
+  reload), and the light keeps the switch's entity ID, settings and voice-assistant exposure
+  through that reload and a later one, with nothing created twice. No change to the integration
+  itself.
 - `scripts/check.sh` in a dev checkout: when `../govee-ble-local` no longer tracks its generated
   Kaitai classes (it then builds them from `spec/*.ksy` on install), the gate requires the JVM
   `kaitai-struct-compiler` 0.11 and stops with install instructions if it is missing, instead of
