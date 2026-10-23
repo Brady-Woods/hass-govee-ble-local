@@ -395,10 +395,11 @@ async def test_entry_with_only_short_identifiers_is_left_unscrubbed(
     mock_device: Device,
     mock_bluetooth: SimpleNamespace,
 ) -> None:
-    """With nothing long enough to match, text is passed through (keys are still redacted)."""
+    """With nothing long enough to match (a short address and title), text is passed through
+    (keys are still redacted)."""
     entry = MockConfigEntry(
         domain=DOMAIN,
-        title=TITLE,
+        title="Lamp",
         unique_id="A:1",
         data={"address": "A:1", CONF_SKU: "H60A6"},
     )

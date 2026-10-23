@@ -12,9 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the library logs a refused write only at DEBUG and raises `GoveeBleCommandRejected` instead, so
   refusals had dropped out of `recent_warnings`. The integration now logs at WARNING, with the
   device address, a light or switch command the device refuses and a rejected secret key (from a
-  command, the **Run self-test** button or `capture_session`). The always-on capture also keeps
-  this integration's own WARNING+ lines for the device (these rejections, and Home Assistant's
-  error for a failed poll, a rejected secret included), as well as the library's.
+  command, the **Run self-test** button or `capture_session`). The always-on capture also keeps this
+  integration's own WARNING+ lines for the device (these rejections, and Home Assistant's error for
+  a failed poll, a rejected secret included), as well as the library's, with the device's address
+  and name scrubbed from them like the rest of the diagnostics.
 
 ### Changed
 - Tests: the stand-in for the library's connection (`tests/conftest.py` `FakeConnection`) is now
