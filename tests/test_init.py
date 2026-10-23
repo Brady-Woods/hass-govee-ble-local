@@ -24,7 +24,9 @@ from homeassistant.components.bluetooth import (
     BluetoothScanningMode,
     BluetoothServiceInfoBleak,
 )
+from homeassistant.components.homeassistant import exposed_entities
 from homeassistant.components.light import DATA_COMPONENT as LIGHT_DATA
+from homeassistant.components.switch import SwitchDeviceClass
 from homeassistant.config_entries import ConfigEntryDisabler, ConfigEntryState
 from homeassistant.const import (
     EVENT_HOMEASSISTANT_STOP,
@@ -33,7 +35,13 @@ from homeassistant.const import (
     STATE_UNAVAILABLE,
 )
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers import device_registry as dr, entity_registry as er
+from homeassistant.helpers import (
+    area_registry as ar,
+    device_registry as dr,
+    entity_registry as er,
+    label_registry as lr,
+)
+from homeassistant.setup import async_setup_component
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
@@ -62,6 +70,7 @@ from .conftest import (
     connection,
     fake_transport,
     make_device,
+    make_power_only_light,
     make_service_info,
     unavailable_callback,
 )
@@ -1094,6 +1103,93 @@ async def test_legacy_zone_switches_removed(
     assert await hass.config_entries.async_setup(mock_config_entry.entry_id)
     for unique_id in (f"{ADDRESS}_zone_0", f"{ADDRESS}_zone_main", f"{ADDRESS}_zone_background"):
         assert registry.async_get_entity_id("switch", DOMAIN, unique_id) is None
+
+
+@pytest.mark.parametrize(
+    ("device_sku", "case"),
+    [("H6006", "power_only_light"), ("H6006", "light_registered"), ("H5083", "relay_plug")],
+    ids=["power_only_light", "light_registered", "relay_plug"],
+)
+async def test_power_switch_moves_over_to_the_light(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_bluetooth: SimpleNamespace,
+    case: str,
+) -> None:
+    """An earlier version's power switch of a power-only light becomes its light; a plug keeps it.
+
+    Earlier versions made every power-only device a switch. The light takes the switch's object
+    id, the user's settings and its voice-assistant exposure, a hide the user chose too, but not
+    a disable an integration set. A light entry already registered keeps its own settings. A
+    relay plug's switch is its entity: the same registry entry, untouched.
+    """
+    assert await async_setup_component(hass, "homeassistant", {})
+    device = make_device("H5083") if case == "relay_plug" else make_power_only_light()
+    registry = er.async_get(hass)
+    area = ar.async_get(hass).async_create("Office")
+    label = lr.async_get(hass).async_create("Desk")
+    mock_config_entry.add_to_hass(hass)
+    if case == "light_registered":  # e.g. from a release with the light, then a downgrade
+        registry.async_get_or_create(
+            "light",
+            DOMAIN,
+            f"{ADDRESS}_light",
+            config_entry=mock_config_entry,
+            suggested_object_id="kept",
+            disabled_by=er.RegistryEntryDisabler.USER,
+        )
+    old = registry.async_get_or_create(
+        "switch",
+        DOMAIN,
+        f"{ADDRESS}_power",
+        config_entry=mock_config_entry,
+        suggested_object_id="desk",
+        original_device_class=SwitchDeviceClass.OUTLET,  # as GoveeBleLocalPowerSwitch registers
+    )
+    old = registry.async_update_entity(
+        old.entity_id,
+        name="Desk",
+        icon="mdi:desk",
+        area_id=area.id,
+        labels={label.label_id},
+        aliases=["Desk light"],
+        hidden_by=er.RegistryEntryHider.USER,
+        disabled_by=er.RegistryEntryDisabler.INTEGRATION,
+    )
+    exposed_entities.async_expose_entity(hass, "conversation", old.entity_id, True)
+    with patch("custom_components.govee_ble_local.create_device", return_value=device):
+        assert await hass.config_entries.async_setup(mock_config_entry.entry_id)
+        await hass.async_block_till_done(wait_background_tasks=True)
+
+    switch = registry.async_get_entity_id("switch", DOMAIN, f"{ADDRESS}_power")
+    light = registry.async_get_entity_id("light", DOMAIN, f"{ADDRESS}_light")
+    if case == "relay_plug":
+        assert light is None
+        assert switch == old.entity_id
+        assert registry.async_get(switch).id == old.id
+        return
+    assert switch is None
+    if case == "light_registered":
+        kept = registry.async_get("light.kept")
+        assert (kept.unique_id, kept.name, kept.disabled_by) == (
+            f"{ADDRESS}_light",
+            None,
+            er.RegistryEntryDisabler.USER,
+        )
+        return
+    moved = registry.async_get("light.desk")
+    assert moved is not None
+    assert moved.unique_id == f"{ADDRESS}_light"
+    assert (moved.name, moved.icon, moved.area_id, moved.labels, moved.aliases) == (
+        "Desk",
+        "mdi:desk",
+        area.id,
+        {label.label_id},
+        old.aliases,
+    )
+    assert (moved.hidden_by, moved.disabled_by) == (er.RegistryEntryHider.USER, None)
+    assert exposed_entities.async_should_expose(hass, "conversation", "light.desk")
+    assert hass.states.get("light.desk").attributes["friendly_name"] == "Desk"
 
 
 @pytest.mark.parametrize("device_sku", ["H6047"])

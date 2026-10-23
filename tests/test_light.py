@@ -61,6 +61,7 @@ from .conftest import (
     connection,
     fake_transport,
     make_device,
+    make_power_only_light,
     make_service_info,
     runtime_segment_count,
 )
@@ -2737,3 +2738,30 @@ async def test_a_spared_zone_off_is_no_command(
     assert f"Zone main of {ADDRESS} was just confirmed off; not sending its power-off" in (
         caplog.text
     )
+
+
+# -- 10. power-only lights ------------------------------------------------------------
+
+
+async def test_power_only_light_is_an_on_off_light(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_bluetooth: SimpleNamespace
+) -> None:
+    """Power alone, not a relay plug: one on/off light and no switch; on and off are the
+    device's own power calls."""
+    device = make_power_only_light()
+    entry = await _setup_custom(hass, mock_config_entry, device, mock_bluetooth)
+    entities = er.async_entries_for_config_entry(er.async_get(hass), entry.entry_id)
+    assert {(e.domain, e.unique_id) for e in entities if e.domain in ("light", "switch")} == {
+        ("light", f"{ADDRESS}_light")
+    }
+    _seed(entry, is_on=False, optimistic=False)
+    assert hass.states.get(MAIN).attributes["supported_color_modes"] == ["onoff"]
+
+    await _call(hass, "turn_on", MAIN)
+    device.turn_on.assert_awaited_once_with(power=True, brightness=None, rgb=None, kelvin=None)
+    state = hass.states.get(MAIN)
+    assert (state.state, state.attributes["color_mode"]) == (STATE_ON, "onoff")
+
+    await _call(hass, "turn_off", MAIN)
+    device.turn_off.assert_awaited_once_with()
+    assert hass.states.get(MAIN).state == STATE_OFF

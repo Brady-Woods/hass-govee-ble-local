@@ -189,8 +189,9 @@ rules:
     status: done
     comment: >
       Diagnostic entities use signal_strength / duration / timestamp /
-      connectivity device classes; the light and zone on/off switches have no
-      applicable class.
+      connectivity device classes; a smart plug's power switch is an outlet
+      (a power-only light is a light, not a switch); the lights and the zone
+      on/off switches have no applicable class.
   entity-disabled-by-default:
     status: done
     comment: >
