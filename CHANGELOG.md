@@ -10,9 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - **Setup remembers a light's protocol version and encryption.** The entry keeps the last Govee
   broadcast header Home Assistant heard from the light (its protocol version, encrypt flag and
-  broadcast version), from the config flow and each setup, and from the first advertisement that
-  carries one while none is stored, as the Govee app keeps it for a light already added. When Home
-  Assistant's record of the light carries no Govee data (after a restart, before the light
+  broadcast version), from the config flow and each setup, from the record setup routes by once it
+  shows another protocol version (after a firmware update, say), and from the first advertisement
+  that carries one while none is stored, as the Govee app keeps it for a light already added. When
+  Home Assistant's record of the light carries no Govee data (after a restart, before the light
   advertises again, or with another device's advertisement merged in), setup builds the light from
   the stored header instead of the model's defaults. So an H6008, whose firmware encrypts although
   its model's profile says plain text, stays encrypted after such a restart, and a model whose

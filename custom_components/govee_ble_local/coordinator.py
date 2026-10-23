@@ -719,20 +719,28 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
 
     @callback
     def _async_keep_broadcast(self, service_info: bluetooth.BluetoothServiceInfoBleak) -> None:
-        """Store the first broadcast header heard for an entry without one, for a later setup.
+        """Keep the entry's broadcast header current, for a later setup without a record.
 
-        Only a first one: setup keeps the header current from the record it routes by, and
-        this callback hears every scanner, whose records can lead with different headers, so
-        rewriting here would flip it each time another scanner's advert arrives. A device set
-        up without a pact (none stored, none in the record at setup) has its model's pact-less
-        profile. When the first pact it advertises routes the model to another profile, the
-        entry reloads, so setup builds the device at that pact. Only then: a device set up at
-        a pact keeps its profile through a later one, as the library does.
+        The header of the record setup routes by (the connectable one) replaces a stored one
+        whose pact it no longer shows (a firmware update's, say); with none stored, the first
+        header any scanner hears is stored. Nothing else is written: this callback hears every
+        scanner, whose records can lead with different headers, so taking each would flip the
+        stored one as another scanner's advert arrives. A device set up without a pact (none
+        stored, none in the record at setup) has its model's pact-less profile. When the first
+        pact it advertises routes the model to another profile, the entry reloads, so setup
+        builds the device at that pact. Only then: a device set up at a pact keeps its profile
+        through a later one, as the library does.
         """
-        if (advertised := advertised_broadcast(service_info)) is None:
-            return
-        if Broadcast.from_data(self.config_entry.data.get(CONF_BROADCAST)) is None:
-            async_store_broadcast(self.hass, self.config_entry, advertised)
+        stored = Broadcast.from_data(self.config_entry.data.get(CONF_BROADCAST))
+        routed_by = advertised_broadcast(self.async_last_service_info(connectable=True))
+        if stored is None:
+            store = routed_by or advertised_broadcast(service_info)
+        elif routed_by is not None and routed_by.pact != stored.pact:
+            store = routed_by
+        else:
+            store = None
+        if store is not None:
+            async_store_broadcast(self.hass, self.config_entry, store)
         if not self._set_up_without_pact or self._device.pact is None:
             return
         self._set_up_without_pact = False  # the first pact heard decides

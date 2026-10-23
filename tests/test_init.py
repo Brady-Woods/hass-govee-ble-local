@@ -970,24 +970,31 @@ async def test_setup_routes_by_the_advertised_else_the_stored_header(
 
 
 @pytest.mark.parametrize(
-    ("routes", "reloaded"),
-    [({None: PACTLESS, (10, 1): LIGHT}, True), ({None: LIGHT, (10, 1): LIGHT}, False)],
-    ids=["routes_elsewhere", "same_profile"],
+    ("routes", "stored", "reloaded"),
+    [
+        ({None: PACTLESS, (10, 1): LIGHT}, None, True),
+        ({None: LIGHT, (10, 1): LIGHT}, None, False),
+        ({(2, 1): LIGHT, (10, 1): LIGHT}, HEADER_2_1, False),
+    ],
+    ids=["routes_elsewhere", "same_profile", "stale_stored"],
 )
-async def test_a_header_first_heard_after_setup(
+async def test_a_header_heard_after_setup(
     hass: HomeAssistant,
     presence: SimpleNamespace,
     mock_bluetooth: SimpleNamespace,
     *,
     routes: Mapping[tuple[int, int] | None, DeviceProfile],
+    stored: dict[str, Any] | None,
     reloaded: bool,
 ) -> None:
-    """A device set up without a pact stores the first header it advertises, and reloads
-    when that pact routes the model to another profile, so setup builds it there."""
+    """The header of the record setup routes by is stored once heard, replacing a stored one
+    of another pact (a firmware update's). A device set up without a pact reloads when that
+    pact routes the model to another profile, so setup builds it there."""
+    set_up_at = tuple(stored["pact"]) if stored else None
     with _served(routes), _fake_transport():
-        entry = await _set_up(hass, presence, mock_bluetooth, _record(None))
+        entry = await _set_up(hass, presence, mock_bluetooth, _record(None), stored)
         device = entry.runtime_data.device
-        assert device.profile is routes[None]
+        assert device.profile is routes[set_up_at]
         heard = _record((10, 1))
         presence.service_info = mock_bluetooth.last_info.return_value = heard
         advertisement_callback(mock_bluetooth)(heard, BluetoothChange.ADVERTISEMENT)
@@ -995,7 +1002,7 @@ async def test_a_header_first_heard_after_setup(
         assert entry.data[CONF_BROADCAST] == broadcast_data(10, 1)
         assert entry.state is ConfigEntryState.LOADED
         assert (entry.runtime_data.device is not device) is reloaded
-        assert entry.runtime_data.device.profile is (LIGHT if reloaded else routes[None])
+        assert entry.runtime_data.device.profile is (LIGHT if reloaded else routes[set_up_at])
         assert await hass.config_entries.async_unload(entry.entry_id)
 
 
