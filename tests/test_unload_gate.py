@@ -52,9 +52,11 @@ class ClosingConnection(FakeConnection):
 
 
 @pytest.fixture
-def mock_device(device_sku: str) -> Generator[Device]:
+def mock_device(device_sku: str, allow_modelled: bool) -> Generator[Device]:
     """The device under test, on a transport that refuses I/O after its close."""
-    device = make_device(device_sku, connection_class=ClosingConnection)
+    device = make_device(
+        device_sku, allow_modelled=allow_modelled, connection_class=ClosingConnection
+    )
     with patch("custom_components.govee_ble_local.create_device", return_value=device):
         yield device
 
