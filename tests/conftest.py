@@ -4,8 +4,9 @@ Devices are REAL library ``Device`` objects built from the shipped device
 profiles (zones, segments, capabilities, scene catalog, state bookkeeping and
 ``GoveeBleNotSupported`` errors are the library's own); only the BLE transport
 is replaced by :class:`FakeConnection`, which records frames and can be made to
-fail. ``Device.update`` returns the same (mutable) state object the real one
-does; tests simulate a read-back by mutating ``device.state`` first.
+fail; a test whose library code still reaches for a real link fails
+(``no_real_bluetooth``). ``Device.update`` returns the same (mutable) state object
+the real one does; tests simulate a read-back by mutating ``device.state`` first.
 """
 
 from __future__ import annotations
@@ -17,16 +18,19 @@ import dataclasses
 from dataclasses import dataclass
 from datetime import timedelta
 import math
+from pathlib import Path
 import time
+import traceback
 from types import SimpleNamespace
-from typing import Any
-from unittest.mock import AsyncMock, PropertyMock, patch
+from typing import Any, NoReturn
+from unittest.mock import AsyncMock, PropertyMock, create_autospec, patch
+import weakref
 
 from bleak.backends.device import BLEDevice
 from bleak.backends.scanner import AdvertisementData
 import govee_ble_local
 from govee_ble_local import Capability, Device, GoveeBleError, create_device
-from govee_ble_local.models import Encryption
+from govee_ble_local.transport.connection import GoveeConnection
 from homeassistant.components.bluetooth import BluetoothServiceInfoBleak
 from homeassistant.core import HomeAssistant
 from homeassistant.util import dt as dt_util
@@ -68,15 +72,38 @@ _WRAPPED_COMMANDS = (
 )
 
 
-class FakeConnection:
-    """Stand-in for the library's GoveeConnection: records frames, no BLE.
+# The private library names the transport double depends on, each looked up when used:
+# the class Device builds its transport from (by the Device module, at construction), and
+# the bleak-retry-connector function the library's connection brings a real link up with
+# (``no_real_bluetooth`` refuses it).
+_CONNECTION_IN_DEVICE = "govee_ble_local.devices.device.GoveeConnection"
+_ESTABLISH_CONNECTION = "govee_ble_local.transport.connection.establish_connection"
+REACHED_REAL_BLUETOOTH = "a test reached real Bluetooth"
 
-    Set ``error`` to make every write/query raise it; ``fail_after`` lets that
-    many more frames through first (a command that fails part-way).
+# The coroutine methods that would open or use a BLE link; FakeConnection replaces
+# exactly these. test_fake_connection_covers_every_io_method fails, by name, the day
+# the library adds another (instead of every test failing at random).
+IO_METHODS = frozenset(
+    {"connect", "send", "send_many", "send_unacked", "query", "disconnect", "close"}
+)
+
+
+class FakeConnection(GoveeConnection):
+    """The library's own GoveeConnection with only its radio I/O replaced: records frames.
+
+    A subclass, not a hand-copied duck type: every method or property the library adds
+    that does no I/O (``set_advertised_encryption`` in library 1.7) is the library's own
+    code here, with no change to this class, and ``encryption``, ``link_number``,
+    ``is_connected`` and ``write_payload_size`` answer from the real code with no link up.
+    Built by the library itself (``fake_transport``), so it gets the constructor arguments
+    the Device really passes.
+
+    Set ``error`` to make every write/query raise it; ``fail_after`` lets that many more
+    frames through first (a command that fails part-way).
     """
 
-    def __init__(self) -> None:
-        self.encryption = Encryption.NONE
+    def __init__(self, ble_device: BLEDevice, **kwargs: Any) -> None:
+        super().__init__(ble_device, **kwargs)
         self.sent: list[bytes] = []
         # The request frame of every read (query) the library made, answered or not.
         self.queries: list[bytes] = []
@@ -85,9 +112,6 @@ class FakeConnection:
         self.closed = False
         # How often the link was dropped while the Device stays usable (disconnect()).
         self.disconnects = 0
-        # The default BLE write size (ATT MTU 23 - 3); the library sizes
-        # multi-packet uploads to it.
-        self.write_payload_size = 20
 
     def _write(self, frames: list[bytes]) -> None:
         for frame in frames:
@@ -97,61 +121,58 @@ class FakeConnection:
                 self.fail_after -= 1
             self.sent.append(frame)
 
-    async def send(
-        self, frame: bytes, *, expect_ack: bool = True, connect_budget: Any = None
+    async def connect(self) -> None:
+        """No link to bring up."""
+
+    async def send(  # type: ignore[override]
+        self, frame_plaintext: bytes, *, expect_ack: bool = True, connect_budget: Any = None
     ) -> bytes | None:
-        self._write([frame])
+        self._write([frame_plaintext])
         return None
 
     async def send_many(self, frames: list[bytes]) -> None:
         self._write(list(frames))
 
     async def send_unacked(
-        self, frames: list[bytes] | Callable[[int], list[bytes]], *, gap: float = 0.03
+        self, frames: list[bytes] | Callable[[int], list[bytes]], *, gap: float = 0.0
     ) -> None:
         # The library may pass a function of the link's write size (MTU-sized uploads).
         self._write(list(frames(self.write_payload_size) if callable(frames) else frames))
 
-    async def query(self, *args: Any, **_kwargs: Any) -> list[bytes]:
-        if args:
-            self.queries.append(args[0])
+    async def query(self, frame_plaintext: bytes, **_kwargs: Any) -> list[bytes]:
+        self.queries.append(frame_plaintext)
         if self.error is not None:
             raise self.error
         return []
 
-    async def connect(self) -> None:
-        """Connect and set the session up (no link here: nothing to do)."""
-
-    async def close(self) -> None:
-        self.closed = True
-
     async def disconnect(self, *, keep: Callable[[], bool] | None = None) -> bool:
-        """Drop the link now, the Device staying usable; False if ``keep()`` says keep it.
-
-        No link here: a drop is counted and reported (govee-ble-local 1.6.0's signature).
-        """
+        """No link here: a drop is counted and reported, unless ``keep()`` keeps it."""
         if keep is not None and keep():
             return False
         self.disconnects += 1
         return True
 
-    @property
-    def is_connected(self) -> bool:
-        """Whether a link is up (no link here)."""
-        return False
+    async def close(self) -> None:
+        self.closed = True
 
-    @property
-    def link_number(self) -> int:
-        """Which link is up, 0 with none (govee-ble-local 1.6.0+; no link here)."""
-        return 0
 
-    def update_ble_device(self, ble_device: BLEDevice) -> None:
-        """Accept a fresher BLEDevice (no-op)."""
+@contextmanager
+def fake_transport(
+    connection_class: type[FakeConnection] = FakeConnection,
+) -> Iterator[list[FakeConnection]]:
+    """Every library Device built inside gets a ``connection_class``; yields them in order."""
+    built: list[FakeConnection] = []
 
-    @contextmanager
-    def hold_heartbeat(self) -> Iterator[None]:
-        """Stand in for GoveeConnection.hold_heartbeat (library 1.6.0+): nothing to hold."""
-        yield
+    def _build(*args: Any, **kwargs: Any) -> FakeConnection:
+        conn = connection_class(*args, **kwargs)
+        built.append(conn)
+        return conn
+
+    with patch(_CONNECTION_IN_DEVICE, _build):
+        yield built
+
+
+_CONNECTIONS: weakref.WeakKeyDictionary[Device, FakeConnection] = weakref.WeakKeyDictionary()
 
 
 def make_device(
@@ -161,20 +182,22 @@ def make_device(
     name: str = LOCAL_NAME,
     secret: bytes | None = None,
     allow_modelled: bool = False,
+    connection_class: type[FakeConnection] = FakeConnection,
 ) -> Device:
     """Build a real library Device for ``sku`` on a FakeConnection.
 
     ``allow_modelled`` builds an opt-in-only ("modelled") model, as setup does for an entry
     that opted in.
     """
-    device = create_device(
-        BLEDevice(address=address, name=name, details={}),
-        sku,
-        None,
-        secret=secret,
-        allow_modelled=allow_modelled,
-    )
-    device._conn = FakeConnection()  # type: ignore[assignment]
+    with fake_transport(connection_class) as built:
+        device = create_device(
+            BLEDevice(address=address, name=name, details={}),
+            sku,
+            None,
+            secret=secret,
+            allow_modelled=allow_modelled,
+        )
+    (_CONNECTIONS[device],) = built
     for method in _WRAPPED_COMMANDS:
         setattr(device, method, AsyncMock(wraps=getattr(device, method)))
 
@@ -184,7 +207,8 @@ def make_device(
         device.state.optimistic = False
         return device.state
 
-    device.update = AsyncMock(side_effect=_update)  # type: ignore[method-assign]
+    # Autospecced: a call the installed library's update() doesn't accept fails here.
+    device.update = create_autospec(device.update, side_effect=_update)  # type: ignore[method-assign]
     return device
 
 
@@ -214,10 +238,8 @@ def runtime_segment_count(count: int) -> Iterator[None]:
 
 
 def connection(device: Device) -> FakeConnection:
-    """Return a test device's fake transport."""
-    conn = device._conn
-    assert isinstance(conn, FakeConnection)
-    return conn
+    """Return the fake transport a ``make_device`` device was built on."""
+    return _CONNECTIONS[device]
 
 
 def allow_adverts(device: Device) -> None:
@@ -271,8 +293,49 @@ def make_service_info(
 
 
 @pytest.fixture(autouse=True)
-def auto_enable_custom_integrations(enable_custom_integrations: None) -> None:
-    """Enable loading of the custom integration in every test."""
+def no_real_bluetooth() -> Generator[list[str]]:
+    """Fail a test in which the library tried to bring a real BLE link up.
+
+    FakeConnection replaces only the connection's public I/O coroutines. An I/O path that
+    isn't one (an async context manager, a helper the library adds) would still run the
+    library's own code, down to bleak-retry-connector's ``establish_connection``: here that
+    raises instead. The library turns such an error into a failed connect, which a poll only
+    counts as a failure, so each attempt is also recorded, and fails the test as it ends.
+    Yields that record: a test that gets there on purpose clears it.
+    """
+    reached: list[str] = []
+
+    def _refuse(*args: Any, **_kwargs: Any) -> NoReturn:
+        # Raises as it is called, awaited or not. Where it was called from, innermost first
+        # (the error itself may not get out).
+        callers = [
+            f"{Path(frame.filename).name}:{frame.lineno} {frame.name}"
+            for frame in reversed(traceback.extract_stack()[:-1])
+            if "govee_ble_local" in frame.filename
+        ]
+        reached.append(
+            f"{REACHED_REAL_BLUETOOTH}: establish_connection{args[1:3]!r} from"
+            f" {' < '.join(callers[:5]) or '?'} (FakeConnection replaces only the"
+            " connection's I/O coroutines)"
+        )
+        raise AssertionError(reached[-1])
+
+    with patch(_ESTABLISH_CONNECTION, _refuse):
+        yield reached
+    if reached:
+        pytest.fail(f"{reached[0]} [{len(reached)} attempt(s)]", pytrace=False)
+
+
+@pytest.fixture(autouse=True)
+def auto_enable_custom_integrations(
+    no_real_bluetooth: list[str], enable_custom_integrations: None
+) -> None:
+    """Enable loading of the custom integration in every test.
+
+    Asks for ``no_real_bluetooth`` first: set up before Home Assistant (which
+    ``enable_custom_integrations`` brings in), it ends after HA has stopped, so the unloads
+    and the shutdown are covered too.
+    """
 
 
 @pytest.fixture(autouse=True)
