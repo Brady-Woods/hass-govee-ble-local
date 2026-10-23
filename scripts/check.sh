@@ -11,6 +11,8 @@
 #   2. mypy against Home Assistant core's own strict config (mypy.ini)
 #   3. pytest with hard statement+branch coverage floors on the HA-facing layer
 #   4. manifest / quality_scale sanity
+#   5. README.md's supported-models table matches scripts/gen_supported_models.py (only
+#      when the library installed is the floor release, which the table describes)
 #
 # CI additionally runs hassfest + HACS validation (see .github/workflows).
 #
@@ -45,6 +47,8 @@ python -m pip install --quiet "pip==26.2.1"
 python -m pip install --quiet -r requirements_test.txt
 
 echo ">> installing govee-ble-local (runtime dependency)"
+# Set when the floor release is what gets installed: README.md's model table describes it.
+FLOOR_RELEASE=""
 REQ="$(python -c 'import json;print(json.load(open("custom_components/govee_ble_local/manifest.json"))["requirements"][0])')"
 if [ -d ../govee-ble-local ] && [ -z "${CI:-}" ] && [ -z "${FROM_MANIFEST:-}" ]; then
   echo "   ../govee-ble-local working tree ($(git -C ../govee-ble-local rev-parse --short HEAD 2>/dev/null || echo '?')) - set FROM_MANIFEST=1 to test the pin itself"
@@ -63,7 +67,8 @@ floors = [s.version for s in req.specifier if s.operator == ">="]
 assert len(floors) == 1, f"manifest requirement {req} needs exactly one '>=' floor"
 print(f"{req.name}=={floors[0]}")
 PY
-)" ;;
+)"
+      FLOOR_RELEASE=1 ;;
     newest) SPEC="$REQ" ;;
     *) echo "LIB_VERSION must be 'floor' or 'newest', got '${LIB_VERSION}'" >&2; exit 2 ;;
   esac
@@ -124,6 +129,25 @@ if manifest.get("quality_scale"):
 print(f"manifest ok: {manifest['domain']} v{manifest['version']} "
       f"quality_scale={manifest.get('quality_scale')}")
 PY
+
+echo ">> README model table (floor release only)"
+if [ -z "$FLOOR_RELEASE" ]; then
+  echo "   skipped: README.md lists the floor release's models, and this run tests another" \
+    "govee-ble-local (LIB_VERSION=floor checks it; in a dev checkout, with FROM_MANIFEST=1)"
+# A build of a local tree (it carries a direct_url.json) can have the floor's version
+# number without being the floor release, so the version alone doesn't say.
+elif python -c '
+import importlib.metadata
+import sys
+
+sys.exit(importlib.metadata.distribution("govee-ble-local").read_text("direct_url.json") is not None)
+'; then
+  python scripts/gen_supported_models.py --check
+  echo "   README.md lists the floor release's models"
+else
+  echo "   skipped: the govee-ble-local in $VENV is a local build, not the floor release" \
+    "(pip kept it: its version number is the floor's); a fresh VENV installs the release"
+fi
 
 echo ""
 echo "ALL QUALITY GATES PASSED (hass-govee-ble-local)"

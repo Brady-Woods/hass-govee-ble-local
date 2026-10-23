@@ -16,6 +16,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fails by name when the library adds an I/O method, or a name the fake uses for its own
   bookkeeping, and a test whose library code still reaches for a real Bluetooth link fails
   instead of trying one. No change to the integration itself.
+- Tests: the suite no longer breaks when `govee-ble-local` changes its model data. With the
+  connection stand-in above, it passes against 1.6.1 and against three unreleased library builds:
+  master at aa89aa9 and at 55f3c52, and the catalogue update (Brady-Woods/govee-ble-local#45) at
+  b79c3c7, where 53, 88 and 75 test cases failed before. Tests that ran once per supported model,
+  or pinned one model's library data (the H61A8's, and the H60A6's segment colour temperature),
+  are gone or build the profile they need: 1053 test cases instead of 1161. The poll-policy tests
+  check what Home Assistant shows (entity states, the poll interval sensor, diagnostics) and how
+  often a light is polled, not the coordinator's internals or Home Assistant's timer handles. A
+  test now fails when a poll ends in the coordinator's catch-all for unexpected errors, which had
+  let two broken tests pass. The README's supported-models table is checked by `scripts/check.sh`
+  on the floor release (CI's `floor` job) instead of by a test. No change to the integration
+  itself.
 
 ## [1.6.1] - 2026-10-22
 

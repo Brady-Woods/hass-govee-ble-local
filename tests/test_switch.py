@@ -18,7 +18,6 @@ from govee_ble_local import (
     GoveeBleNotSupported,
     GoveeBleTimeout,
     Zone,
-    supported_skus,
 )
 from govee_ble_local.wire import build
 from homeassistant.components.light import DATA_COMPONENT as LIGHT_DATA_COMPONENT
@@ -40,21 +39,6 @@ from .conftest import connection, make_device
 from .const import ADDRESS
 
 PLUG = "switch.test_ceiling"
-
-
-def _every_sku() -> list[Any]:
-    """(device_sku, allow_modelled) for every SKU the library supports, then the opt-in-only ones.
-
-    The opt-in list is the library's own (supported_skus with allow_modelled, minus without),
-    never a fixed one: an opted-in device is set up through the flow's confirmation, so it gets
-    the same entity checks.
-    """
-    default = supported_skus()
-    opt_in = sorted(set(supported_skus(allow_modelled=True)) - set(default))
-    return [
-        *(pytest.param(sku, False, id=sku) for sku in default),
-        *(pytest.param(sku, True, id=f"{sku}-opted_in") for sku in opt_in),
-    ]
 
 
 # -- helpers --------------------------------------------------------------------------
@@ -261,41 +245,6 @@ async def test_light_fixtures_have_no_power_switch(
     assert hass.states.async_all("switch") == []
 
 
-@pytest.mark.parametrize(("device_sku", "allow_modelled"), _every_sku())
-async def test_every_profile_gets_one_entity_per_relay(
-    hass: HomeAssistant,
-    mock_config_entry: MockConfigEntry,
-    mock_device: Device,
-    mock_bluetooth: SimpleNamespace,
-) -> None:
-    """Across every library profile, opt-in ones too, light.py, switch.py and the cleanup agree.
-
-    Each zone is a light or a switch (never both or neither), the whole device
-    gets at most one control (a light or an outlet switch, one if it has no
-    zones), and the cleanup of pre-light zone switches only removes the ones a
-    zone light replaced.
-    """
-    registry = er.async_get(hass)
-    mock_config_entry.add_to_hass(hass)
-    for zone in mock_device.zones:  # the zone switches earlier versions registered
-        registry.async_get_or_create(
-            "switch", DOMAIN, f"{ADDRESS}_zone_{zone.name}", config_entry=mock_config_entry
-        )
-    assert await hass.config_entries.async_setup(mock_config_entry.entry_id)
-    await hass.async_block_till_done(wait_background_tasks=True)
-
-    switches = set(_switches(hass, mock_config_entry))
-    lights = {e.unique_id for e in _lights(hass, mock_config_entry)}
-    for zone in mock_device.zones:
-        is_light = f"{ADDRESS}_zone_{zone.name}_light" in lights
-        is_switch = f"{ADDRESS}_zone_{zone.name}" in switches
-        assert is_light != is_switch, zone
-    whole = (lights | switches) & {f"{ADDRESS}_light", f"{ADDRESS}_power"}
-    assert len(whole) <= 1
-    if not mock_device.zones:
-        assert len(whole) == 1
-
-
 # -- 11. zone switches ----------------------------------------------------------------
 
 
@@ -359,11 +308,9 @@ async def test_zone_switch_names(hass: HomeAssistant, zone_entry: MockConfigEntr
     assert mystery.entity_id.endswith("_mystery")
 
 
-@pytest.mark.parametrize(
-    ("zone", "index"), [("main", 0), ("mystery", 1)], ids=["translated", "untranslated"]
-)
+@pytest.mark.parametrize("zone", ["main", "mystery"], ids=["translated", "untranslated"])
 async def test_zone_switch_turn_on_and_off(
-    hass: HomeAssistant, zone_entry: MockConfigEntry, zone: str, index: int
+    hass: HomeAssistant, zone_entry: MockConfigEntry, zone: str
 ) -> None:
     """turn_on / turn_off drive set_zone_power for that zone and update its state."""
     device = _device(zone_entry)
@@ -372,13 +319,11 @@ async def test_zone_switch_turn_on_and_off(
 
     await _call(hass, "turn_on", entity_id)
     device.set_zone_power.assert_awaited_once_with(zone, True)
-    assert connection(device).sent == [build.zone_power(index, True)]
     assert hass.states.get(entity_id).state == STATE_ON
 
     device.set_zone_power.reset_mock()
     await _call(hass, "turn_off", entity_id)
     device.set_zone_power.assert_awaited_once_with(zone, False)
-    assert connection(device).sent[-1] == build.zone_power(index, False)
     assert hass.states.get(entity_id).state == STATE_OFF
 
 

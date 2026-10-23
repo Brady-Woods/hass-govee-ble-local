@@ -60,6 +60,7 @@ from custom_components.govee_ble_local.coordinator import (
 )
 
 from .conftest import (
+    UNEXPECTED_POLL_ERROR,
     advance,
     advertisement_callback,
     allow_adverts,
@@ -267,6 +268,7 @@ async def test_jitter_is_added_after_the_cap(
     assert interval(coordinator) == BASE + 30
 
 
+@pytest.mark.expects_unexpected_poll_error
 async def test_unexpected_error_still_backs_off_and_logs_traceback(
     coordinator: GoveeBleLocalCoordinator,
     mock_device: Device,
@@ -278,7 +280,9 @@ async def test_unexpected_error_still_backs_off_and_logs_traceback(
         await coordinator.async_refresh()
         await coordinator.async_refresh()
 
-    records = [r for r in caplog.records if "Unexpected error polling" in r.getMessage()]
+    # Matched as conftest's no_unexpected_poll_error guard matches it, so this also proves the
+    # guard's string is still what the coordinator logs.
+    records = [r for r in caplog.records if r.getMessage().startswith(UNEXPECTED_POLL_ERROR)]
     assert len(records) == 2
     assert records[0].exc_info is not None
     assert isinstance(records[0].exc_info[1], ValueError)
