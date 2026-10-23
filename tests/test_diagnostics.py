@@ -7,7 +7,7 @@ import logging
 import time
 from types import SimpleNamespace
 
-from govee_ble_local import Device
+from govee_ble_local import Device, GoveeBleCommandRejected
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 import pytest
@@ -19,7 +19,7 @@ from pytest_homeassistant_custom_component.typing import ClientSessionGenerator
 
 from custom_components.govee_ble_local.const import CONF_SECRET, CONF_SKU, DOMAIN
 
-from .conftest import connection, rejected_write
+from .conftest import connection
 from .const import ADDRESS, SECRET_HEX, TITLE
 
 REDACTED = "**REDACTED**"
@@ -349,7 +349,7 @@ async def test_rejected_command_reaches_the_diagnostics(
     The library logs the rejection only at DEBUG; the line comes from the
     integration's own WARNING.
     """
-    connection(mock_device).error = rejected_write()
+    connection(mock_device).error = GoveeBleCommandRejected(f"{ADDRESS}: write refused")
     with pytest.raises(HomeAssistantError):
         await hass.services.async_call(
             "light", "turn_on", {"entity_id": "light.test_ceiling"}, blocking=True
@@ -357,8 +357,7 @@ async def test_rejected_command_reaches_the_diagnostics(
 
     diagnostics = await get_diagnostics_for_config_entry(hass, hass_client, setup_integration)
     assert diagnostics["recent_warnings"] == [
-        f"WARNING {REDACTED} rejected a command: {REDACTED}: device rejected write 0x33 "
-        "(status 0x01)"
+        f"WARNING {REDACTED} rejected a command: {REDACTED}: write refused"
     ]
 
 

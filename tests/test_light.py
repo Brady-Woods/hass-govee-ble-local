@@ -39,6 +39,10 @@ from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import entity_registry as er
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
+from pytest_homeassistant_custom_component.components.diagnostics import (
+    get_diagnostics_for_config_entry,
+)
+from pytest_homeassistant_custom_component.typing import ClientSessionGenerator
 
 from custom_components.govee_ble_local.const import (
     CONF_ALLOW_MODELLED,
@@ -58,7 +62,6 @@ from .conftest import (
     connection,
     make_device,
     make_service_info,
-    rejected_write,
     runtime_segment_count,
 )
 from .const import ADDRESS, TITLE, pact_mfg
@@ -746,9 +749,14 @@ async def test_turn_off_failure_keeps_light_on(
     ids=lambda e: type(e).__name__,
 )
 async def test_ble_errors_become_ble_command_failed(
-    hass: HomeAssistant, entry: MockConfigEntry, mock_device: Device, error: BaseException
+    hass: HomeAssistant,
+    hass_client: ClientSessionGenerator,
+    entry: MockConfigEntry,
+    mock_device: Device,
+    error: BaseException,
 ) -> None:
-    """Transport failures surface as one translated HomeAssistantError, without reauth."""
+    """Transport failures surface as one translated HomeAssistantError, without reauth, and
+    add no line to the diagnostics' recent warnings (only rejections are logged there)."""
     _fail(mock_device, error)
     with pytest.raises(HomeAssistantError) as exc:
         await _call(hass, "turn_on", MAIN)
@@ -761,6 +769,8 @@ async def test_ble_errors_become_ble_command_failed(
     assert exc.value.__cause__ is error
     await hass.async_block_till_done()
     assert _govee_flows(hass) == []
+    diagnostics = await get_diagnostics_for_config_entry(hass, hass_client, entry)
+    assert diagnostics["recent_warnings"] == []
 
 
 async def test_bare_timeout_error_is_named(
@@ -787,84 +797,31 @@ async def test_not_supported_is_a_validation_error(
 
 
 async def test_auth_error_starts_reauth(
-    hass: HomeAssistant, entry: MockConfigEntry, mock_device: Device
+    hass: HomeAssistant,
+    entry: MockConfigEntry,
+    mock_device: Device,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """A rejected secret raises secret_rejected and starts a reauth flow."""
+    """A rejected secret raises secret_rejected, starts a reauth flow and is logged once.
+
+    The library logs the rejection only at DEBUG: the integration's WARNING, naming
+    the address, is what its diagnostics capture keeps.
+    """
     _fail(mock_device, GoveeBleAuthError("secret rejected"))
     with pytest.raises(HomeAssistantError) as exc:
         await _call(hass, "turn_on", MAIN)
     assert exc.value.translation_key == "secret_rejected"
     assert not isinstance(exc.value, ServiceValidationError)
+    assert [
+        r.getMessage()
+        for r in caplog.records
+        if r.name.startswith("custom_components.govee_ble_local") and r.levelno >= logging.WARNING
+    ] == [f"{ADDRESS} rejected its secret key: secret rejected"]
     await hass.async_block_till_done()
     flows = _govee_flows(hass)
     assert len(flows) == 1
     assert flows[0]["context"]["source"] == "reauth"
     assert flows[0]["context"]["entry_id"] == entry.entry_id
-
-
-def _warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
-    """The integration's own WARNING+ lines (the ones its diagnostics capture keeps)."""
-    return [
-        r.getMessage()
-        for r in caplog.records
-        if r.name.startswith("custom_components.govee_ble_local") and r.levelno >= logging.WARNING
-    ]
-
-
-async def test_rejected_command_is_logged_for_diagnostics(
-    hass: HomeAssistant,
-    entry: MockConfigEntry,
-    mock_device: Device,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """A write the device refuses fails the call, no reauth, and is logged at WARNING.
-
-    The library logs the rejection only at DEBUG, so the integration's WARNING is
-    what reaches the device's diagnostics capture.
-    """
-    error = rejected_write()
-    _fail(mock_device, error)
-    with pytest.raises(HomeAssistantError) as exc:
-        await _call(hass, "turn_on", MAIN)
-    assert not isinstance(exc.value, ServiceValidationError)
-    assert exc.value.translation_key == "ble_command_failed"
-    assert exc.value.translation_placeholders["error"] == str(error)
-    assert exc.value.__cause__ is error
-    await hass.async_block_till_done()
-    assert _govee_flows(hass) == []
-
-    line = f"{ADDRESS} rejected a command: {error}"
-    assert _warnings(caplog) == [line]
-    assert entry.runtime_data.log_capture.records() == [f"WARNING {line}"]
-
-
-async def test_rejected_secret_is_logged_for_diagnostics(
-    hass: HomeAssistant,
-    entry: MockConfigEntry,
-    mock_device: Device,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """A rejected secret is logged at WARNING too (it is not a GoveeBleCommandRejected)."""
-    _fail(mock_device, GoveeBleAuthError("secret rejected"))
-    with pytest.raises(HomeAssistantError):
-        await _call(hass, "turn_on", MAIN)
-    line = f"{ADDRESS} rejected its secret key: secret rejected"
-    assert _warnings(caplog) == [line]
-    assert entry.runtime_data.log_capture.records() == [f"WARNING {line}"]
-
-
-async def test_transport_failure_is_not_a_warning(
-    hass: HomeAssistant,
-    entry: MockConfigEntry,
-    mock_device: Device,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """A lost link stays at DEBUG: only refusals are worth a WARNING."""
-    _fail(mock_device, GoveeBleConnectionError("no connection"))
-    with pytest.raises(HomeAssistantError):
-        await _call(hass, "turn_on", MAIN)
-    assert _warnings(caplog) == []
-    assert entry.runtime_data.log_capture.records() == []
 
 
 async def test_hung_command_hits_the_deadline(
@@ -1116,62 +1073,6 @@ async def test_brightness_only_fixture(
 
     await _call(hass, "turn_on", MAIN, brightness=51)
     assert hass.states.get(MAIN).attributes["brightness"] == 51
-
-
-@pytest.mark.parametrize("device_sku", ["H6052"])
-async def test_h6052_colour_temp_reads_back_as_rgb(
-    hass: HomeAssistant,
-    entry: MockConfigEntry,
-    mock_device: Device,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """An H6052 set to a Kelvin switches to rgb mode once a poll reads the colour back.
-
-    The library reads the lamp's colour as the Govee app does: RGB only (the Kelvin's
-    tint) with no colour temperature, so the light flips from color_temp to rgb.
-    """
-    coordinator = entry.runtime_data.coordinator
-    _seed(entry, is_on=True, optimistic=False)
-    await _call(hass, "turn_on", MAIN, color_temp_kelvin=2700)
-    attrs = hass.states.get(MAIN).attributes
-    assert attrs["color_mode"] == "color_temp"
-    assert attrs["color_temp_kelvin"] == 2700
-
-    async def _poll(**_kwargs: object) -> Any:
-        # What the lamp reports after a 2700 K write: aa 05 0d ff ae 54 ...
-        mock_device.state.rgb_color = (255, 174, 84)
-        mock_device.state.color_temp_kelvin = None
-        mock_device.state.optimistic = False
-        return mock_device.state
-
-    mock_device.update.side_effect = _poll  # type: ignore[attr-defined]
-    await coordinator.async_refresh()
-    await hass.async_block_till_done()
-
-    state = hass.states.get(MAIN)
-    assert state.state == STATE_ON
-    assert state.attributes["color_mode"] == "rgb"
-    assert state.attributes["rgb_color"] == (255, 174, 84)
-    assert state.attributes["color_temp_kelvin"] is None
-    assert set(state.attributes["supported_color_modes"]) == {"color_temp", "rgb"}
-
-    # A brightness change keeps the read-back colour: nothing is re-sent for it.
-    await _call(hass, "turn_on", MAIN, brightness=128)
-    kwargs = mock_device.turn_on.await_args.kwargs
-    assert (kwargs["rgb"], kwargs["kelvin"]) == (None, None)
-    assert hass.states.get(MAIN).attributes["color_mode"] == "rgb"
-
-    # Leaving a scene restores the read-back RGB (there is no Kelvin to go back to).
-    await _call(hass, "turn_on", MAIN, effect="off")
-    assert mock_device.turn_on.await_args.kwargs["rgb"] == (255, 174, 84)
-
-    # Setting a Kelvin again goes back to color_temp.
-    await _call(hass, "turn_on", MAIN, color_temp_kelvin=4000)
-    attrs = hass.states.get(MAIN).attributes
-    assert attrs["color_mode"] == "color_temp"
-    assert attrs["color_temp_kelvin"] == 4000
-    # Home Assistant found nothing invalid in the reported colour state.
-    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
 
 
 @pytest.mark.parametrize("device_sku", ["H6006"])

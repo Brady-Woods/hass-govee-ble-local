@@ -24,7 +24,7 @@ from unittest.mock import AsyncMock, PropertyMock, patch
 from bleak.backends.device import BLEDevice
 from bleak.backends.scanner import AdvertisementData
 import govee_ble_local
-from govee_ble_local import Device, GoveeBleCommandRejected, GoveeBleError, create_device
+from govee_ble_local import Device, GoveeBleError, create_device
 from govee_ble_local.models import Encryption
 from homeassistant.components.bluetooth import BluetoothServiceInfoBleak
 from homeassistant.core import HomeAssistant
@@ -196,11 +196,6 @@ def runtime_segment_count(count: int) -> Iterator[None]:
     """
     with patch.object(Device, "segment_count", new_callable=PropertyMock, return_value=count):
         yield
-
-
-def rejected_write(address: str = ADDRESS) -> GoveeBleCommandRejected:
-    """A write rejection as the library raises it (its message names the device)."""
-    return GoveeBleCommandRejected(f"{address}: device rejected write 0x33 (status 0x01)")
 
 
 def connection(device: Device) -> FakeConnection:

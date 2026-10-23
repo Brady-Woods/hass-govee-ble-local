@@ -215,9 +215,9 @@ class GoveeBleLocalEntity(CoordinatorEntity[GoveeBleLocalCoordinator]):
         the other commands. ``keeps_power``: it says nothing about the device's
         power (a zone's turn-off), so the device's last power word stands.
 
-        A rejected secret or command is logged at WARNING, where the always-on
+        A command the device refuses is logged at WARNING, where the always-on
         diagnostics capture (capture.LogCapture) sees it: the library logs it
-        only at DEBUG.
+        only at DEBUG. ``async_secret_rejected`` logs a rejected secret.
         """
         try:
             async with (
@@ -226,8 +226,7 @@ class GoveeBleLocalEntity(CoordinatorEntity[GoveeBleLocalCoordinator]):
             ):
                 result = await coro
         except GoveeBleAuthError as err:
-            _LOGGER.warning("%s rejected its secret key: %s", self._address, err)
-            raise async_secret_rejected(self.hass, self.coordinator.config_entry) from err
+            raise async_secret_rejected(self.hass, self.coordinator.config_entry, err) from err
         except GoveeBleNotSupported as err:
             raise ServiceValidationError(
                 translation_domain=DOMAIN,

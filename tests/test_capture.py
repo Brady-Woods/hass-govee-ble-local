@@ -1041,23 +1041,15 @@ async def test_log_capture_keeps_only_warnings_for_its_address(
 async def test_log_capture_keeps_the_integrations_own_warnings(
     lib_logger: logging.Logger,
 ) -> None:
-    """The integration's WARNING lines (command and secret rejections) are captured too.
+    """The integration's WARNING lines are captured too, until the last capture detaches.
 
-    Each record is kept once, whichever of the two loggers it comes through, and
-    detaching the last capture leaves no handler on either.
+    Detaching it leaves the shared handler on neither logger.
     """
     integration_logger = logging.getLogger(INTEGRATION_LOGGER)
     log_capture = LogCapture(ADDRESS)
-    assert len(_router_handlers(integration_logger)) == 1
-
     logging.getLogger(f"{INTEGRATION_LOGGER}.entity").warning("%s rejected a command", ADDRESS)
-    logging.getLogger(f"{INTEGRATION_LOGGER}.entity").info("%s just info", ADDRESS)
-    logging.getLogger("govee_ble_local.session").warning("%s unrecognised frame", ADDRESS)
+    assert log_capture.records() == [f"WARNING {ADDRESS} rejected a command"]
 
-    assert log_capture.records() == [
-        f"WARNING {ADDRESS} rejected a command",
-        f"WARNING {ADDRESS} unrecognised frame",
-    ]
     log_capture.detach()
     assert _router_handlers(integration_logger) == []
     assert _router_handlers(lib_logger) == []

@@ -141,8 +141,9 @@ profile's capabilities:
   advertising again after skipped polls it is polled at once and the backoff
   is reset.
 - A rejected secret key (`GoveeBleAuthError`) starts the re-auth flow, and
-  polling stops until the entry is reloaded with a new key. It is logged at
-  WARNING, so it shows in the diagnostics' captured log.
+  polling stops until the entry is reloaded with a new key. Home Assistant logs
+  the failed poll at ERROR through the coordinator's logger, with the device's
+  address, so it shows in the diagnostics' captured log.
 
 ### Commands (`light.py`, `switch.py`, `entity.py`)
 - The main light sends power + brightness + colour as **one batched library
@@ -211,8 +212,9 @@ profile's capabilities:
   back off, and never while no polls are scheduled. A command that turns a
   policy-followed light on or off starts or stops its background polls.
 - Library and bleak errors become a translated `HomeAssistantError`. A command
-  the device refuses (`GoveeBleCommandRejected`) or a rejected secret is also
-  logged at WARNING: the library logs it only at DEBUG.
+  the device refuses (`GoveeBleCommandRejected`) is also logged at WARNING, and
+  so is a rejected secret (`helpers.async_secret_rejected`, for entity commands,
+  the self-test and `capture_session` alike): the library logs both only at DEBUG.
 
 ### Connect gate (`connect_gate.py`)
 A mass command ("turn off all the lights") starts every device's connect

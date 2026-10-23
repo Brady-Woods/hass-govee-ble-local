@@ -8,12 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
-- **Rejected commands and secret keys are back in the diagnostics.** Since `govee-ble-local` 1.5.0
+- **Rejected commands and secret keys are back in the diagnostics.** Since `govee-ble-local` 1.4.0
   the library logs a refused write only at DEBUG and raises `GoveeBleCommandRejected` instead, so
-  refusals had dropped out of `recent_warnings`. The integration now logs a refused command and a
-  rejected secret key at WARNING with the device address, from a service call or a poll. The
-  always-on capture also keeps this integration's own WARNING+ lines for the device (rejections,
-  failed polls), as well as the library's.
+  refusals had dropped out of `recent_warnings`. The integration now logs at WARNING, with the
+  device address, a light or switch command the device refuses and a rejected secret key (from a
+  command, the **Run self-test** button or `capture_session`). The always-on capture also keeps
+  this integration's own WARNING+ lines for the device (these rejections, and Home Assistant's
+  error for a failed poll, a rejected secret included), as well as the library's.
 
 ### Changed
 - `scripts/check.sh` in a dev checkout: when `../govee-ble-local` no longer tracks its generated

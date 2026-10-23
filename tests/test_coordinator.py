@@ -15,7 +15,6 @@ from bleak.exc import BleakError
 from govee_ble_local import (
     Device,
     GoveeBleAuthError,
-    GoveeBleCommandRejected,
     GoveeBleConnectionError,
     GoveeBleHandshakeError,
     GoveeBleNotSupported,
@@ -36,6 +35,10 @@ from pytest_homeassistant_custom_component.common import (
     MockConfigEntry,
     async_fire_time_changed,
 )
+from pytest_homeassistant_custom_component.components.diagnostics import (
+    get_diagnostics_for_config_entry,
+)
+from pytest_homeassistant_custom_component.typing import ClientSessionGenerator
 
 from custom_components.govee_ble_local.const import (
     CONF_SKU,
@@ -68,7 +71,6 @@ from .conftest import (
     connection,
     make_device,
     make_service_info,
-    rejected_write,
     unavailable_callback,
 )
 from .const import ADDRESS, TITLE
@@ -329,48 +331,21 @@ async def test_skipped_poll_error_is_translated(
     assert str(last) == f"{ADDRESS} is not advertising; poll skipped"
 
 
-def _integration_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
-    """WARNING lines the integration logged itself (what its diagnostics capture keeps)."""
-    return [
-        r.getMessage()
-        for r in caplog.records
-        if r.name.startswith("custom_components.govee_ble_local") and r.levelno == logging.WARNING
-    ]
-
-
-async def test_rejected_command_during_poll_is_a_logged_failure(
-    setup_integration: MockConfigEntry,
-    coordinator: GoveeBleLocalCoordinator,
-    mock_device: Device,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """A refused write while polling fails the poll like any BLE error, logged at WARNING."""
-    error = rejected_write()
-    assert isinstance(error, GoveeBleCommandRejected)
-    fail(mock_device, error)
-    await coordinator.async_refresh()
-
-    assert (coordinator.consecutive_failures, coordinator.total_failures) == (1, 1)
-    assert not coordinator.last_update_success
-    line = f"{ADDRESS} rejected a command during a poll: {error}"
-    assert _integration_warnings(caplog) == [line]
-    assert f"WARNING {line}" in setup_integration.runtime_data.log_capture.records()
-
-
 async def test_auth_error_starts_reauth_and_stops_polling(
     hass: HomeAssistant,
+    hass_client: ClientSessionGenerator,
     setup_integration: MockConfigEntry,
     coordinator: GoveeBleLocalCoordinator,
     mock_device: Device,
-    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """A rejected secret starts reauth, isn't a poll failure and cancels further polling."""
+    """A rejected secret starts reauth, isn't a poll failure and cancels further polling.
+
+    Home Assistant's own ERROR for the failed refresh names the device (the coordinator is named
+    after its address), so it reaches the diagnostics' recent warnings, scrubbed.
+    """
     fail(mock_device, GoveeBleAuthError("secret rejected"))
     await coordinator.async_refresh()
     await hass.async_block_till_done()
-    line = f"{ADDRESS} rejected its secret key: secret rejected"
-    assert _integration_warnings(caplog) == [line]
-    assert f"WARNING {line}" in setup_integration.runtime_data.log_capture.records()
 
     flows = hass.config_entries.flow.async_progress()
     assert any(
@@ -384,6 +359,11 @@ async def test_auth_error_starts_reauth_and_stops_polling(
     assert isinstance(error, ConfigEntryAuthFailed)
     assert (error.translation_domain, error.translation_key) == (DOMAIN, "secret_rejected")
     assert error.translation_placeholders == {"device_name": TITLE}
+    diagnostics = await get_diagnostics_for_config_entry(hass, hass_client, setup_integration)
+    (line,) = diagnostics["recent_warnings"]
+    assert line.startswith(
+        "ERROR Authentication failed while fetching govee_ble_local_**REDACTED**"
+    )
 
     mock_device.update.reset_mock()  # type: ignore[attr-defined]
     await advance(hass, 3 * 3600)

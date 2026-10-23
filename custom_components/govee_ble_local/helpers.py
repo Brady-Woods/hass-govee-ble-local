@@ -2,22 +2,26 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from typing import TYPE_CHECKING
 
 from bleak.exc import BleakError
 from govee_ble_local import Capability, GoveeBleError
 from govee_ble_local.identify import parse_manufacturer_data
+from homeassistant.const import CONF_ADDRESS
 from homeassistant.core import Context, HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 
 from .const import DEFAULT_MAX_KELVIN, DEFAULT_MIN_KELVIN, DOMAIN, ZONE_OFF_FRESH_SECONDS
 
 if TYPE_CHECKING:
-    from govee_ble_local import Device, Zone
+    from govee_ble_local import Device, GoveeBleAuthError, Zone
     from homeassistant.components.bluetooth import BluetoothServiceInfoBleak
 
     from . import GoveeBleLocalConfigEntry
+
+_LOGGER = logging.getLogger(__name__)
 
 # Errors that mean "the BLE operation didn't land" rather than a bug: bleak's own,
 # the library's (connect/handshake/timeout/not-supported - not BleakError
@@ -173,13 +177,17 @@ def parse_secret(raw: str) -> str | None:
 
 @callback
 def async_secret_rejected(
-    hass: HomeAssistant, entry: GoveeBleLocalConfigEntry
+    hass: HomeAssistant, entry: GoveeBleLocalConfigEntry, err: GoveeBleAuthError
 ) -> HomeAssistantError:
-    """Start reauth for a device that rejected its secret; return the error to raise.
+    """Log a rejected secret, start reauth for its device; return the error to raise.
 
-    Shared by every command path (entity commands, the self-test) so they map a
-    ``GoveeBleAuthError`` the same way.
+    Shared by every command path (entity commands, the self-test and the
+    ``capture_session`` service) so they map a ``GoveeBleAuthError`` the same
+    way. It is logged at WARNING, with the address, where the always-on
+    diagnostics capture (capture.LogCapture) sees it: the library logs it only
+    at DEBUG.
     """
+    _LOGGER.warning("%s rejected its secret key: %s", entry.data[CONF_ADDRESS], err)
     entry.async_start_reauth(hass)
     return HomeAssistantError(
         translation_domain=DOMAIN,

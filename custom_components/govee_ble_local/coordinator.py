@@ -50,7 +50,6 @@ from govee_ble_local import (
     Device,
     DeviceState,
     GoveeBleAuthError,
-    GoveeBleCommandRejected,
     GoveeBleTimeout,
     const as lib_const,
 )
@@ -1653,9 +1652,6 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         except GoveeBleAuthError as err:
             # Starts HA's reauth flow (config_flow.async_step_reauth); HA stops
             # scheduling polls until the entry is reloaded with a new secret.
-            # Rejections are logged at WARNING for the diagnostics capture
-            # (capture.LogCapture): the library logs them only at DEBUG.
-            _LOGGER.warning("%s rejected its secret key: %s", self._address, err)
             self._auth_failed = True
             # HA doesn't notify listeners when this follows a failed poll;
             # the poll interval (and availability) change regardless.
@@ -1666,8 +1662,6 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
                 translation_placeholders={"device_name": self.config_entry.title},
             ) from err
         except BLE_ERRORS as err:
-            if isinstance(err, GoveeBleCommandRejected):
-                _LOGGER.warning("%s rejected a command during a poll: %s", self._address, err)
             self.total_failures += 1
             elapsed = bluetooth.MONOTONIC_TIME() - started
             if not present:

@@ -48,7 +48,8 @@ _LOGGER = logging.getLogger(__name__)
 _ROOT_LOGGER = "govee_ble_local"
 _FRAMES_LOGGER = "govee_ble_local.frames"
 # Where LogCapture listens: the library, and this integration (custom_components.govee_ble_local),
-# which logs the command and secret rejections.
+# which logs refused commands and rejected secrets, and through whose coordinator logger Home
+# Assistant logs a failed poll.
 _CAPTURED_LOGGERS = (_ROOT_LOGGER, __package__)
 
 # Cap scene coverage: scene upload is the most failure-prone path, but activating every scene
