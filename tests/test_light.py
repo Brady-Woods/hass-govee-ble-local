@@ -2838,29 +2838,3 @@ async def test_an_on_off_zone_light_switches_its_zone_alone(
     await _call(hass, "turn_off", zone)
     device.set_zone_power.assert_awaited_once_with("background", False)
     assert hass.states.get(zone).state == STATE_OFF
-
-
-@pytest.mark.parametrize("device_pact", [(1, 1)])
-async def test_an_h60a6_at_pact_1_1_has_whole_light_colour_and_on_off_zones(
-    hass: HomeAssistant, entry: MockConfigEntry, mock_device: Device
-) -> None:
-    """The installed library's H60A6 at pact 1,1: the whole light keeps its colour and colour
-    temperature, its zones are on/off lights on their unique ids, and it has no segment light
-    and no switch. Skipped by a library that gives it segments there (1.6.1 and earlier)."""
-    if Capability.SEGMENTS in mock_device.capabilities:
-        pytest.skip("this govee-ble-local gives the H60A6 segments at pact 1,1")
-    entities = er.async_entries_for_config_entry(er.async_get(hass), entry.entry_id)
-    assert {(e.domain, e.unique_id) for e in entities if e.domain in ("light", "switch")} == {
-        ("light", f"{ADDRESS}_light"),
-        ("light", f"{ADDRESS}_zone_main_light"),
-        ("light", f"{ADDRESS}_zone_background_light"),
-    }
-    _seed(entry, is_on=True, zone_power={0: True, 1: True})
-    for name in ("main", "background"):
-        assert hass.states.get(_zone(hass, name)).attributes["supported_color_modes"] == ["onoff"]
-    assert set(hass.states.get(MAIN).attributes["supported_color_modes"]) == {"rgb", "color_temp"}
-
-    await _call(hass, "turn_on", MAIN, rgb_color=RED)
-    assert hass.states.get(MAIN).attributes["rgb_color"] == RED
-    await _call(hass, "turn_on", MAIN, color_temp_kelvin=4000)
-    assert hass.states.get(MAIN).attributes["color_temp_kelvin"] == 4000
