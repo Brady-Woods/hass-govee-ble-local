@@ -7,8 +7,9 @@
 #     scripts/check.sh
 #
 # Gates:
-#   1. ruff lint (ruff.toml)
-#   2. mypy against Home Assistant core's own strict config (mypy.ini)
+#   1. ruff lint (ruff.toml), the integration, its tests and tools/
+#   2. mypy against Home Assistant core's own strict config (mypy.ini), the integration and
+#      the field-test harness (tools/ha_field_test)
 #   3. pytest with hard statement+branch coverage floors on the HA-facing layer
 #   4. manifest / quality_scale sanity
 #   5. README.md's supported-models table matches scripts/gen_supported_models.py (only
@@ -127,10 +128,12 @@ print(f"   {req.name} {installed} satisfies {req}")
 PY
 
 echo ">> ruff (lint, see ruff.toml)"
-ruff check custom_components tests brands
+ruff check custom_components tests brands tools
 
 echo ">> mypy (Home Assistant strict config, see mypy.ini)"
 mypy custom_components/govee_ble_local
+# The field-test harness (docs/field-test-ha.md): a dev tool, held to the same bar.
+mypy tools/ha_field_test
 
 echo ">> pytest (coverage gate: >= ${COV_MIN}% statements+branches)"
 pytest tests/ \

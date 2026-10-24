@@ -205,7 +205,7 @@ async def test_area_target_resolves_devices_in_it(
     hass: HomeAssistant, setup_integration: MockConfigEntry
 ) -> None:
     """An area target runs the devices placed in that area."""
-    area = ar.async_get(hass).async_create("Living room")
+    area = ar.async_get(hass).async_create("Test Area")
     dr.async_get(hass).async_update_device(_device_id(hass, setup_integration), area_id=area.id)
 
     response = await _capture_session(hass, {"area_id": area.id})

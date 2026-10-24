@@ -60,8 +60,8 @@ PLUG_NO_COLON = PLUG_ADDRESS.replace(":", "").lower()
 # address the device advertises (the library's own example has the same pair).
 PLUG_DEVICE_ID = "86:9D:AA:BB:CC:DD:EE:06"
 PLUG_WIFI_MAC = "AA:BB:CC:DD:EE:06"
-OTHER_DEVICE_ID = "86:9D:98:17:3C:B1:A2:D0"
-OTHER_BLE_MAC = "98:17:3C:B1:A2:D1"
+OTHER_DEVICE_ID = "86:9D:00:00:5E:00:53:20"
+OTHER_BLE_MAC = "00:00:5E:00:53:21"
 
 
 @pytest.fixture
