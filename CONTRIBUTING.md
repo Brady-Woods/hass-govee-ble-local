@@ -9,9 +9,9 @@ Assistant token, reads them from a git-ignored file with mode `600` on the host 
 test. Never put them in the repository. The field-test harness's file is described in
 `docs/field-test-ha.md` (Credentials).
 
-Unit tests use made-up values only:
+Unit tests use made-up values only, never a real device's:
 
-- MAC addresses from the RFC 7042 documentation range (`00:00:5E:00:53:xx`) or locally
+- for MAC addresses, prefer the RFC 7042 documentation range (`00:00:5E:00:53:xx`) or locally
   administered ones (`02:…`);
 - made-up secrets and names.
 
@@ -19,7 +19,7 @@ Unit tests use made-up values only:
 
 None of these go in tests, fixtures, docs, commit messages, or PR and issue text:
 
-- MAC addresses, including their vendor prefixes;
+- the lab's MAC addresses, or even their vendor prefixes;
 - ESPHome and proxy hostnames, and host names;
 - area, room and device names;
 - config entry ids.

@@ -164,11 +164,12 @@ cd ~/govee-bench/ha_field_test_src/tools && python3 -m ha_field_test --run --exp
   If its reach can't be known, every device counts as reachable through it: when the Bluetooth
   diagnostics can't be read, or when the proxy takes connections but has discovered no device
   (as one that has wedged would). The run notes that in its report. Any call to such a device
-  that fails over the radio, or takes 30 s, ends the run once that device is restored: a test
-  step, a read-back poll, a restore call or the self-test. A refusal Home Assistant or the
-  integration gives without the radio (a validation error) doesn't count. A burst through it
-  wedged its adapter before. The harness never touches the proxy. Never stop that proxy's
-  container, and never reset its adapter, without your OK.
+  that fails over the radio, takes 30 s, or raises or times out (whether it reached the radio is
+  then unknown) ends the run once that device is restored: a test step, a read-back poll, a
+  restore call or the self-test. A refusal Home Assistant or the integration gives without the
+  radio (a validation error) doesn't count. A burst through it wedged its adapter before. The
+  harness never touches the proxy. Never stop that proxy's container, and never reset its
+  adapter, without your OK.
 - **Time:** with a read-back after every step, a device takes about 3-6 minutes, so the full lab
   takes about an hour. `--no-readback` is faster, but every step then counts as unverified.
   `--only 'H60A6 #2'` (or `--only H60A6`) tests a subset.
@@ -243,9 +244,10 @@ Or deploy the release itself once it ships, as in step 2. Either way:
   - It leaves alone a device that is already as found.
   - It refuses a device whose config entry is gone, or whose journal record names entities that
     aren't that device's own now.
-  - One device's failure doesn't stop the others, with one exception: a radio failure, or a 30 s
-    call, through the fragile proxy stops the recovery there. The devices after it are listed
-    as "not attempted"; run `--restore-from` again once the proxy is healthy.
+  - One device's failure doesn't stop the others, with one exception: a call through the
+    fragile proxy that fails over the radio, takes 30 s, or raises or times out stops the
+    recovery once that device is done. It prints why, and lists each device after it as "not
+    attempted"; run `--restore-from` again once the proxy is healthy.
   - It needs a terminal, and keeps to the daytime window (`--outside-daytime-ok` overrides).
 - **What Home Assistant can't put back** shows as "Restore caveat" in the plan, and the check
   reports it:

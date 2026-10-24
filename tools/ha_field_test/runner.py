@@ -21,9 +21,10 @@ Safety rules, in the order they apply:
   link up 30 s after a write), so at most one link is up through any proxy.
 * A device the fragile proxy (the software proxy that wedged before) can reach, by its
   Connection source or by having passed on its advertisements, that fails a command over
-  Bluetooth, or takes 30 s for one, stops the run once it is restored. A refusal Home
-  Assistant or the integration answers without the radio (a validation error) doesn't
-  count. The harness never touches the proxy itself.
+  Bluetooth, takes 30 s for one, or whose call raises or times out, stops the run (or a
+  recovery) once it is restored. A refusal Home Assistant or the integration answers
+  without the radio (a validation error) doesn't count. The harness never touches the
+  proxy itself.
 
 Settling follows the integration: a service call returns once the integration's command
 finished (its frames acked, the state written), so the state is read at once; a read-back
@@ -355,45 +356,71 @@ class Runner:
         return named or device.fragile(self._fragile_sources)
 
     def _call(
-        self, domain: str, service: str, data: dict[str, Any], *, retry: bool = False
+        self,
+        domain: str,
+        service: str,
+        data: dict[str, Any],
+        *,
+        device: DeviceDesc | None,
+        what: str,
+        retry: bool = False,
     ) -> tuple[ServiceError | None, float]:
-        """Make one service call; ``retry`` an idempotent one once on a new connection.
+        """Make one service call to ``device``; ``retry`` an idempotent one once.
 
         An interrupted call (Ctrl-C, a lost link) can leave the connection mid-frame. A
-        restore call or a read-back poll sets a state or only reads, so making it again is
-        safe; a test step is never retried (its failure is what the test reports).
+        restore call or a read-back poll sets a state or only reads, so making it again on
+        a new connection is safe; a test step is never retried (its failure is what the
+        test reports). Each failure, slow call, raise or timeout is checked against the
+        fragile-proxy rule (``what`` names the call there).
         """
         started = time.monotonic()
         try:
             try:
                 error = self.ws.call_service(domain, service, data)
-            except (HAError, OSError, ValueError):
+            except (HAError, OSError, ValueError) as err:
+                self._trouble(device, what, None, time.monotonic() - started, raised=err)
                 if not retry:
                     raise
                 self.ws.connect()
+                started = time.monotonic()
                 error = self.ws.call_service(domain, service, data)
+        except (HAError, OSError, ValueError) as err:
+            self._trouble(device, what, None, time.monotonic() - started, raised=err)
+            raise
         finally:
             self._last_command = time.monotonic()
-        return error, time.monotonic() - started
+        seconds = time.monotonic() - started
+        self._trouble(device, what, error, seconds)
+        return error, seconds
 
     def _trouble(
-        self, device: DeviceDesc | None, what: str, error: ServiceError | None, seconds: float
+        self,
+        device: DeviceDesc | None,
+        what: str,
+        error: ServiceError | None,
+        seconds: float,
+        *,
+        raised: BaseException | None = None,
     ) -> bool:
         """Note a radio failure or a slow call to a device the fragile proxy can reach.
 
         Every call counts: a test step, a read-back poll, a restore call, the self-test.
-        The run then ends once the device is restored (a test step stops at once).
+        A call that raised or timed out counts like a radio failure: whether it reached
+        the radio is unknown. The run, or a recovery, then ends once the device is
+        restored (a test step stops at once).
         """
         if device is None or not self._fragile(device):
             return False
-        if not (_ble_failure(error) or seconds >= FRAGILE_SLOW_SECONDS):
+        if not (raised or _ble_failure(error) or seconds >= FRAGILE_SLOW_SECONDS):
             return False
         if self._fragile_stop is None:
+            if raised is not None:
+                how = f"raised {type(raised).__name__}"
+            else:
+                how = "failed" if error is not None else f"took {seconds:.0f} s"
             self._fragile_stop = (
-                f"{what} to {device.label} "
-                + ("failed" if error is not None else f"took {seconds:.0f} s")
-                + ": the fragile proxy can reach it, so the run stops before the proxy"
-                " wedges (check it; the harness doesn't touch it)"
+                f"{what} to {device.label} {how}: the fragile proxy can reach it, so the run"
+                " stops before the proxy wedges (check it; the harness doesn't touch it)"
             )
         self.stop = self.stop or self._fragile_stop
         return True
@@ -406,11 +433,15 @@ class Runner:
         wait = self._last_poll.get(device.label, 0.0) + REFRESH_COOLDOWN_SECONDS + 0.5
         if (left := wait - time.monotonic()) > 0:
             self._sleep(left)
-        error, seconds = self._call(
-            "homeassistant", "update_entity", {"entity_id": main.entity_id}, retry=True
+        error, _seconds = self._call(
+            "homeassistant",
+            "update_entity",
+            {"entity_id": main.entity_id},
+            device=device,
+            what="a read-back poll",
+            retry=True,
         )
         self._last_poll[device.label] = time.monotonic()
-        self._trouble(device, "a read-back poll", error, seconds)
         if error is not None:
             return f"read-back refused: {error.code}"
         coordinator = (self.rest.diagnostics(device.entry_id).get("data") or {}).get(
@@ -462,7 +493,9 @@ class Runner:
         before = self.rest.state(step.entity.entity_id)
         by_advert = self.readback and device.optimistic and step.power
         self._sent = True
-        error, seconds = self._call(step.domain, step.service, step.call_data())
+        error, seconds = self._call(
+            step.domain, step.service, step.call_data(), device=device, what="a command"
+        )
         # The call's end on Home Assistant's clock: the advertisement that confirms the step
         # must come after the library's suppression window from there.
         call_end = self._advert_times(device.address)[0] if by_advert and error is None else None
@@ -502,7 +535,7 @@ class Runner:
             f"  {result.verdict.upper():10s} {step.step_id:28s} {result.expected[:60]}"
             + (f"  ({'; '.join(notes)})" if notes else "")
         )
-        if self._trouble(device, "a command", error, seconds) or self._fragile_stop:
+        if self._fragile_stop:
             raise AbortRunError(self._fragile_stop)
 
     def _capture_lit(self, record: dict[str, Any]) -> None:
@@ -574,9 +607,10 @@ class Runner:
             ):
                 continue
             data = {"entity_id": call.entity_id, **call.data}
-            error, seconds = self._call(call.domain, call.service, data, retry=True)
+            error, _seconds = self._call(
+                call.domain, call.service, data, device=device, what="a restore call", retry=True
+            )
             sent += 1
-            self._trouble(device, "a restore call", error, seconds)
             if error is not None:
                 errors.append(
                     f"{call.service} {_named(record, call.entity_id)}: {error.describe()}"
@@ -741,10 +775,15 @@ class Runner:
         if button is None:
             return {"ran": False, "why": "no self-test button"}
         self._say("  running the integration's self-test")
-        error = self.ws.call_service(
-            "button", "press", {"entity_id": button.entity_id}, SELF_TEST_TIMEOUT
-        )
-        self._last_command = time.monotonic()
+        try:
+            error = self.ws.call_service(
+                "button", "press", {"entity_id": button.entity_id}, SELF_TEST_TIMEOUT
+            )
+        except (HAError, OSError, ValueError) as err:
+            self._trouble(device, "the self-test", None, 0.0, raised=err)
+            raise
+        finally:
+            self._last_command = time.monotonic()
         # It takes long by design: only a radio failure counts toward the fragile proxy.
         self._trouble(device, "the self-test", error, 0.0)
         last = (self.rest.diagnostics(device.entry_id).get("data") or {}).get(
@@ -786,7 +825,9 @@ class Runner:
                 if self.stop is not None:
                     # The run stopped: the devices after it were never reached.
                     for later in devices[n:]:
-                        self.report.devices.append(self._partial(later, "never started"))
+                        self.report.devices.append(
+                            self._partial(plans[later.label], "never started")
+                        )
                     break
                 plan = plans[device.label]
                 if plan.excluded or not plan.steps:
@@ -800,20 +841,20 @@ class Runner:
                 except (AbortRunError, KeyboardInterrupt) as err:
                     # Before any change to this device: nothing to put back.
                     self.stop = str(err) or "Ctrl-C"
-                    self.report.devices.append(self._partial(device, self.stop))
+                    self.report.devices.append(self._partial(plan, self.stop))
                     continue
                 except HAError as err:
                     # It couldn't be read just before its test; nothing was changed.
-                    self.report.devices.append(self._partial(device, f"not read: {err}"))
+                    self.report.devices.append(self._partial(plan, f"not read: {err}"))
                     continue
                 self.report.devices.append(result)
                 self._save_report()
 
-    def _partial(self, device: DeviceDesc, why: str) -> DeviceResult:
+    def _partial(self, plan: DevicePlan, why: str) -> DeviceResult:
         """Return the record of a device the run stopped at or never reached."""
-        result = DeviceResult.from_plan(build_plan(device), self.inventory.scanner_labels)
+        result = DeviceResult.from_plan(plan, self.inventory.scanner_labels)
         result.stopped = why
-        record = self.journal.data.get("devices", {}).get(device.label, {})
+        record = self.journal.data.get("devices", {}).get(plan.device.label, {})
         if record.get("touched"):
             result.restore = {"ok": bool(record.get("restored"))}
         else:
@@ -885,8 +926,11 @@ class Runner:
             self._say(f"  {label}: {outcomes[label]}")
             if self._fragile_stop:
                 # A radio failure through the fragile proxy: no more connects at all.
+                self._say(f"  stopping: {self._fragile_stop}")
                 for rest in self.restore_plan(journal, everything=everything):
-                    outcomes.setdefault(rest, f"not attempted: {self._fragile_stop}")
+                    if rest not in outcomes:
+                        outcomes[rest] = "not attempted: the recovery stopped (fragile proxy)"
+                        self._say(f"  {rest}: {outcomes[rest]}")
                 break
         return outcomes
 

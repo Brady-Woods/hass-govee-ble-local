@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 import copy
+import dataclasses
 import datetime as dt
 import json
 import os
@@ -486,6 +487,29 @@ def test_fake_ha_run(tmp_path, monkeypatch) -> None:  # noqa: PLR0915 - one run,
     }
     assert ha.colours == START
     assert ha.switches[PLUG] == "off"
+    # A restore call through the fragile proxy that times out ends the recovery after that
+    # device, which is still put back (its idempotent calls retry): it says why, and names
+    # each device it leaves.
+    runner.inventory.devices = [
+        dataclasses.replace(d, heard_by=frozenset({FRAGILE})) if d is lamp else d
+        for d in runner.inventory.devices
+    ]
+    ha.colours[FIXTURE]["rgb_color"] = [0, 0, 255]
+    again = Journal.load(runner.journal.path)
+    again.data["devices"] = {
+        label: {**again.data["devices"][label], "restored": False}
+        for label in ("H60A6 #1", "H5083 #1")
+    }
+    ha.fail_on[len(ha.calls)] = TimeoutError("no reply from Home Assistant in time")
+
+    assert runner.restore_from(again) == {
+        "H60A6 #1": "put back",
+        "H5083 #1": "not attempted: the recovery stopped (fragile proxy)",
+    }
+    assert ha.colours == START
+    log = (tmp_path / "run.log").read_text()
+    assert "stopping: a restore call to H60A6 #1 raised TimeoutError" in log
+    assert "H5083 #1: not attempted" in log
 
 
 def _hang_up(terminal: dict[str, bool]) -> Callable[[], None]:
@@ -538,6 +562,12 @@ GUARDS: dict[str, dict[str, Any]] = {
         "stopped": "a restore call",
     },
     "a validation refusal through the fragile proxy doesn't stop it": {"fragile": True},
+    # Raised, not answered: whether it reached the radio is unknown, so it counts.
+    "a call through the fragile proxy that raises": {
+        "fragile": True,
+        "fail": {2: OSError("timed out")},
+        "stopped": "fragile proxy",
+    },
     # Its reach unknown (it discovered nothing): it counts as reaching every device.
     "the fragile proxy's reach unknown: a radio failure stops the run": {
         "discovered": {},
@@ -556,6 +586,13 @@ GUARDS: dict[str, dict[str, Any]] = {
     "an on/off zone left off by an interrupted step is switched back on": {
         "onoff_back": True,
         "interrupt_after": "zone_background.off",
+        "stopped": "Ctrl-C",
+    },
+    # A plug the user named, after a stop: never started, still a confirmed plug.
+    "a stop before a confirmed plug": {
+        "devices": "light, then plug",
+        "plugs": {"H5083 #1"},
+        "fail": {3: KeyboardInterrupt()},
         "stopped": "Ctrl-C",
     },
     "a self-test abandoned with Ctrl-C x3": {
@@ -596,6 +633,7 @@ def test_guards(case: str, tmp_path, monkeypatch) -> None:
     devices = {
         "plug": [_plug_device()],
         "plug, then light": [_plug_device(), lamp],
+        "light, then plug": [lamp, _plug_device()],
         "retry": [_lamp(lit=True, entry_id="entry-retry", entry_state="setup_retry")],
     }.get(spec.get("devices", ""), [lamp, _lamp(lit=True, label="H60A6 #2")])
     ha = FakeHA(lit=True, plug_state="on", onoff_back=spec.get("onoff_back", False))
@@ -638,7 +676,9 @@ def test_guards(case: str, tmp_path, monkeypatch) -> None:
     assert stopped in (runner.report.stopped or "") if stopped else runner.report.stopped is None
     if stopped:
         # The next device never started, and the report says so.
-        assert [d.restore for d in runner.report.devices[1:]] == [{"never_started": True}]
+        assert [(d.restore, d.excluded) for d in runner.report.devices[1:]] == [
+            ({"never_started": True}, None)
+        ]
     for result in runner.report.devices:
         for step in result.steps:
             assert (step.verdict == "unverified") is (step.step_id in spec.get("unverified", ()))
