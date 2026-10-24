@@ -63,6 +63,7 @@ from .const import (
 from .coordinator import GoveeBleLocalCoordinator
 from .helpers import (
     Broadcast,
+    SegmentCountRead,
     advertised_broadcast,
     async_store_broadcast,
     clean_mac,
@@ -71,7 +72,6 @@ from .helpers import (
     has_fixture_light,
     has_zone_lights,
     parse_secret,
-    segment_count_read,
     stored_segment_count,
 )
 from .services import async_register_services
@@ -587,40 +587,43 @@ def _async_track_segment_count(hass: HomeAssistant, entry: GoveeBleLocalConfigEn
     """Follow the segment count the device reports (``confirmed_segment_count``).
 
     The library learns it from a read (on some strips, each poll's), after setup has built the
-    segment lights. A count is taken once two reads in a row report it, so one read alone (a
-    bad one) and counts that change from one read to the next change nothing; one that holds
-    for two reads is taken each time it changes. A read is a poll that read the device without
-    failing (``segment_count_read``), even one whose count read went unanswered: the library
-    keeps its last count then, so a bad count followed by such a poll is taken.
+    segment lights. A read here is one the device answered with a count: a new stamp from the
+    library. A poll whose count read failed or went unanswered, or a state pushed again with no
+    read (an advertisement, a command), is none, and neither counts nor breaks a row. A count
+    is taken once two reads in a row answer it, so one read alone (a bad one) and a count that
+    changes from one read to the next change nothing; one that holds for two reads is taken
+    each time it changes. A read of another count, of the stored one, or a count dropped back
+    to the profile's, breaks the row.
 
     A count taken that differs from the stored one is stored, so every later setup starts from
     it. One that differs from the lights built too reloads the entry, once: the setup builds
     that many. Otherwise the lights past it, which an earlier version built, are removed now. A
-    count the device hasn't reported (none read yet, or the profile's) changes nothing, and
-    neither does a failed poll; a larger count brings the removed ones back, with what Home
-    Assistant kept of them.
+    count the device hasn't reported (none read yet, or the profile's) changes nothing; a larger
+    count brings the removed ones back, with what Home Assistant kept of them.
     """
     data = entry.runtime_data
     device = data.device
     if Capability.SEGMENTS not in device.capabilities:
         return
     address: str = entry.data[CONF_ADDRESS]
-    # The count last reported, and the read (``segment_count_read``) it was first seen at.
-    seen: tuple[int, int] | None = None
+    # The last read seen (its count and stamp), taken or not.
+    last: SegmentCountRead | None = None
 
     @callback
     def _check() -> None:
-        nonlocal seen
-        count = confirmed_segment_count(device)
-        if count is None or count == stored_segment_count(entry):
+        nonlocal last
+        read = confirmed_segment_count(device)
+        if read is None:
+            last = None  # back to the profile's count: the row starts over
             return
-        reads = segment_count_read(entry)
-        if seen != (count, reads - 1):
-            # A count read once (or pushed again by an advertisement or a command, with no
-            # read since), or one after a read this didn't see: wait for the next read.
-            if seen != (count, reads):
-                seen = (count, reads)
+        if last is not None and read.read_at == last.read_at:
+            return  # no read since the last push
+        previous, last = last, read
+        if read.segments == stored_segment_count(entry):
             return
+        if previous is None or previous.segments != read.segments:
+            return  # the first read of this count: wait for the next one
+        count = read.segments
         hass.config_entries.async_update_entry(
             entry, data={**entry.data, CONF_SEGMENT_COUNT: count}
         )

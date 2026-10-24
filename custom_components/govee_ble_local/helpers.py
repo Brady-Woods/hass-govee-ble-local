@@ -119,33 +119,31 @@ def async_store_broadcast(
         hass.config_entries.async_update_entry(entry, data={**entry.data, CONF_BROADCAST: data})
 
 
-# The library's flag that a read from the device set ``Device.segment_count`` (True), rather
-# than the count falling back to the profile's ``segments``. No library release has it yet, so
-# its name is a stand-in until one does; this is the only place that names it.
-SEGMENT_COUNT_CONFIRMED_ATTR = "segment_count_confirmed"
+# The library's stamp of the last read from the device that gave a usable segment count
+# (``time.monotonic()``; None while ``Device.segment_count`` is the profile's): its re-reads of
+# the same count too, but not a read that failed or went unanswered. No library release has it
+# yet, so its name is a stand-in until one does; this is the only place that names it.
+SEGMENT_COUNT_READ_AT_ATTR = "segment_count_read_at"
 
 
-def confirmed_segment_count(device: Device) -> int | None:
-    """Return the device's segment count when the device itself reported it, else None.
+class SegmentCountRead(NamedTuple):
+    """A segment count the device answered a read with, and the library's stamp of that read."""
 
-    None while the library has no count from the device (none read yet, or a read that went
-    unanswered, timed out or gave no usable count), and on a library without the flag (1.6.1):
-    such a count may be the profile's, so nothing may be removed by it.
+    segments: int
+    read_at: float
+
+
+def confirmed_segment_count(device: Device) -> SegmentCountRead | None:
+    """Return the device's segment count and the stamp of the read that gave it, else None.
+
+    None while the library has no count from the device (none read yet, the profile's, or one
+    dropped since), and on a library without the stamp (1.6.1): such a count may be the
+    profile's, so nothing may be removed by it. A new stamp is a new read the device answered.
     """
-    if getattr(device, SEGMENT_COUNT_CONFIRMED_ATTR, False) is True:
-        return device.segment_count
-    return None
-
-
-def segment_count_read(entry: GoveeBleLocalConfigEntry) -> int:
-    """Return which read the device's confirmed segment count is taken to come from.
-
-    The polls that read the device without failing (``coordinator.device_reads``). One whose
-    count read went unanswered counts as a read too: the library then keeps its last count and
-    flag, and has no public stamp of the read that gave a count. A library stamp, bumped when
-    the device answers a count read, would replace this; nothing else reads it.
-    """
-    return entry.runtime_data.coordinator.device_reads
+    read_at = getattr(device, SEGMENT_COUNT_READ_AT_ATTR, None)
+    if not isinstance(read_at, (int, float)) or isinstance(read_at, bool):
+        return None
+    return SegmentCountRead(device.segment_count, float(read_at))
 
 
 def stored_segment_count(entry: GoveeBleLocalConfigEntry) -> int | None:

@@ -429,10 +429,6 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         # back. They answer different questions: reachability vs. successful control.
         self.last_seen: datetime | None = None
         self.last_connected: datetime | None = None
-        # Polls that read the device without failing, whether or not it answered each read in
-        # them: the segment count is taken from two in a row (``helpers.segment_count_read``).
-        # Not a failed one: the library keeps the last count through it.
-        self.device_reads = 0
         # last_connected on the Bluetooth monotonic clock (``power_confirmed_off``).
         self._read_back_at: float | None = None
         self._diagnostic_listeners: list[CALLBACK_TYPE] = []
@@ -1743,7 +1739,6 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         finally:
             # Even a failed poll may have read power before it failed.
             self._io_at = bluetooth.MONOTONIC_TIME()
-        self.device_reads += 1
         if not data.optimistic:
             self.last_connected = dt_util.utcnow()
             self._connectable_heard_at = self._read_back_at = bluetooth.MONOTONIC_TIME()
