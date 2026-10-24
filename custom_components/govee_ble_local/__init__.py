@@ -563,8 +563,10 @@ def _async_remove_segment_lights(
 ) -> None:
     """Remove this entry's segment lights for segments ``keep`` and up.
 
-    Home Assistant keeps what it knew of each (its entity id, name, area, enabled or not), and
-    gives it back to a segment light set up again on the same unique id.
+    Home Assistant keeps what it knew of each (its entity id, name, area, enabled or not) while
+    the entry exists, and gives it back to a segment light set up again on the same unique id. It
+    purges the record only once it is orphaned, 30 days after the entry is deleted
+    (``ORPHANED_ENTITY_KEEP_SECONDS`` in its entity registry).
     """
     registry = er.async_get(hass)
     segment = f"{address}_segment_"

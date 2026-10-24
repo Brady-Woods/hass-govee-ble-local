@@ -36,7 +36,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Fewer segments than lights:** the lights past the count are removed. An H6641 has at most
     14 segments, where earlier versions made 16 lights, and a strip cut short has fewer.
   - **More segments than lights:** the entry reloads once. The removed lights come back on their
-    old entity IDs, with their names, areas and enabled or disabled setting.
+    old entity IDs, with their names, areas and enabled or disabled setting, however long ago they
+    were removed. Home Assistant keeps those settings for as long as the device stays set up in the
+    integration. It forgets them only 30 days after you delete the device's entry.
   - **Restarts:** the count is stored, so a restart starts from it.
   - **No count from the device:** none read yet, a read that timed out or went unanswered, or the
     model's default. Nothing is removed and nothing reloads.

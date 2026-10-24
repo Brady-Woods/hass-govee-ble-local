@@ -70,8 +70,9 @@ running scene or mode.
 Entity count: the segment count the device last reported, once the library says a count came from
 the device (`helpers.confirmed_segment_count`; stored in the entry, so a restart starts from it),
 else the library's `segment_count` (the profile's until the device reports one). A reported count
-removes the segment lights past it, and a larger one reloads the entry to bring them back; a count
-the device hasn't reported removes none. No released library has the flag yet, so on 1.6.1 the
+removes the segment lights past it, and a larger one reloads the entry to bring them back with their
+registry settings (Home Assistant keeps a removed entity's record while its config entry exists, and
+purges it 30 days after the entry is deleted); a count the device hasn't reported removes none. No released library has the flag yet, so on 1.6.1 the
 count is the profile's, as before.
 
 ---

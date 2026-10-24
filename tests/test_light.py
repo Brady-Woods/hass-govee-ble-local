@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Generator
 import dataclasses
+from datetime import timedelta
 import functools
 import logging
 import operator
@@ -35,7 +36,7 @@ from homeassistant.config_entries import ConfigEntryState
 from homeassistant.const import STATE_OFF, STATE_ON, STATE_UNAVAILABLE, STATE_UNKNOWN
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
-from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import area_registry as ar, entity_registry as er
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 from pytest_homeassistant_custom_component.components.diagnostics import (
@@ -2961,21 +2962,36 @@ async def test_a_count_the_device_hasnt_reported_removes_no_segment_light(
     assert _segment_lights(hass, entry) == lights
 
 
+@pytest.mark.parametrize("days_between", [0, 31], ids=["right_after", "past_the_purge_window"])
 @pytest.mark.usefixtures("strip", "mock_bluetooth")
 async def test_a_larger_reported_count_brings_the_segment_lights_back_as_they_were(
-    hass: HomeAssistant, mock_config_entry: MockConfigEntry, reported: SimpleNamespace
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    reported: SimpleNamespace,
+    freezer: Any,
+    days_between: int,
 ) -> None:
     """A segment light removed by a shorter count comes back, at a larger one, on its unique
-    id with what Home Assistant kept of it: its entity id, name and enabled or not."""
+    id with what Home Assistant kept of it: its entity id, name, area and enabled or not.
+
+    However long after: Home Assistant purges a removed entity's record 30 days after it is
+    orphaned, and a removed segment light's stays with its config entry, so only deleting the
+    device's entry starts that clock.
+    """
     entry = await _set_up_strip(hass, mock_config_entry)
     registry = er.async_get(hass)
-    enabled = registry.async_update_entity(_segment(hass, 12), disabled_by=None, name="Desk end")
+    area = ar.async_get(hass).async_create("Workshop")
+    enabled = registry.async_update_entity(
+        _segment(hass, 12), disabled_by=None, name="Desk end", area_id=area.id
+    )
     untouched = registry.async_get(_segment(hass, 13))
     assert untouched is not None
     assert untouched.disabled_by is er.RegistryEntryDisabler.INTEGRATION
     reported.count = 9
     await _poll(hass, entry)
     assert 12 not in _segment_lights(hass, entry)
+    freezer.tick(timedelta(days=days_between))
+    registry.async_purge_expired_orphaned_entities()  # Home Assistant runs it daily
 
     reported.count = 16
     await _poll(hass, entry)
@@ -2984,10 +3000,11 @@ async def test_a_larger_reported_count_brings_the_segment_lights_back_as_they_we
     for before in (enabled, untouched):
         after = registry.async_get(_segment(hass, int(before.unique_id.rsplit("_", 1)[1])))
         assert after is not None
-        assert (after.id, after.entity_id, after.name, after.disabled_by) == (
+        assert (after.id, after.entity_id, after.name, after.area_id, after.disabled_by) == (
             before.id,
             before.entity_id,
             before.name,
+            before.area_id,
             before.disabled_by,
         )
     assert hass.states.get(enabled.entity_id) is not None  # the enabled one is set up again
