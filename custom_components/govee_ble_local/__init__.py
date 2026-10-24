@@ -544,7 +544,7 @@ def _async_size_segment_lights(
       govee-ble-local release after 1.6.1 gives no segments, has them from an earlier library,
       or from a setup without its pact (the entry is reloaded once the pact is heard).
     - The count the device last reported (``stored_segment_count``), so the lights match the
-      device before it is read again: a strip cut short, or an H6641 an earlier version gave 16.
+      device before it is read again: a strip cut short, or one an earlier version gave more.
     - Otherwise the library's ``segment_count`` (the profile's, until the device has reported
       its own). Nothing is removed by it: a count read short must not delete a light.
     """
@@ -585,24 +585,36 @@ def _async_remove_segment_lights(
 def _async_track_segment_count(hass: HomeAssistant, entry: GoveeBleLocalConfigEntry) -> None:
     """Follow the segment count the device reports (``confirmed_segment_count``).
 
-    The library learns it from a read (on the IC-sized strips, each poll's), after setup has
-    built the segment lights. A reported count that differs from the stored one is stored, so
-    every later setup starts from it. One that differs from the lights built too reloads the
-    entry, once: the setup builds that many. Otherwise the lights past it, which an earlier
-    version built, are removed now. A count the device hasn't reported changes nothing, so a
-    read that failed, timed out or went unanswered never removes a light; a larger reported
-    count brings the removed ones back, with what Home Assistant kept of them.
+    The library learns it from a read (on some strips, each poll's), after setup has built the
+    segment lights. A count is taken once two reads in a row report it: one read alone may be
+    a bad one, and counts that alternate would reload the entry on every poll. A count taken
+    that differs from the stored one is stored, so every later setup starts from it. One that
+    differs from the lights built too reloads the entry, once: the setup builds that many.
+    Otherwise the lights past it, which an earlier version built, are removed now. A count the
+    device hasn't reported changes nothing, so a read that failed, timed out or went unanswered
+    never removes a light; a larger count brings the removed ones back, with what Home
+    Assistant kept of them.
     """
     data = entry.runtime_data
     device = data.device
     if Capability.SEGMENTS not in device.capabilities:
         return
     address: str = entry.data[CONF_ADDRESS]
+    # The count last reported, and the read (``coordinator.device_reads``) it was first seen at.
+    seen: tuple[int, int] | None = None
 
     @callback
     def _check() -> None:
+        nonlocal seen
         count = confirmed_segment_count(device)
         if count is None or count == stored_segment_count(entry):
+            return
+        reads = data.coordinator.device_reads
+        if seen != (count, reads - 1):
+            # A count read once (or pushed again by an advertisement or a command, with no
+            # read since), or one after a read this didn't see: wait for the next read.
+            if seen != (count, reads):
+                seen = (count, reads)
             return
         hass.config_entries.async_update_entry(
             entry, data={**entry.data, CONF_SEGMENT_COUNT: count}

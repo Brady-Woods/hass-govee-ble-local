@@ -25,27 +25,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Deleted first, it hands its voice-assistant exposure back to the switch, so the new light gets
   the helper's entity ID and that exposure, but not a name or area you gave the helper: set
   those on the light. Left in place, it makes the new light's entity ID end in `_2`.
-- **Segment lights follow the segment count the device reports.** From the `govee-ble-local`
-  release that makes some strips' count live (1.9.0), the library reads it from the device on
-  these models:
-  - H6641, H6640, H61B3, H61B6, H1A42, H1A43, H1A44, H1AA2, H1AA5, H1AB1, H1AB2, H1AB3 and H1B6A;
-  - H61B8, H61B9, H61F2, H61F5 and H61F6, behind the modelled opt-in;
-  - the H6062, which already reports its own count.
-
-  How the lights follow it:
-  - **Fewer segments than lights:** the lights past the count are removed. An H6641 has at most
-    14 segments, where earlier versions made 16 lights, and a strip cut short has fewer.
+- **Segment lights follow the segment count the device reports.** Some strips can report how
+  many segments they have, for example one that has been cut short. From the `govee-ble-local`
+  release that reports a confirmed segment count, Home Assistant follows it:
+  - **Fewer segments than lights:** the lights past the count are removed.
   - **More segments than lights:** the entry reloads once. The removed lights come back on their
     old entity IDs, with their names, areas and enabled or disabled setting, however long ago they
     were removed. Home Assistant keeps those settings for as long as the device stays set up in the
     integration. It forgets them only 30 days after you delete the device's entry.
+  - **Two reads in a row:** a count counts once two reads in a row report it, so a single bad read,
+    or counts that keep changing, remove nothing and reload nothing.
   - **Restarts:** the count is stored, so a restart starts from it.
   - **No count from the device:** none read yet, a read that timed out or went unanswered, or the
     model's default. Nothing is removed and nothing reloads.
 
-  This takes effect only with a library release that says whether a count came from the device
-  (still being added to the library). With 1.6.1 nothing changes: segment lights are sized as
-  before, and none is removed by count. No library floor bump.
+  With 1.6.1, and any library release that doesn't report a confirmed count, nothing changes:
+  segment lights are sized as before, and none is removed by count. No library floor bump.
 - Tests: the stand-in for the library's connection (`tests/conftest.py` `FakeConnection`) is now
   the library's own `GoveeConnection` with only its Bluetooth I/O replaced, instead of a
   hand-written copy put on the library's private `Device._conn`. A method the library adds that

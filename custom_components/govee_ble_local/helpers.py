@@ -120,9 +120,8 @@ def async_store_broadcast(
 
 
 # The library's flag that a read from the device set ``Device.segment_count`` (True), rather
-# than the count falling back to the profile's ``segments``. The library has none yet (asked
-# for the release that makes the count live, govee-ble-local 1.9.0), so its name is a stand-in
-# until it ships; this is the only place that names it.
+# than the count falling back to the profile's ``segments``. No library release has it yet, so
+# its name is a stand-in until one does; this is the only place that names it.
 SEGMENT_COUNT_CONFIRMED_ATTR = "segment_count_confirmed"
 
 
