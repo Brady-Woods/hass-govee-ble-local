@@ -12,7 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `docs/field-test-ha.md`), the Home Assistant route of the full test pass on every Govee device
   in range before each release.
   - **How it runs:** on the lab Home Assistant host with the standard library only, over Home
-    Assistant's REST and WebSocket APIs, with the token read from an owner-only file.
+    Assistant's REST and WebSocket APIs, with the token read from an owner-only file. The token
+    goes only to localhost, never through a proxy or along a redirect.
   - **Steps:** built from what each entity supports: power, brightness, RGB and the white tint
     pick, the Kelvin range's ends and middle, zones, enabled segment lights and a scene. The
     refusals and conversions Home Assistant or the integration should make are recorded as
@@ -36,6 +37,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     lints and type-checks it.
 
   Nothing in the integration changes.
+- Development: the field-test harness reads every credential from one owner-only file outside the
+  repository (`~/.config/govee-field-test/credentials`, `key = value`, `ha_token = …`; the older
+  bare `~/.ha_token` still works). It refuses a file that group or others can read, with the
+  `chmod 600` fix, stops cleanly when the file is absent, and keeps every value out of its
+  reports, `run.log` and journal. `.gitignore` covers such files, and `CONTRIBUTING.md` sets out
+  the rules for secrets and lab identifiers in this public repository.
 - Tests: fixtures use only made-up identifiers. The addresses in `tests/test_connect_gate.py`,
   `tests/test_config_flow.py` and `tests/test_helpers.py`, and two area names, are replaced with
   documentation-range addresses (RFC 7042) and "Test Area".

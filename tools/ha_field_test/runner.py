@@ -49,7 +49,7 @@ from types import FrameType
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from .ha_api import HAError, RestClient, ServiceError, WebSocketClient
+from .ha_api import HAError, RestClient, ServiceError, WebSocketClient, scrub_token
 from .inventory import (
     ROLE_FIXTURE,
     ROLE_PLUG,
@@ -157,7 +157,8 @@ class Journal:
 
     def save(self) -> None:
         """Write it (before any change, and after each)."""
-        write_private(self.path, json.dumps(self.data, indent=1) + "\n")
+        # Private, but no credential belongs in it either.
+        write_private(self.path, scrub_token(json.dumps(self.data, indent=1)) + "\n")
 
     def put(self, label: str, record: dict[str, Any]) -> None:
         """Record (or re-record) a device's start state and save."""
@@ -216,14 +217,29 @@ class Console:
 
 @contextmanager
 def signals_raise(console: Console) -> Iterator[None]:
-    """While testing: SIGTERM and SIGHUP stop the run like Ctrl-C (and restore)."""
+    """While testing: Ctrl-C, SIGTERM and SIGHUP stop the run (and restore).
 
-    def _raise(signum: int, _frame: FrameType | None) -> None:
+    Only the first: as it is raised, every handler becomes note-only, so a second signal
+    while the first unwinds (before the restore's own handlers are in place) can't stop the
+    restore. The run ends after that device either way.
+    """
+    sigs = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+
+    def _note(signum: int, _frame: FrameType | None) -> None:
         if signum == signal.SIGHUP:
             console.detach()
+        console.say("  stopping: the device under test is put back first")
+
+    def _raise(signum: int, _frame: FrameType | None) -> None:
+        for sig in sigs:
+            signal.signal(sig, _note)
+        if signum == signal.SIGHUP:
+            console.detach()
+        if signum == signal.SIGINT:
+            raise KeyboardInterrupt
         raise AbortRunError(f"signal {signal.Signals(signum).name}")
 
-    previous = {s: signal.signal(s, _raise) for s in (signal.SIGTERM, signal.SIGHUP)}
+    previous = {s: signal.signal(s, _raise) for s in sigs}
     try:
         yield
     finally:
@@ -255,6 +271,21 @@ def signals_deferred(console: Console) -> Iterator[list[int]]:
     finally:
         for sig, handler in previous.items():
             signal.signal(sig, handler)
+
+
+def _reach_unknown(inventory: Inventory, fragile: list[dict[str, Any]]) -> str | None:
+    """Return why the fragile proxy must count as reaching every device, if it must."""
+    for scanner in fragile:
+        source = str(scanner["source"])
+        if scanner.get("connectable", True) and (
+            inventory.discovered_error or not inventory.discovered.get(source)
+        ):
+            label = inventory.scanner_labels.get(source, "the fragile proxy")
+            why = inventory.discovered_error or "it has discovered no device"
+            return (
+                f"{label}'s reach is unknown ({why}): every device counts as reachable through it"
+            )
+    return None
 
 
 def _ble_failure(error: ServiceError | None) -> bool:
@@ -295,11 +326,17 @@ class Runner:
         self._colour_changed = False
         self._sent = False  # whether anything was sent to the device under test
         # The fragile proxy's address too: the stop rule mustn't depend on a name alone.
-        self._fragile_sources = frozenset(
-            str(s["source"])
+        fragile = [
+            s
             for s in inventory.scanners
             if fragile_proxy and fragile_proxy in str(s.get("name") or "")
-        )
+        ]
+        self._fragile_sources = frozenset(str(s["source"]) for s in fragile)
+        # Its reach unknown (the Bluetooth diagnostics unread, or it discovered nothing while
+        # it takes connections): the safe side is that it can reach every device.
+        self._fragile_everywhere = _reach_unknown(inventory, fragile)
+        if self._fragile_everywhere:
+            report.notes.append(self._fragile_everywhere)
 
     # -- helpers -------------------------------------------------------------
 
@@ -311,6 +348,8 @@ class Runner:
 
     def _fragile(self, device: DeviceDesc) -> bool:
         """Return whether a connect to the device may go through the fragile proxy."""
+        if self._fragile_everywhere:
+            return True
         name = device.source_name or ""
         named = bool(self.fragile_proxy) and self.fragile_proxy in name
         return named or device.fragile(self._fragile_sources)
@@ -379,19 +418,24 @@ class Runner:
         ) or {}
         return "read back" if coordinator.get("last_update_success") else "read-back poll failed"
 
-    def _advert_time(self, address: str) -> float | None:
-        """Return when Home Assistant last heard the device advertise (on its own clock)."""
+    def _advert_times(self, address: str) -> tuple[float | None, float | None]:
+        """Return Home Assistant's clock now and when it last heard the device advertise.
+
+        Both on Home Assistant's own monotonic clock, the one advertisements are stamped
+        with: "now" is the newest advertisement from any device (they arrive many a second).
+        """
         events = self.ws.subscribe_snapshot(
             {"type": "bluetooth/subscribe_advertisements"}, settle=1.0
         )
-        times = [
+        adverts = [a for e in events for a in (e or {}).get("add") or ()]
+        stamped = [a for a in adverts if isinstance(a.get("time"), (int, float))]
+        now = max((float(a["time"]) for a in stamped), default=None)
+        own = [
             float(a["time"])
-            for e in events
-            for a in (e or {}).get("add") or ()
+            for a in stamped
             if str(a.get("address", "")).upper() == address.upper()
-            and isinstance(a.get("time"), (int, float))
         ]
-        return max(times) if times else None
+        return now, max(own, default=None)
 
     def _library_state(self, entry_id: str) -> Mapping[str, Any]:
         data = self.rest.diagnostics(entry_id).get("data") or {}
@@ -417,9 +461,11 @@ class Runner:
         self._check_daytime()
         before = self.rest.state(step.entity.entity_id)
         by_advert = self.readback and device.optimistic and step.power
-        heard = self._advert_time(device.address) if by_advert else None
         self._sent = True
         error, seconds = self._call(step.domain, step.service, step.call_data())
+        # The call's end on Home Assistant's clock: the advertisement that confirms the step
+        # must come after the library's suppression window from there.
+        call_end = self._advert_times(device.address)[0] if by_advert and error is None else None
         after = self.rest.state(step.entity.entity_id)
         verdict, notes = judge(step, error, before, after)
         how = ""
@@ -428,10 +474,13 @@ class Runner:
                 how = self._poll(device)
             elif by_advert:
                 self._sleep(ADVERT_SUPPRESS_SECONDS + ADVERT_MARGIN_SECONDS)
-                # Only an advertisement after the library's suppression window counts.
-                later = self._advert_time(device.address)
-                window = seconds + ADVERT_SUPPRESS_SECONDS
-                fresh = heard is not None and later is not None and later - heard >= window
+                # Only an advertisement the library didn't ignore counts.
+                later = self._advert_times(device.address)[1]
+                fresh = (
+                    call_end is not None
+                    and later is not None
+                    and later >= call_end + ADVERT_SUPPRESS_SECONDS
+                )
                 how = "advertisement" if fresh else "no advertisement heard after the command"
             if how in ("read back", "advertisement"):
                 readback = self.rest.state(step.entity.entity_id)
@@ -733,7 +782,12 @@ class Runner:
         self.journal.save()  # every start state, before the first change
         self._say(f"journal: {self.journal.path} (private: unmasked, owner-only)")
         with signals_raise(self.console):
-            for device in devices:
+            for n, device in enumerate(devices):
+                if self.stop is not None:
+                    # The run stopped: the devices after it were never reached.
+                    for later in devices[n:]:
+                        self.report.devices.append(self._partial(later, "never started"))
+                    break
                 plan = plans[device.label]
                 if plan.excluded or not plan.steps:
                     # Not loaded, unreachable or an unconfirmed plug: never touched at all.
@@ -747,21 +801,23 @@ class Runner:
                     # Before any change to this device: nothing to put back.
                     self.stop = str(err) or "Ctrl-C"
                     self.report.devices.append(self._partial(device, self.stop))
-                    break
+                    continue
                 except HAError as err:
                     # It couldn't be read just before its test; nothing was changed.
                     self.report.devices.append(self._partial(device, f"not read: {err}"))
                     continue
                 self.report.devices.append(result)
                 self._save_report()
-                if self.stop is not None:
-                    break
 
     def _partial(self, device: DeviceDesc, why: str) -> DeviceResult:
+        """Return the record of a device the run stopped at or never reached."""
         result = DeviceResult.from_plan(build_plan(device), self.inventory.scanner_labels)
         result.stopped = why
-        restored = self.journal.data.get("devices", {}).get(device.label, {}).get("restored")
-        result.restore = {"ok": bool(restored)} if restored is not None else {}
+        record = self.journal.data.get("devices", {}).get(device.label, {})
+        if record.get("touched"):
+            result.restore = {"ok": bool(record.get("restored"))}
+        else:
+            result.restore = {"never_started": True}
         return result
 
     def restore_plan(self, journal: Journal, *, everything: bool = False) -> list[str]:
@@ -827,6 +883,11 @@ class Runner:
             except (HAError, OSError, ValueError, AbandonRestoreError) as err:
                 outcomes[label] = f"failed: {type(err).__name__}"
             self._say(f"  {label}: {outcomes[label]}")
+            if self._fragile_stop:
+                # A radio failure through the fragile proxy: no more connects at all.
+                for rest in self.restore_plan(journal, everything=everything):
+                    outcomes.setdefault(rest, f"not attempted: {self._fragile_stop}")
+                break
         return outcomes
 
 

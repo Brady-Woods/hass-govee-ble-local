@@ -35,11 +35,30 @@ stops. `--outside-daytime-ok` overrides the window, and only you should pass it.
 ## Prerequisites
 
 - `ssh "$HA_HOST"` works, and Home Assistant is up on `http://localhost:8123` there.
-- A long-lived token is in `~/.ha_token` on that host, mode 600. The harness reads it there and
-  refuses a file anyone else may read. It never prints, logs or writes the token, and it only sends
-  it to localhost.
+- The credentials file is on that host (see Credentials below).
 - Python 3.11 or later on the host (stdlib only, no pip), and `tmux` (or `screen`).
 - The household knows that lights will change for a while.
+
+## Credentials
+
+Every credential the harness uses comes from one file on the host that runs it, never from the
+repository:
+
+- **Where:** `~/.config/govee-field-test/credentials` (or `--credentials FILE`). It lives outside
+  the repository; `.gitignore` also covers a file named `credentials` or `*.credentials`, or
+  `.ha_token`, should one ever land in a checkout. Never commit it, and never paste its contents
+  anywhere.
+- **Mode 600:** the harness refuses a file that group or others can read or write, says how to fix
+  it (`chmod 600 <file>`), and never shows its contents.
+- **What goes in it:** `key = value` lines, `#` for comments. Today it needs only
+  `ha_token = <a Home Assistant long-lived access token>`. Plug secrets stay in Home Assistant's
+  own config entries, so the harness needs none. Any secret a later test needs, for example a
+  device's secret code and MAC, goes here too, never in a test or a fixture.
+- **The older form:** a file holding the bare token alone, such as `~/.ha_token`, still works.
+  The harness uses it when the default file is absent.
+- **Absent:** the harness stops with a clear message and changes nothing.
+- **Output:** no value is ever printed, logged or written. Reports, `run.log` and the journal are
+  scrubbed of every value the file holds, and the token only goes to localhost.
 
 ## 1. Copy the harness to the lab host
 
@@ -142,11 +161,14 @@ cd ~/govee-bench/ha_field_test_src/tools && python3 -m ha_field_test --run --exp
   contains `bt-proxy`; `--fragile-proxy` names another). A device counts as reachable through it
   if it is the device's Connection source, or if the proxy has discovered the device (the
   Bluetooth integration's own per-scanner list, read-only) or relayed one of its advertisements.
-  Any call to such a device that fails over the radio, or takes 30 s, ends the run once that
-  device is restored: a test step, a read-back poll, a restore call or the self-test. A refusal
-  Home Assistant or the integration gives without the radio (a validation error) doesn't count.
-  A burst through it wedged its adapter before. The harness never touches the proxy. Never stop
-  that proxy's container, and never reset its adapter, without your OK.
+  If its reach can't be known, every device counts as reachable through it: when the Bluetooth
+  diagnostics can't be read, or when the proxy takes connections but has discovered no device
+  (as one that has wedged would). The run notes that in its report. Any call to such a device
+  that fails over the radio, or takes 30 s, ends the run once that device is restored: a test
+  step, a read-back poll, a restore call or the self-test. A refusal Home Assistant or the
+  integration gives without the radio (a validation error) doesn't count. A burst through it
+  wedged its adapter before. The harness never touches the proxy. Never stop that proxy's
+  container, and never reset its adapter, without your OK.
 - **Time:** with a read-back after every step, a device takes about 3-6 minutes, so the full lab
   takes about an hour. `--no-readback` is faster, but every step then counts as unverified.
   `--only 'H60A6 #2'` (or `--only H60A6`) tests a subset.
@@ -221,7 +243,9 @@ Or deploy the release itself once it ships, as in step 2. Either way:
   - It leaves alone a device that is already as found.
   - It refuses a device whose config entry is gone, or whose journal record names entities that
     aren't that device's own now.
-  - One device's failure doesn't stop the others.
+  - One device's failure doesn't stop the others, with one exception: a radio failure, or a 30 s
+    call, through the fragile proxy stops the recovery there. The devices after it are listed
+    as "not attempted"; run `--restore-from` again once the proxy is healthy.
   - It needs a terminal, and keeps to the daytime window (`--outside-daytime-ok` overrides).
 - **What Home Assistant can't put back** shows as "Restore caveat" in the plan, and the check
   reports it:
@@ -305,13 +329,15 @@ As defence in depth, every saved or printed string is also masked:
 - any hex run of 8 or more digits becomes `<hex>`.
 
 Errors are reported by their key and the underlying error, never by a message that names the
-device. Home Assistant errors never carry a request path, and the harness refuses an HTTP
-redirect, so the token can't follow one away from localhost.
+device. Home Assistant errors never carry a request path. The harness refuses an HTTP redirect
+and ignores any proxy that `http_proxy` or `HTTPS_PROXY` names, so the token can't leave
+localhost through either.
 
 Check a report before attaching it anyway: the masking can only replace what it was told about.
 
 Each device's section lists every step with its verdict, its read-back, how long it took and the
-scanner it went through, followed by the restore outcome. Attach `report.md` to the release PR.
+scanner it went through, followed by the restore outcome ("never started" for a device the run
+stopped before it reached). Attach `report.md` to the release PR.
 
 ## Options
 
@@ -328,6 +354,7 @@ scanner it went through, followed by the restore outcome. Attach `report.md` to 
 | `--fragile-proxy NAME` | The scanner whose trouble stops the run (default `bt-proxy`). |
 | `--scan-seconds N` | How long to collect advertisements (default 10). |
 | `--out DIR` | Where run directories go (default `~/govee-bench/ha_field_test_runs`). |
+| `--credentials FILE` | The owner-only credentials file (default `~/.config/govee-field-test/credentials`). |
 
 ## Not covered here
 

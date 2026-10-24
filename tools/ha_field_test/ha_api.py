@@ -17,6 +17,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import socket
 import stat
 import time
@@ -26,7 +27,9 @@ import urllib.parse
 import urllib.request
 
 DEFAULT_URL = "http://localhost:8123"
-DEFAULT_TOKEN_FILE = "~/.ha_token"  # noqa: S105 - a path, not the token
+# The harness's credentials file: outside the repository, owner-only (load_credentials).
+DEFAULT_CREDENTIALS = "~/.config/govee-field-test/credentials"
+LEGACY_TOKEN_FILE = "~/.ha_token"  # noqa: S105 - a path, not the token
 # Home Assistant's API carries the token in clear over http: only ever to this host.
 _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 _WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -72,30 +75,68 @@ class ServiceError:
         return f"{self.translation_key}: {detail}" if detail else self.translation_key
 
 
-_TOKEN: list[str] = []  # the one token read, for scrub_token
+_SECRETS: list[str] = []  # every credential value read, for scrub_token
+_KEY_VALUE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_.-]*)\s*=\s*(.*?)\s*$")
+TOKEN_KEY = "ha_token"  # noqa: S105 - the key's name, not a token
 
 
-def read_token(path: str = DEFAULT_TOKEN_FILE) -> str:
-    """Return the token in ``path``, refusing a file anyone but its owner may read or write."""
-    token_path = Path(path).expanduser()
-    info = token_path.stat()
+class CredentialsMissingError(HAError):
+    """There is no credentials file: the harness can't reach Home Assistant without one."""
+
+
+def _owner_only(path: Path) -> None:
+    """Refuse a credentials file anyone but its owner may read or write; never show it."""
+    info = path.stat()
     if not stat.S_ISREG(info.st_mode):
-        raise HAError(f"{token_path} is not a regular file")
-    if info.st_mode & (stat.S_IRWXG | stat.S_IRWXO):
-        raise HAError(f"{token_path} must be owner-only (chmod 600)")
+        raise HAError(f"{path} is not a regular file")
+    if info.st_mode & 0o077:
+        raise HAError(f"{path} must be readable by its owner only: run chmod 600 {path}")
     if info.st_uid != os.getuid():
-        raise HAError(f"{token_path} is not owned by the user running the harness")
-    token = token_path.read_text(encoding="utf-8").strip()
-    if not token:
-        raise HAError(f"{token_path} is empty")
-    _TOKEN.append(token)
-    return token
+        raise HAError(f"{path} is not owned by the user running the harness")
+
+
+def load_credentials(path: str | None = None) -> dict[str, str]:
+    """Return the credentials in the harness's one credentials file.
+
+    ``path``, or else ``DEFAULT_CREDENTIALS``, or else the older single-token file
+    ``LEGACY_TOKEN_FILE``. The file holds ``key = value`` lines (``#`` starts a comment):
+    ``ha_token`` is the Home Assistant long-lived token. A file holding a bare value alone is
+    a token (the older form). Every value is kept for :func:`scrub_token`, so none reaches any
+    output; an error names the file, never its contents.
+    """
+    candidates = [path] if path else [DEFAULT_CREDENTIALS, LEGACY_TOKEN_FILE]
+    found = next((Path(c).expanduser() for c in candidates if Path(c).expanduser().exists()), None)
+    if found is None:
+        raise CredentialsMissingError(
+            f"no credentials file at {candidates[0]}: see docs/field-test-ha.md, Credentials"
+        )
+    _owner_only(found)
+    lines = [
+        line.strip()
+        for line in found.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+    values: dict[str, str] = {}
+    for line in lines:
+        if m := _KEY_VALUE.match(line):
+            values[m.group(1)] = m.group(2)
+    if not values and len(lines) == 1:
+        values[TOKEN_KEY] = lines[0]
+    _SECRETS.extend(v for v in values.values() if v)
+    if not values.get(TOKEN_KEY):
+        raise HAError(f"{found} has no {TOKEN_KEY}")
+    return values
+
+
+def read_token(path: str | None = None) -> str:
+    """Return the Home Assistant token from the credentials file (:func:`load_credentials`)."""
+    return load_credentials(path)[TOKEN_KEY]
 
 
 def scrub_token(text: str) -> str:
-    """Return ``text`` without the token (defence in depth: nothing should ever carry it)."""
-    for token in _TOKEN:
-        text = text.replace(token, "<token>")
+    """Return ``text`` without any credential value (defence in depth: nothing should carry one)."""
+    for secret in _SECRETS:
+        text = text.replace(secret, "<token>")
     return text
 
 
@@ -121,7 +162,9 @@ class RestClient:
         check_loopback(url)
         self._url = url.rstrip("/")
         self._token = token
-        self._opener = urllib.request.build_opener(_NoRedirect)
+        # No proxy from http_proxy/HTTPS_PROXY (the token would go to it in clear), and no
+        # redirect (urllib would send the token along).
+        self._opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)
 
     def get(self, path: str, timeout: float = READ_TIMEOUT) -> Any:
         """GET ``path`` and return its JSON (None for 404).

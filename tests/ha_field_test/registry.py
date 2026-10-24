@@ -1,4 +1,4 @@
-"""The inventory's neutral labels, and the masking: nothing that identifies a home gets out.
+"""A made-up Home Assistant registry for the inventory, and what the masker makes of it.
 
 All identifiers are made up: MACs from the RFC 7042 documentation range, invented names.
 """
@@ -7,12 +7,7 @@ from __future__ import annotations
 
 from typing import Any
 
-import pytest
-
-from tools.ha_field_test import ha_api
-from tools.ha_field_test.ha_api import ServiceError
-from tools.ha_field_test.inventory import RawInventory, library_version, parse_inventory
-from tools.ha_field_test.masking import Masker
+from tools.ha_field_test.inventory import RawInventory
 
 LIGHT = "00:00:5E:00:53:01"
 PLUG = "00:00:5E:00:53:02"
@@ -25,7 +20,7 @@ SERIAL = "00:00:5E:00:53:F1:AA:01"
 REVERSED = ":".join(reversed(LIGHT.split(":")))  # device-info replies carry it reversed
 
 
-def _entity(address: str, key: str, entity_id: str, device_id: str, **extra: Any) -> dict:
+def _reg_entity(address: str, key: str, entity_id: str, device_id: str, **extra: Any) -> dict:
     return {
         "platform": "govee_ble_local",
         "unique_id": f"{address}_{key}",
@@ -36,7 +31,7 @@ def _entity(address: str, key: str, entity_id: str, device_id: str, **extra: Any
     }
 
 
-def _raw() -> RawInventory:
+def raw_inventory() -> RawInventory:
     entry = {"domain": "govee_ble_local", "state": "loaded"}
     return RawInventory(
         entries=[
@@ -84,15 +79,15 @@ def _raw() -> RawInventory:
             },
         ],
         entities=[
-            _entity(LIGHT, "light", "light.renamed_test_lamp", "d1"),
-            _entity(LIGHT, "zone_main_light", "light.gvh60a6abcd_main_light", "d1"),
-            _entity(
+            _reg_entity(LIGHT, "light", "light.renamed_test_lamp", "d1"),
+            _reg_entity(LIGHT, "zone_main_light", "light.gvh60a6abcd_main_light", "d1"),
+            _reg_entity(
                 LIGHT, "segment_3", "light.gvh60a6abcd_segment_4", "d1", disabled_by="integration"
             ),
-            _entity(LIGHT, "connection_source", "sensor.gvh60a6abcd_connection_source", "d1"),
-            _entity(PLUG, "power", "switch.ihoment_h5083_abce", "d2"),
-            _entity(OUTLETS, "zone_1", "switch.ihoment_h5086_abcf_outlet_1", "d3"),
-            _entity(OUTLETS, "zone_2", "switch.ihoment_h5086_abcf_outlet_2", "d3"),
+            _reg_entity(LIGHT, "connection_source", "sensor.gvh60a6abcd_connection_source", "d1"),
+            _reg_entity(PLUG, "power", "switch.ihoment_h5083_abce", "d2"),
+            _reg_entity(OUTLETS, "zone_1", "switch.ihoment_h5086_abcf_outlet_1", "d3"),
+            _reg_entity(OUTLETS, "zone_2", "switch.ihoment_h5086_abcf_outlet_2", "d3"),
         ],
         areas=[
             {"area_id": "test_room", "name": "Test Room"},
@@ -179,82 +174,3 @@ MASKING = [
     ("frame 3305150101ff00 at 2700 K, rgb_ff0000", "frame <hex> at 2700 K, rgb_ff0000"),
     ("a Lamp in the light", "a Lamp in the light"),
 ]
-
-
-def test_inventory_and_masking(tmp_path) -> None:
-    """The inventory's labels, and what the masker makes of every kind of identifier."""
-    inv = parse_inventory(_raw())
-    by_label = {d.label: d for d in inv.devices}
-
-    assert list(by_label) == ["H5083 #1", "H5086 #1", "H6008 #1", "H60A6 #1"]
-    # Scanners: local first, then proxies, each in address order; whatever order they come in.
-    assert inv.scanner_labels == {LOCAL: "local adapter", PROXY_1: "proxy A", PROXY_2: "proxy B"}
-    lamp, outlets, retry = by_label["H60A6 #1"], by_label["H5086 #1"], by_label["H6008 #1"]
-    assert (lamp.area_label, lamp.area, lamp.source_label) == ("area 3", "Test Room", "proxy B")
-    # Every scanner that passed on its advertisements: the fragile-proxy rule's paths.
-    assert lamp.heard_by == frozenset({LOCAL, PROXY_2})
-    assert lamp.fragile(frozenset({PROXY_2}))
-    assert not by_label["H5083 #1"].fragile(frozenset({PROXY_2}))
-    # A per-outlet relay is a plug, with its outlets; a plug found optimistic.
-    assert outlets.is_plug
-    assert [o.zone for o in outlets.outlets] == ["1", "2"]
-    assert by_label["H5083 #1"].optimistic
-    # Not loaded: never testable, so a run never reads it before its test.
-    assert not retry.available
-    assert inv.not_testable == [
-        ("H60A6 (entry #1)", "config entry disabled (user)"),
-        ("H6199 (entry #2)", "discovery ignored in Home Assistant"),
-        ("H6008 #1", "config entry setup_retry"),
-    ]
-    assert inv.unmanaged == [
-        ("H6199 (heard #1)", "heard through proxy A, no govee_ble_local entry")
-    ]
-    assert (inv.integration_version, inv.requirements) == (
-        "1.7.0rc1",
-        ["govee-ble-local>=1.7.0rc1,<2"],
-    )
-
-    # Masking: every identifier the inventory knows becomes its label.
-    for text, masked in MASKING:
-        assert inv.masker.text(text) == masked, text
-        assert inv.masker.data({text: [text]}) == {masked: [masked]}
-    # Short names too, as whole words only; never the reports' own words.
-    masker = Masker()
-    masker.add("H6052 #1", names=("Lamp", "Ivy"), hex_ids=("1",))
-    assert (
-        masker.text("Ivy is on; Ivyleaf, a lamp, the light")
-        == "H6052 #1 is on; Ivyleaf, a lamp, the light"
-    )
-    # Errors are reported by key and the underlying error, never the message that names
-    # the device by its entry title.
-    error = ServiceError(
-        "home_assistant_error",
-        "Could not reach GVH60A6ABCD: timed out",
-        "govee_ble_local",
-        "ble_command_failed",
-        {"device_name": "GVH60A6ABCD", "error": "timed out"},
-    )
-    assert error.describe() == "ble_command_failed: timed out"
-    # The library version a requirement names: a wheel URL's, a pin or a floor.
-    assert (
-        library_version(["govee-ble-local @ https://x/govee_ble_local-1.7.0rc1-py3-none-any.whl"])
-        == "1.7.0rc1"
-    )
-    assert library_version(["govee-ble-local==1.7.0"]) == "1.7.0"
-    assert inv.requirements == ["govee-ble-local>=1.7.0rc1,<2"]
-    assert library_version(inv.requirements) == "1.7.0rc1"
-
-    # The token: owner-only, never in any text, never sent anywhere but localhost, and
-    # never along a redirect.
-    token_file = tmp_path / "token"
-    token_file.write_text("made-up.test-token-value\n")
-    token_file.chmod(0o644)
-    with pytest.raises(ha_api.HAError, match="owner-only"):
-        ha_api.read_token(str(token_file))
-    token_file.chmod(0o600)
-    token = ha_api.read_token(str(token_file))
-    assert inv.masker.text(f"Bearer {token}") == "Bearer <token>"
-    with pytest.raises(ha_api.HAError, match="only http"):
-        ha_api.RestClient("http://ha.example.net:8123", token)
-    with pytest.raises(ha_api.HAError, match="redirect"):
-        ha_api._NoRedirect().redirect_request()

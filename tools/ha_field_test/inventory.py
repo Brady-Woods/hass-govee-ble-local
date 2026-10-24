@@ -187,6 +187,8 @@ class Inventory:
     masker: Masker
     requirements: list[str] = field(default_factory=list)
     scanner_labels: dict[str, str] = field(default_factory=dict)
+    discovered: dict[str, list[str]] = field(default_factory=dict)
+    discovered_error: str | None = None
 
     def device(self, label: str) -> DeviceDesc | None:
         """Return the device with ``label``."""
@@ -209,6 +211,7 @@ class RawInventory:
     # Each scanner's own discovered devices (the Bluetooth integration's diagnostics):
     # {scanner address: [device address, ...]}, not deduplicated across scanners.
     discovered: dict[str, list[str]] = field(default_factory=dict)
+    discovered_error: str | None = None  # why they couldn't be read, if they couldn't
 
 
 def entity_role(  # noqa: PLR0911 - one return per role
@@ -386,15 +389,19 @@ def _heard_by(raw: RawInventory) -> dict[str, frozenset[str]]:
     return {address: frozenset(sources) for address, sources in heard.items()}
 
 
-def _discovered(ws: WebSocketClient, rest: RestClient) -> dict[str, list[str]]:
-    """Read each scanner's discovered devices from the Bluetooth integration's diagnostics."""
+def _discovered(ws: WebSocketClient, rest: RestClient) -> tuple[dict[str, list[str]], str | None]:
+    """Read each scanner's discovered devices from the Bluetooth integration's diagnostics.
+
+    Returns them, and why they couldn't be read (then the runner takes the fragile proxy to
+    reach every device).
+    """
     for entry in ws.command({"type": "config_entries/get", "domain": "bluetooth"}):
         if entry.get("state") != "loaded":
             continue
         try:
             manager = (rest.diagnostics(entry["entry_id"]).get("data") or {}).get("manager") or {}
-        except Exception:  # noqa: BLE001 - only narrows the fragile-proxy rule's reach
-            return {}
+        except Exception as err:  # noqa: BLE001 - the runner falls back to the safe side
+            return {}, f"the Bluetooth diagnostics couldn't be read ({type(err).__name__})"
         return {
             str(scanner["source"]): [
                 str(d.get("address"))
@@ -403,8 +410,8 @@ def _discovered(ws: WebSocketClient, rest: RestClient) -> dict[str, list[str]]:
             ]
             for scanner in manager.get("scanners") or ()
             if isinstance(scanner, Mapping) and scanner.get("source")
-        }
-    return {}
+        }, None
+    return {}, "no loaded Bluetooth config entry"
 
 
 def scanner_name(scanners: list[dict[str, Any]], source: object) -> str | None:
@@ -581,6 +588,8 @@ def parse_inventory(raw: RawInventory) -> Inventory:
         requirements=requirements,
         masker=masker,
         scanner_labels=sources,
+        discovered=raw.discovered,
+        discovered_error=raw.discovered_error,
     )
 
 
@@ -596,6 +605,7 @@ def fetch_raw(ws: WebSocketClient, rest: RestClient, *, scan_seconds: float = 10
         except Exception as err:  # noqa: BLE001 - one entry's diagnostics never stop the inventory
             diagnostics[entry["entry_id"]] = f"{type(err).__name__}: {err}"
     scanner_events = ws.subscribe_snapshot({"type": "bluetooth/subscribe_scanner_details"})
+    discovered, discovered_error = _discovered(ws, rest)
     advert_events = (
         ws.subscribe_snapshot({"type": "bluetooth/subscribe_advertisements"}, settle=scan_seconds)
         if scan_seconds > 0
@@ -611,7 +621,8 @@ def fetch_raw(ws: WebSocketClient, rest: RestClient, *, scan_seconds: float = 10
         diagnostics=diagnostics,
         adverts=[a for e in advert_events for a in (e or {}).get("add") or ()],
         ha_version=ws.ha_version,
-        discovered=_discovered(ws, rest),
+        discovered=discovered,
+        discovered_error=discovered_error,
     )
 
 

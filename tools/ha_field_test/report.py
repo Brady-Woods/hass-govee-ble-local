@@ -196,6 +196,8 @@ def _data_text(data: dict[str, Any]) -> str:
 def _restore_text(restore: dict[str, Any]) -> str:
     if not restore:
         return "-"
+    if restore.get("never_started"):
+        return "never started"
     if restore.get("ok"):
         return "yes"
     return "NO: " + "; ".join(str(d) for d in restore.get("diffs", []) + restore.get("errors", []))

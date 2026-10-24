@@ -13,8 +13,9 @@ from pathlib import Path
 import sys
 
 from .ha_api import (
-    DEFAULT_TOKEN_FILE,
+    DEFAULT_CREDENTIALS,
     DEFAULT_URL,
+    CredentialsMissingError,
     HAError,
     RestClient,
     WebSocketClient,
@@ -86,7 +87,11 @@ def _args(argv: list[str] | None) -> argparse.Namespace:
     )
     parser.add_argument("--out", default=DEFAULT_OUT, help="where each run's directory goes")
     parser.add_argument("--url", default=DEFAULT_URL, help="Home Assistant on this host")
-    parser.add_argument("--token-file", default=DEFAULT_TOKEN_FILE, help="owner-only token file")
+    parser.add_argument(
+        "--credentials",
+        metavar="FILE",
+        help=f"the owner-only credentials file (default {DEFAULT_CREDENTIALS})",
+    )
     return parser.parse_args(argv)
 
 
@@ -255,10 +260,13 @@ def main(argv: list[str] | None = None) -> int:
     args = _args(argv)
     mode = "run" if args.run else "restore" if args.restore_from else "dry run"
     try:
-        token = read_token(args.token_file)
+        token = read_token(args.credentials)
         rest = RestClient(args.url, token)
         ws = WebSocketClient(args.url, token)
         ws.connect()
+    except CredentialsMissingError as err:
+        print(f"skipped: {err}", file=sys.stderr)
+        return EXIT_REFUSED
     except (HAError, OSError) as err:
         print(f"error: {err}", file=sys.stderr)
         return EXIT_REFUSED

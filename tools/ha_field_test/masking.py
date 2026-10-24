@@ -21,7 +21,7 @@ As defence in depth, every string saved or printed also goes through :meth:`Mask
 * Any hex run of 8 or more digits becomes ``<hex>``, as the integration's diagnostics drop
   them: a frame's hex can carry a MAC or serial split across lines.
 
-The token never reaches any text (``ha_api.scrub_token`` runs last).
+No credential reaches any text (``ha_api.scrub_token`` runs first).
 """
 
 from __future__ import annotations
@@ -160,13 +160,13 @@ class Masker:
         return self._pattern
 
     def text(self, text: str) -> str:
-        """Return ``text`` masked."""
+        """Return ``text`` masked; credentials go first, so no other rule leaves a part behind."""
+        text = scrub_token(text)
         if (pattern := self._compiled()) is not None:
             text = pattern.sub(self._replace, text)
         text = _MAC_TOKEN_RE.sub("<mac>", text)
         text = _NAME_TOKEN_RE.sub(r"\1xxxx", text)
-        text = _HEX_RUN.sub("<hex>", text)
-        return scrub_token(text)
+        return _HEX_RUN.sub("<hex>", text)
 
     def data(self, value: Any) -> Any:
         """Return ``value`` (JSON-like) with every string, keys included, masked."""

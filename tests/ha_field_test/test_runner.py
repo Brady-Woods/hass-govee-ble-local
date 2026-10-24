@@ -14,15 +14,23 @@ import signal
 import stat
 import sys
 from typing import Any
+import urllib.request
 
 import pytest
 
+from tools.ha_field_test import ha_api
 from tools.ha_field_test.ha_api import HAError, ServiceError
-from tools.ha_field_test.inventory import DeviceDesc, Inventory, scanner_labels
+from tools.ha_field_test.inventory import (
+    DeviceDesc,
+    Inventory,
+    library_version,
+    parse_inventory,
+    scanner_labels,
+)
 from tools.ha_field_test.masking import Masker
 from tools.ha_field_test.plan import TINT_KELVIN, TINT_RGB, Kind, build_plan
 from tools.ha_field_test.report import RunReport
-from tools.ha_field_test.runner import AbandonRestoreError, Journal, Runner
+from tools.ha_field_test.runner import AbandonRestoreError, AbortRunError, Journal, Runner
 
 from .builders import (
     ADDRESS,
@@ -37,6 +45,7 @@ from .builders import (
     self_test_button,
     zone_light,
 )
+from .registry import LOCAL, MASKING, PROXY_1, PROXY_2, raw_inventory
 
 FIXTURE = "light.gvh60a6abcd"
 MAIN = "light.gvh60a6abcd_zone_main_light"
@@ -121,8 +130,14 @@ class FakeHA:
 
     def subscribe_snapshot(self, message: dict[str, Any], settle: float = 2.0) -> list[Any]:
         assert message["type"] == "bluetooth/subscribe_advertisements"
-        self.advert_clock += self.advert_step  # advertisements keep coming, or not
-        return [{"add": [{"address": ADDRESS, "time": self.advert_clock}]}]
+        # Stamped on Home Assistant's clock: another device's advertisement now, and the
+        # device's own every advert_step seconds.
+        self.advert_clock += self.advert_step
+        adverts = [
+            {"address": "00:00:5E:00:53:99", "time": self.advert_clock + 1},
+            {"address": ADDRESS, "time": self.advert_clock},
+        ]
+        return [{"add": adverts}]
 
     def diagnostics(self, entry_id: str) -> dict[str, Any]:
         self.diagnostics_read.append(entry_id)
@@ -236,7 +251,11 @@ def _plug_device() -> DeviceDesc:
 
 
 def _runner(
-    ha: FakeHA, tmp_path: Any, devices: list[DeviceDesc], **kwargs: Any
+    ha: FakeHA,
+    tmp_path: Any,
+    devices: list[DeviceDesc],
+    discovered: dict[str, list[str]] | None = None,
+    **kwargs: Any,
 ) -> tuple[Runner, list[float]]:
     slept: list[float] = []
     labels = scanner_labels(SCANNERS)
@@ -259,6 +278,8 @@ def _runner(
         integration_version="1.7.0",
         masker=masker,
         scanner_labels=labels,
+        # The fragile proxy's own discovered devices: its reach is known.
+        discovered={FRAGILE: ["00:00:5E:00:53:99"]} if discovered is None else discovered,
     )
     report = RunReport.from_inventory(
         inventory,
@@ -283,9 +304,114 @@ def _runner(
     return runner, slept
 
 
-def test_fake_ha_run(tmp_path) -> None:
-    """A full run, its journal, its masked reports, then --restore-from on its journal."""
-    # A zoned light found off (its zones keep their colours, which HA hides) and a plug.
+def test_fake_ha_run(tmp_path, monkeypatch) -> None:  # noqa: PLR0915 - one run, end to end
+    """The inventory and its masking, a full run, its journal and reports, then --restore-from.
+
+    The inventory comes from a made-up registry (registry.py); the run from a fake Home
+    Assistant that follows the integration's zone relight rule.
+    """
+    inv = parse_inventory(raw_inventory())
+    by_label = {d.label: d for d in inv.devices}
+
+    assert list(by_label) == ["H5083 #1", "H5086 #1", "H6008 #1", "H60A6 #1"]
+    # Scanners: local first, then proxies, each in address order; whatever order they come in.
+    assert inv.scanner_labels == {LOCAL: "local adapter", PROXY_1: "proxy A", PROXY_2: "proxy B"}
+    lamp, outlets, retry = by_label["H60A6 #1"], by_label["H5086 #1"], by_label["H6008 #1"]
+    assert (lamp.area_label, lamp.area, lamp.source_label) == ("area 3", "Test Room", "proxy B")
+    # Every scanner that passed on its advertisements: the fragile-proxy rule's paths.
+    assert lamp.heard_by == frozenset({LOCAL, PROXY_2})
+    assert lamp.fragile(frozenset({PROXY_2}))
+    assert not by_label["H5083 #1"].fragile(frozenset({PROXY_2}))
+    # A per-outlet relay is a plug, with its outlets; a plug found optimistic.
+    assert outlets.is_plug
+    assert [o.zone for o in outlets.outlets] == ["1", "2"]
+    assert by_label["H5083 #1"].optimistic
+    # Not loaded: never testable, so a run never reads it before its test.
+    assert not retry.available
+    assert inv.not_testable == [
+        ("H60A6 (entry #1)", "config entry disabled (user)"),
+        ("H6199 (entry #2)", "discovery ignored in Home Assistant"),
+        ("H6008 #1", "config entry setup_retry"),
+    ]
+    assert inv.unmanaged == [
+        ("H6199 (heard #1)", "heard through proxy A, no govee_ble_local entry")
+    ]
+    assert (inv.integration_version, inv.requirements) == (
+        "1.7.0rc1",
+        ["govee-ble-local>=1.7.0rc1,<2"],
+    )
+
+    # Masking: every identifier the inventory knows becomes its label.
+    for text, masked in MASKING:
+        assert inv.masker.text(text) == masked, text
+        assert inv.masker.data({text: [text]}) == {masked: [masked]}
+    # Short names too, as whole words only; never the reports' own words.
+    masker = Masker()
+    masker.add("H6052 #1", names=("Lamp", "Ivy"), hex_ids=("1",))
+    assert (
+        masker.text("Ivy is on; Ivyleaf, a lamp, the light")
+        == "H6052 #1 is on; Ivyleaf, a lamp, the light"
+    )
+    # Errors are reported by key and the underlying error, never the message that names
+    # the device by its entry title.
+    error = ServiceError(
+        "home_assistant_error",
+        "Could not reach GVH60A6ABCD: timed out",
+        "govee_ble_local",
+        "ble_command_failed",
+        {"device_name": "GVH60A6ABCD", "error": "timed out"},
+    )
+    assert error.describe() == "ble_command_failed: timed out"
+    # The library version a requirement names: a wheel URL's, a pin or a floor.
+    assert (
+        library_version(["govee-ble-local @ https://x/govee_ble_local-1.7.0rc1-py3-none-any.whl"])
+        == "1.7.0rc1"
+    )
+    assert library_version(["govee-ble-local==1.7.0"]) == "1.7.0"
+    assert inv.requirements == ["govee-ble-local>=1.7.0rc1,<2"]
+    assert library_version(inv.requirements) == "1.7.0rc1"
+
+    # Credentials: one owner-only file, made-up values here. Refused while group or others
+    # can read it (the error names the fix, never a value); absent, a clean skip; every
+    # value it holds is kept out of all text; never sent anywhere but localhost, and never
+    # along a redirect.
+    credentials = tmp_path / "credentials"
+    credentials.write_text(
+        "# made up\nha_token = made-up.test-token\nplug_secret = 0011223344556677\n"
+    )
+    credentials.chmod(0o644)
+    with pytest.raises(ha_api.HAError, match="chmod 600") as refused:
+        ha_api.load_credentials(str(credentials))
+    assert "made-up" not in str(refused.value)
+    credentials.chmod(0o600)
+    loaded = ha_api.load_credentials(str(credentials))
+    assert loaded == {"ha_token": "made-up.test-token", "plug_secret": "0011223344556677"}
+    assert (
+        inv.masker.text("Bearer made-up.test-token, 0011223344556677") == "Bearer <token>, <token>"
+    )
+    bare = tmp_path / "ha_token"
+    bare.write_text("made-up.bare-token\n")
+    bare.chmod(0o600)
+    assert ha_api.read_token(str(bare)) == "made-up.bare-token"  # the older one-token form
+    with pytest.raises(ha_api.CredentialsMissingError, match="Credentials"):
+        ha_api.load_credentials(str(tmp_path / "absent"))
+    with pytest.raises(ha_api.HAError, match="only http"):
+        ha_api.RestClient("http://ha.example.net:8123", loaded["ha_token"])
+    with pytest.raises(ha_api.HAError, match="redirect"):
+        ha_api._NoRedirect().redirect_request()
+    # No proxy either, whatever the environment names: the token would go to it in clear.
+    monkeypatch.setenv("http_proxy", "http://proxy.example.net:3128")
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example.net:3128")
+    client = ha_api.RestClient("http://127.0.0.1:8123", loaded["ha_token"])
+
+    def proxied(opener: urllib.request.OpenerDirector) -> list[Any]:
+        return [h for h in opener.handlers if getattr(h, "proxies", None)]
+
+    assert proxied(urllib.request.build_opener())  # what urllib would do on its own
+    assert proxied(client._opener) == []
+
+    # The run: a zoned light found off (its zones keep their colours, which HA hides), and a
+    # plug.
     lamp, plug_dev = _lamp(lit=False), _plug_device()
     ha = FakeHA(lit=False, plug_state="on")
     runner, slept = _runner(ha, tmp_path, [plug_dev, lamp])
@@ -370,6 +496,14 @@ def _hang_up(terminal: dict[str, bool]) -> Callable[[], None]:
     return hang_up
 
 
+def _terminate_twice() -> None:
+    try:
+        os.kill(os.getpid(), signal.SIGTERM)  # os.kill runs the handler before it returns
+    except AbortRunError:
+        os.kill(os.getpid(), signal.SIGTERM)  # a second one while the first unwinds
+        raise
+
+
 GUARDS: dict[str, dict[str, Any]] = {
     # A stop restores first, whatever stopped it; the journal says "restored" only if the
     # last check found nothing different.
@@ -384,6 +518,13 @@ GUARDS: dict[str, dict[str, Any]] = {
         "fail": {3: "hang up"},
         "stopped": "signal SIGHUP",
     },
+    # The first signal makes every handler note-only, so the second can't cut the unwind
+    # short before the restore's own handlers are in place.
+    "SIGTERM twice: the second only noted": {
+        "fail": {3: _terminate_twice},
+        "stopped": "signal SIGTERM",
+        "log": "stopping: the device under test is put back first",
+    },
     "the window closes mid device": {"night_after": 3, "stopped": "outside the test window"},
     "a radio failure the fragile proxy could carry": {
         "fragile": True,
@@ -397,6 +538,21 @@ GUARDS: dict[str, dict[str, Any]] = {
         "stopped": "a restore call",
     },
     "a validation refusal through the fragile proxy doesn't stop it": {"fragile": True},
+    # Its reach unknown (it discovered nothing): it counts as reaching every device.
+    "the fragile proxy's reach unknown: a radio failure stops the run": {
+        "discovered": {},
+        "fail": {2: BLE_FAILURE},
+        "stopped": "fragile proxy",
+        "note": "proxy A's reach is unknown (it has discovered no device)",
+    },
+    # An optimistic plug's advertisement inside the library's suppression window after the
+    # call proves nothing: unverified, not a pass.
+    "an advertisement inside the suppression window": {
+        "devices": "plug, then light",
+        "plugs": {"H5083 #1"},
+        "advert_step": 10,
+        "unverified": ["plug.off", "plug.on"],
+    },
     "an on/off zone left off by an interrupted step is switched back on": {
         "onoff_back": True,
         "interrupt_after": "zone_background.off",
@@ -439,9 +595,11 @@ def test_guards(case: str, tmp_path, monkeypatch) -> None:
     )
     devices = {
         "plug": [_plug_device()],
+        "plug, then light": [_plug_device(), lamp],
         "retry": [_lamp(lit=True, entry_id="entry-retry", entry_state="setup_retry")],
     }.get(spec.get("devices", ""), [lamp, _lamp(lit=True, label="H60A6 #2")])
     ha = FakeHA(lit=True, plug_state="on", onoff_back=spec.get("onoff_back", False))
+    ha.advert_step = spec.get("advert_step", ha.advert_step)
     terminal = {"gone": False}
     checks = iter(range(10**6))
     night_after = spec.get("night_after")
@@ -453,6 +611,7 @@ def test_guards(case: str, tmp_path, monkeypatch) -> None:
         ha,
         tmp_path,
         devices,
+        discovered=spec.get("discovered"),
         daytime_override=night_after is None,
         self_test=spec.get("self_test", False),
         clock=lambda: NIGHT if night_after is not None and next(checks) >= night_after else DAY,
@@ -468,7 +627,7 @@ def test_guards(case: str, tmp_path, monkeypatch) -> None:
     if after := spec.get("interrupt_after"):
         ha.fail_on[_call_after(lamp, after)] = KeyboardInterrupt()
 
-    runner.run(devices, plugs=set())
+    runner.run(devices, plugs=spec.get("plugs", set()))
 
     if spec.get("untouched"):
         assert [c for c in ha.calls if c[0] != "homeassistant"] == []
@@ -478,14 +637,22 @@ def test_guards(case: str, tmp_path, monkeypatch) -> None:
     stopped = spec.get("stopped")
     assert stopped in (runner.report.stopped or "") if stopped else runner.report.stopped is None
     if stopped:
-        assert len(runner.report.devices) == 1  # the next device never started
+        # The next device never started, and the report says so.
+        assert [d.restore for d in runner.report.devices[1:]] == [{"never_started": True}]
+    for result in runner.report.devices:
+        for step in result.steps:
+            assert (step.verdict == "unverified") is (step.step_id in spec.get("unverified", ()))
+    if note := spec.get("note"):
+        assert any(note in n for n in runner.report.notes)
     # Put back first: the light as found, and every zone lit again.
     assert ha.colours == ({**START, BACK: {}} if spec.get("onoff_back") else START)
     assert all(ha.lit.values())
     journal = json.loads(runner.journal.path.read_text())
     assert journal["devices"]["H60A6 #1"]["restored"] is spec.get("restored", True)
     assert (tmp_path / "report.json").exists()
-    assert "H60A6 #1 restored: " in (tmp_path / "run.log").read_text()
+    log = (tmp_path / "run.log").read_text()
+    assert "H60A6 #1 restored: " in log
+    assert spec.get("log", "") in log
     if "SIGHUP" in case:
         assert not runner.console.terminal
     assert ha.connects == spec.get("connects", 0)
