@@ -166,10 +166,12 @@ cd ~/govee-bench/ha_field_test_src/tools && python3 -m ha_field_test --run --exp
   (as one that has wedged would). The run notes that in its report. Any call to such a device
   that fails over the radio, takes 30 s, or raises or times out (whether it reached the radio is
   then unknown) ends the run once that device is restored: a test step, a read-back poll, a
-  restore call or the self-test. A refusal Home Assistant or the integration gives without the
-  radio (a validation error) doesn't count. A burst through it wedged its adapter before. The
-  harness never touches the proxy. Never stop that proxy's container, and never reset its
-  adapter, without your OK.
+  restore call or the self-test; a poll before a device's test stops it before anything is sent
+  to it. A refusal Home Assistant or the integration gives without the radio (a validation
+  error) doesn't count. A burst through it wedged its adapter before. The harness never touches
+  the proxy. Never stop that proxy's container, and never reset its adapter, without your OK.
+- **A device that can't be read** just before its test is reported as "not read" and left
+  untouched. If Home Assistant didn't answer at all, the run stops there.
 - **Time:** with a read-back after every step, a device takes about 3-6 minutes, so the full lab
   takes about an hour. `--no-readback` is faster, but every step then counts as unverified.
   `--only 'H60A6 #2'` (or `--only H60A6`) tests a subset.
@@ -248,6 +250,7 @@ Or deploy the release itself once it ships, as in step 2. Either way:
     fragile proxy that fails over the radio, takes 30 s, or raises or times out stops the
     recovery once that device is done. It prints why, and lists each device after it as "not
     attempted"; run `--restore-from` again once the proxy is healthy.
+  - It prints each device's outcome. If any device isn't put back, it says which and exits 1.
   - It needs a terminal, and keeps to the daytime window (`--outside-daytime-ok` overrides).
 - **What Home Assistant can't put back** shows as "Restore caveat" in the plan, and the check
   reports it:

@@ -222,7 +222,14 @@ def _restore(args: argparse.Namespace, runner: Runner) -> int:
 
     outcomes = runner.restore_from(journal, everything=args.all, confirm_relay=confirm)
     done = ("put back", "already as found")
-    return EXIT_OK if all(o in done for o in outcomes.values()) else EXIT_FAILED
+    left = [label for label, outcome in outcomes.items() if outcome not in done]
+    if left:
+        print(
+            f"not everything is put back ({', '.join(left)}): see each outcome above",
+            file=sys.stderr,
+        )
+        return EXIT_FAILED
+    return EXIT_OK
 
 
 def _run(args: argparse.Namespace, runner: Runner, devices: list[DeviceDesc]) -> int:

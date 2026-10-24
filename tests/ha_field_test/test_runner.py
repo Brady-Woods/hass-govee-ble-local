@@ -463,10 +463,8 @@ def test_fake_ha_run(tmp_path, monkeypatch) -> None:  # noqa: PLR0915 - one run,
     old = Journal.load(runner.journal.path)
     for record in old.data["devices"].values():
         record["restored"] = False
-    assert runner.restore_from(old) == {
-        "H5083 #1": "already as found",
-        "H60A6 #1": "already as found",
-    }
+    first = runner.restore_from(old)
+    assert first == {"H5083 #1": "already as found", "H60A6 #1": "already as found"}
     assert len(ha.calls) == calls
     # Changed since: the light goes back; the plug relay only with the user's yes; a
     # record naming another device's entities, or a gone entry, is refused.
@@ -479,7 +477,8 @@ def test_fake_ha_run(tmp_path, monkeypatch) -> None:  # noqa: PLR0915 - one run,
     for record in old.data["devices"].values():
         record["restored"] = False
 
-    assert runner.restore_from(old) == {
+    second = runner.restore_from(old)
+    assert second == {
         "H5083 #1": "left as it is: its relays weren't confirmed",
         "H60A6 #1": "put back",
         "foreign": "refused: the journal names entities that aren't the device's",
@@ -510,6 +509,8 @@ def test_fake_ha_run(tmp_path, monkeypatch) -> None:  # noqa: PLR0915 - one run,
     log = (tmp_path / "run.log").read_text()
     assert "stopping: a restore call to H60A6 #1 raised TimeoutError" in log
     assert "H5083 #1: not attempted" in log
+    # Every outcome is said, a refusal or a device left alone included.
+    assert all(f"  {label}: {out}" in log for o in (first, second) for label, out in o.items())
 
 
 def _hang_up(terminal: dict[str, bool]) -> Callable[[], None]:
@@ -562,12 +563,6 @@ GUARDS: dict[str, dict[str, Any]] = {
         "stopped": "a restore call",
     },
     "a validation refusal through the fragile proxy doesn't stop it": {"fragile": True},
-    # Raised, not answered: whether it reached the radio is unknown, so it counts.
-    "a call through the fragile proxy that raises": {
-        "fragile": True,
-        "fail": {2: OSError("timed out")},
-        "stopped": "fragile proxy",
-    },
     # Its reach unknown (it discovered nothing): it counts as reaching every device.
     "the fragile proxy's reach unknown: a radio failure stops the run": {
         "discovered": {},

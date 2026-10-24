@@ -676,6 +676,9 @@ class Runner:
         if (left := self._last_command + LINK_HOLD_SECONDS - time.monotonic()) > 0:
             self._sleep(left)
         device = self._prepare(device)
+        if self._fragile_stop:
+            # Its pre-test poll tripped the fragile-proxy rule: nothing sent to it yet.
+            raise AbortRunError(self._fragile_stop)
         plan = build_plan(device, plug_allowed=plug_allowed)
         result = DeviceResult.from_plan(plan, self.inventory.scanner_labels)
         if plan.excluded or not plan.steps:
@@ -843,9 +846,17 @@ class Runner:
                     self.stop = str(err) or "Ctrl-C"
                     self.report.devices.append(self._partial(plan, self.stop))
                     continue
-                except HAError as err:
+                except (HAError, OSError, ValueError) as err:
                     # It couldn't be read just before its test; nothing was changed.
-                    self.report.devices.append(self._partial(plan, f"not read: {err}"))
+                    self.report.devices.append(
+                        self._partial(plan, f"not read: {type(err).__name__}")
+                    )
+                    if not isinstance(err, HAError):
+                        # Home Assistant isn't answering: no further device.
+                        self.stop = self.stop or (
+                            f"Home Assistant didn't answer reading {device.label}"
+                            f" ({type(err).__name__})"
+                        )
                     continue
                 self.report.devices.append(result)
                 self._save_report()
@@ -887,43 +898,8 @@ class Runner:
         """
         outcomes: dict[str, str] = {}
         for label in self.restore_plan(journal, everything=everything):
-            record = journal.data["devices"][label]
-            device = next(
-                (d for d in self.inventory.devices if d.entry_id == record.get("entry_id")), None
-            )
-            if device is None:
-                outcomes[label] = "refused: its config entry is gone"
-                continue
-            if set(record["entities"]) - {e.entity_id for e in device.entities}:
-                outcomes[label] = "refused: the journal names entities that aren't the device's"
-                continue
-            try:
-                if not self._diffs_now(record):
-                    journal.mark(label, restored=True)
-                    outcomes[label] = "already as found"
-                    continue
-                # As in a run: the last device's link is released before this one connects.
-                if (left := self._last_command + LINK_HOLD_SECONDS - time.monotonic()) > 0:
-                    self._sleep(left)
-                relays = {
-                    eid: info
-                    for eid, info in record["entities"].items()
-                    if info["role"] in RELAY_ROLES
-                    and not confirm_relay(
-                        label, _named(record, eid), str(info["snapshot"]["state"])
-                    )
-                }
-                kept = {k: v for k, v in record["entities"].items() if k not in relays}
-                if not kept:
-                    outcomes[label] = "left as it is: its relays weren't confirmed"
-                    continue
-                with signals_deferred(self.console):
-                    outcome = self.restore({**record, "entities": kept}, device)
-                journal.mark(label, restored=bool(outcome.get("ok")) and not relays)
-                outcomes[label] = "put back" if outcome.get("ok") else f"NOT put back: {outcome}"
-            except (HAError, OSError, ValueError, AbandonRestoreError) as err:
-                outcomes[label] = f"failed: {type(err).__name__}"
-            self._say(f"  {label}: {outcomes[label]}")
+            outcomes[label] = self._recover(journal, label, confirm_relay)
+            self._say(f"  {label}: {outcomes[label]}")  # every outcome, whichever it is
             if self._fragile_stop:
                 # A radio failure through the fragile proxy: no more connects at all.
                 self._say(f"  stopping: {self._fragile_stop}")
@@ -933,6 +909,41 @@ class Runner:
                         self._say(f"  {rest}: {outcomes[rest]}")
                 break
         return outcomes
+
+    def _recover(
+        self, journal: Journal, label: str, confirm_relay: Callable[[str, str, str], bool]
+    ) -> str:
+        """Put one journalled device back for --restore-from; return its outcome."""
+        record = journal.data["devices"][label]
+        device = next(
+            (d for d in self.inventory.devices if d.entry_id == record.get("entry_id")), None
+        )
+        if device is None:
+            return "refused: its config entry is gone"
+        if set(record["entities"]) - {e.entity_id for e in device.entities}:
+            return "refused: the journal names entities that aren't the device's"
+        try:
+            if not self._diffs_now(record):
+                journal.mark(label, restored=True)
+                return "already as found"
+            # As in a run: the last device's link is released before this one connects.
+            if (left := self._last_command + LINK_HOLD_SECONDS - time.monotonic()) > 0:
+                self._sleep(left)
+            relays = {
+                eid: info
+                for eid, info in record["entities"].items()
+                if info["role"] in RELAY_ROLES
+                and not confirm_relay(label, _named(record, eid), str(info["snapshot"]["state"]))
+            }
+            kept = {k: v for k, v in record["entities"].items() if k not in relays}
+            if not kept:
+                return "left as it is: its relays weren't confirmed"
+            with signals_deferred(self.console):
+                outcome = self.restore({**record, "entities": kept}, device)
+            journal.mark(label, restored=bool(outcome.get("ok")) and not relays)
+            return "put back" if outcome.get("ok") else f"NOT put back: {outcome}"
+        except (HAError, OSError, ValueError, AbandonRestoreError) as err:
+            return f"failed: {type(err).__name__}"
 
 
 def ask(prompt: str) -> str:
