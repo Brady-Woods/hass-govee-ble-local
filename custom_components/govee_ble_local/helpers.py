@@ -187,6 +187,48 @@ def has_zone_lights(device: Device) -> bool:
     return has_fixture_light(device)
 
 
+def reads_state(device: Device) -> bool:
+    """Return True if the library can read the device's state back (``profile.readback``).
+
+    A ``"none"`` profile reports nothing over Bluetooth: govee-ble-local 1.8.0's device-list
+    card rows (H70B2, H6630, H8630, H6631) take writes, and their on/off comes from the
+    advertisement and the last command, their brightness from the last command. Home
+    Assistant then never polls the device and shows its state as assumed. No released table
+    profile before 1.8.0 has ``"none"``; a library without the field reads, as before.
+    """
+    return getattr(device.profile, "readback", None) != "none"
+
+
+def taps_per_command(device: Device) -> bool:
+    """Return True if each write is a Bluetooth session of its own (``profile.session``).
+
+    ``"per_command"`` (govee-ble-local 1.8.0, the device-list card's rows): every write
+    connects, sends its one frame and disconnects, so power and brightness are two sessions.
+    A library without the field holds one link across writes (``"held"``), as before.
+    """
+    return getattr(device.profile, "session", "held") == "per_command"
+
+
+def has_segment_brightness(device: Device) -> bool:
+    """Return True if the device's segments take a brightness (``supports_segment_brightness``).
+
+    govee-ble-local 1.8.0 gives H61D2-H61D6 segment colour without segment brightness, and
+    their ``set_segment_brightness`` raises. A library without the property sends it to every
+    segment, as before.
+    """
+    return bool(getattr(device, "supports_segment_brightness", True))
+
+
+def whole_device_kelvin(device: Device) -> bool:
+    """Return True if colour temperature goes to the whole device only (``whole_device_kelvin``).
+
+    govee-ble-local 1.8.0 refuses a colour temperature on a segment or zone of such a device
+    (H61D2-H61D6 among them). A library without the field sends it to a segment or zone, as
+    before.
+    """
+    return bool(getattr(device.profile, "whole_device_kelvin", False))
+
+
 def zone_takes_colour(zone: Zone) -> bool:
     """Return True if the zone has segments, which its colour and brightness go to.
 

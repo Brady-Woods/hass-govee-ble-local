@@ -20,6 +20,7 @@ from bleak.exc import BleakError
 from govee_ble_local import (
     Capability,
     Device,
+    DeviceProfile,
     GoveeBleAuthError,
     GoveeBleConnectionError,
     GoveeBleError,
@@ -989,6 +990,64 @@ async def test_brightness_only_fixture(
 
     await _call(hass, "turn_on", MAIN, brightness=51)
     assert hass.states.get(MAIN).attributes["brightness"] == 51
+
+
+@pytest.mark.skipif(
+    not hasattr(DeviceProfile, "whole_device_kelvin"), reason="govee-ble-local 1.8.0's fields"
+)
+async def test_segments_without_brightness_or_their_own_colour_temperature(
+    hass: HomeAssistant,
+    entity_registry_enabled_by_default: None,
+    mock_config_entry: MockConfigEntry,
+    mock_bluetooth: SimpleNamespace,
+) -> None:
+    """The segment and zone lights of a device whose segments take no brightness, and whose
+    colour temperature goes to the whole device only (govee-ble-local 1.8.0's H61D2-H61D6),
+    offer colour alone, and a colour asked of one with a brightness goes out without the
+    brightness the library would refuse."""
+    device = make_device()
+    device.profile = dataclasses.replace(
+        device.profile, whole_device_kelvin=True, segment_brightness=False
+    )
+    await _setup_custom(hass, mock_config_entry, device, mock_bluetooth)
+    _seed(mock_config_entry, is_on=True)
+    for light in (_segment(hass, 0), _zone(hass, "main")):
+        assert hass.states.get(light).attributes["supported_color_modes"] == ["rgb"]
+        await _call(hass, "turn_on", light, rgb_color=RED, brightness=128)
+    device.set_segment_rgb.assert_awaited_once_with([0], RED)
+    device.set_zone_rgb.assert_awaited_once_with("main", RED)
+    device.set_segment_brightness.assert_not_awaited()
+
+
+@pytest.mark.parametrize("device_sku", ["H6006"])
+async def test_a_light_with_no_read_back_assumes_its_state_and_powers_on_first(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_bluetooth: SimpleNamespace
+) -> None:
+    """A light the library reads nothing from (govee-ble-local 1.8.0's device-list card rows)
+    shows its state as assumed. A brightness asked of it while off goes out after a power-on
+    of its own, so a power-on that landed stays when the brightness then fails. Once it is
+    on, a brightness change sends no power-on: its on/off is never read, and would otherwise
+    make every change two writes."""
+    device = make_device("H6006")
+    device.profile = dataclasses.replace(
+        device.profile,
+        capabilities=frozenset({Capability.POWER, Capability.BRIGHTNESS}),
+        readback="none",
+    )
+    entry = await _setup_custom(hass, mock_config_entry, device, mock_bluetooth)
+    _seed(entry, is_on=False)
+    assert hass.states.get(MAIN).attributes.get("assumed_state") is True
+
+    _fail(device, BleakError("link lost"), after=1)
+    with pytest.raises(HomeAssistantError):
+        await _call(hass, "turn_on", MAIN, brightness=128)
+    assert hass.states.get(MAIN).state == STATE_ON
+
+    connection(device).error = None
+    sent = len(connection(device).sent)
+    await _call(hass, "turn_on", MAIN, brightness=64)
+    assert len(connection(device).sent) == sent + 1
+    assert hass.states.get(MAIN).attributes["brightness"] == 64
 
 
 @pytest.mark.parametrize("device_sku", ["H6006"])

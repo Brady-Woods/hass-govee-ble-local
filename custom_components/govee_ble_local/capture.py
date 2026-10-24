@@ -41,7 +41,7 @@ from govee_ble_local import (
     Zone,
 )
 
-from .helpers import BLE_ERRORS, mid_kelvin
+from .helpers import BLE_ERRORS, mid_kelvin, reads_state
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -438,6 +438,8 @@ class _Steps:
 
     def __init__(self, device: Device) -> None:
         self._device = device
+        # Without read-back there is nothing to re-read or check (``readback_ok`` None).
+        self._reads = reads_state(device)
         self.results: list[StepResult] = []
 
     async def run(
@@ -450,7 +452,8 @@ class _Steps:
 
         A rejected secret aborts the whole test (re-raised); a command the
         device's colour scheme doesn't support is recorded as skipped; any
-        other BLE failure is recorded on the step.
+        other BLE failure is recorded on the step. A device with no read-back
+        is neither re-read nor checked: the state would only echo the command.
         """
         acked = False
         readback_ok: bool | None = None
@@ -458,14 +461,17 @@ class _Steps:
         try:
             await action()
             acked = True
-            try:
-                await self._device.update()
-            except GoveeBleAuthError:
-                raise
-            except BLE_ERRORS as err:
-                _LOGGER.debug("%s: read-back after %s failed: %s", self._device.address, name, err)
-            if verify is not None:
-                readback_ok = verify()
+            if self._reads:
+                try:
+                    await self._device.update()
+                except GoveeBleAuthError:
+                    raise
+                except BLE_ERRORS as err:
+                    _LOGGER.debug(
+                        "%s: read-back after %s failed: %s", self._device.address, name, err
+                    )
+                if verify is not None:
+                    readback_ok = verify()
         except GoveeBleAuthError:
             raise
         except GoveeBleNotSupported as err:
@@ -679,12 +685,13 @@ async def _run_self_test(device: Device, scene_store_error: str | None) -> SelfT
     restore_errors: list[str] = []
 
     with session_capture(address=device.address) as capture:
-        try:
-            await device.update()
-        except GoveeBleAuthError:
-            raise
-        except BLE_ERRORS as err:
-            _LOGGER.debug("%s: self-test initial read failed: %s", device.address, err)
+        if reads_state(device):
+            try:
+                await device.update()
+            except GoveeBleAuthError:
+                raise
+            except BLE_ERRORS as err:
+                _LOGGER.debug("%s: self-test initial read failed: %s", device.address, err)
         snap = _snapshot(device)
         auth_failed = False
         try:

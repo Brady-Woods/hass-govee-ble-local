@@ -6,6 +6,7 @@ from collections.abc import Callable
 import contextlib
 import dataclasses
 import json
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -27,12 +28,27 @@ from custom_components.govee_ble_local.helpers import (
     confirmed_segment_count,
     has_fixture_light,
     has_power_switch,
+    has_segment_brightness,
     parse_secret,
     pct_to_brightness,
+    reads_state,
+    taps_per_command,
+    whole_device_kelvin,
 )
 
 from .conftest import make_device, make_power_only_light, make_service_info
 from .const import SECRET_HEX, pact_mfg
+
+
+def test_a_library_without_the_newer_fields_keeps_todays_behaviour() -> None:
+    """A device of a library that predates them (govee-ble-local 1.6.1 has only ``readback``)
+    reads as today: its state is read back, its writes share a link, and its segments take a
+    brightness and a colour temperature."""
+    device: Any = SimpleNamespace(profile=SimpleNamespace())
+    assert reads_state(device)
+    assert not taps_per_command(device)
+    assert has_segment_brightness(device)
+    assert not whole_device_kelvin(device)
 
 
 def _with(sku: str, **profile: object) -> Callable[[], Device]:
