@@ -497,6 +497,25 @@ async def test_profile_without_color_temp_skips_all_colour_temp_steps() -> None:
     assert report["ok"] is True
 
 
+async def test_a_device_with_no_read_back_is_neither_read_nor_checked() -> None:
+    """A device the library reads nothing from (govee-ble-local 1.8.0's device-list card rows)
+    gets no read before the test or after a step, and no step is checked against a read-back:
+    its state would only echo the command."""
+    device = make_device("H6006")
+    device.profile = replace(
+        device.profile,
+        capabilities=frozenset({Capability.POWER, Capability.BRIGHTNESS}),
+        readback="none",
+    )
+
+    report = await async_run_self_test(device)
+
+    device.update.assert_not_awaited()
+    assert report["steps"]
+    assert [step["readback_ok"] for step in report["steps"]] == [None] * len(report["steps"])
+    assert report["ok"] is True
+
+
 async def test_profile_without_power_runs_zone_steps_and_restores_zones_individually() -> None:
     """With no whole-device power the zones are switched and put back one by one."""
     device = make_device("H60A6")

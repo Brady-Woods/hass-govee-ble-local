@@ -58,7 +58,10 @@ rules:
       device runs, or within 25 s after, waits until then, and while commands
       to two or more devices run at once (a light group, an area) every
       device's polls wait until 25 s after the last of them; a poll waits
-      2 min at most.
+      2 min at most. A device the library reads nothing back from (no
+      read-back in its profile: govee-ble-local 1.8.0's device-list card
+      rows) is never polled, not even after setup; its light shows its state
+      as assumed, from its advertised on/off and the last command.
   brands:
     status: done
     comment: >
@@ -142,8 +145,9 @@ rules:
       whichever comes first, or as soon as it vanishes when no background
       polls are scheduled to count them
       (polling disabled in the entry's system options, halted by a rejected
-      secret, or off under the advertisement poll policy), and stays so if
-      polls resume before it is heard again.
+      secret, off under the advertisement poll policy, or a device with no
+      read-back, which is never polled), and stays so if polls resume before
+      it is heard again.
   integration-owner: done
   log-when-unavailable: done
   parallel-updates: done

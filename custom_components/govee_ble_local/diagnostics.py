@@ -12,6 +12,7 @@ from homeassistant.const import CONF_ADDRESS
 from homeassistant.core import HomeAssistant
 
 from .const import CONF_SECRET
+from .helpers import reads_state, taps_per_command
 
 if TYPE_CHECKING:
     from govee_ble_local import DeviceState
@@ -126,6 +127,10 @@ async def async_get_config_entry_diagnostics(
             "sku": device.sku,
             "capabilities": sorted(c.value for c in device.capabilities),
             "zones": [z.name for z in device.zones],
+            # How the library reaches it: whether it reads state back (else HA assumes
+            # it), and whether each write is a Bluetooth session of its own.
+            "reads_state": reads_state(device),
+            "per_command_session": taps_per_command(device),
             # Counted live (the scenes a device offers can change); not read at all when
             # the scene store couldn't be read at setup, as each read would hit the file.
             "scene_count": None if data.scene_store_error else len(device.scene_names),

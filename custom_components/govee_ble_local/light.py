@@ -27,10 +27,13 @@ from .entity import GoveeBleLocalEntity
 from .helpers import (
     brightness_to_pct,
     has_fixture_light,
+    has_segment_brightness,
     has_zone_lights,
     kelvin_range,
     mid_kelvin,
     pct_to_brightness,
+    reads_state,
+    whole_device_kelvin,
     zone_takes_colour,
 )
 
@@ -71,13 +74,15 @@ def _sub_light_modes(device: Device, *, colour: bool) -> set[ColorMode]:
     """Return the colour modes of a zone/segment sub-light.
 
     RGB, plus COLOR_TEMP when the fixture supports colour temperature (the
-    library exposes masked, independently-addressable per-zone/segment kelvin).
-    On/off alone for a zone that takes no colour (``zone_takes_colour``).
+    library exposes masked, independently-addressable per-zone/segment kelvin),
+    unless it takes colour temperature over the whole device only
+    (``whole_device_kelvin``). On/off alone for a zone that takes no colour
+    (``zone_takes_colour``).
     """
     if not colour:
         return {ColorMode.ONOFF}
     modes = {ColorMode.RGB}
-    if Capability.COLOR_TEMP in device.capabilities:
+    if Capability.COLOR_TEMP in device.capabilities and not whole_device_kelvin(device):
         modes.add(ColorMode.COLOR_TEMP)
     return modes
 
@@ -116,6 +121,9 @@ class _SubLight(GoveeBleLocalEntity, LightEntity):
 
     Colour/brightness are read back best-effort from the device's segments and
     tracked optimistically on each command. ``colour`` False: an on/off light.
+    A device whose segments take no brightness (``has_segment_brightness``)
+    gets none sent: Home Assistant's colour modes always carry one, so it is
+    dropped, as Home Assistant drops a brightness an on/off light can't take.
     """
 
     def __init__(self, entry: GoveeBleLocalConfigEntry, key: str, *, colour: bool = True) -> None:
@@ -142,7 +150,9 @@ class GoveeBleLocalLight(GoveeBleLocalEntity, LightEntity):
     of truth: the library polls it back over BLE for devices that support
     read-back, and for the rest it reflects the last command sent (optimistic).
     Commands mutate that same object, so the UI updates immediately and later
-    polls reconcile with the real device.
+    polls reconcile with the real device. A device with no read-back at all
+    (``reads_state``) is never polled: its state is assumed, from its
+    advertised on/off and the last command.
     """
 
     _attr_name = None
@@ -150,6 +160,7 @@ class GoveeBleLocalLight(GoveeBleLocalEntity, LightEntity):
     def __init__(self, entry: GoveeBleLocalConfigEntry) -> None:
         """Initialize the whole-fixture light."""
         super().__init__(entry, "light")
+        self._attr_assumed_state = not reads_state(self._device)
         caps = self._device.capabilities
         modes: set[ColorMode] = set()
         if Capability.RGB in caps:
@@ -298,16 +309,29 @@ class GoveeBleLocalLight(GoveeBleLocalEntity, LightEntity):
         # A plain "turn on" always sends power (idempotent; on a zoned fixture it
         # also brings every zone back). For a brightness/colour/effect change on
         # a lit fixture power is skipped - it would re-light zones the user
-        # turned off - unless the on/off state is only optimistic and there are
-        # no zones to disturb.
+        # turned off - unless the on/off state is only optimistic until a poll
+        # reads it and there are no zones to disturb. A device with no read-back
+        # is never read: its on/off is what its advertisement and the last
+        # command say, as the Govee app's device-list card shows it.
         plain = not (kwargs.keys() & _COLOUR_KWARGS)
+        read = reads_state(self._device)
+        unconfirmed = data.optimistic and read and not self._device.zones
         power = Capability.POWER in self._device.capabilities and (
-            plain or data.is_on is not True or (data.optimistic and not self._device.zones)
+            plain or data.is_on is not True or unconfirmed
         )
+        change = brightness is not None or rgb is not None or kelvin is not None
         async with self._command():
-            # Power + brightness + colour go out as ONE batched device operation
-            # (one lock, one connection, each frame ack-verified, power first).
-            if power or brightness is not None or rgb is not None or kelvin is not None:
+            if power and change and not read:
+                # Power first, as a call of its own with its own deadline and turn at
+                # the connect gate, as the device-list card taps it before its slider:
+                # govee-ble-local 1.8.0 sends each write to such a device as a Bluetooth
+                # session of its own. A power-on that landed stays landed when the
+                # brightness then fails.
+                await self._run_client_command(self._device.set_power(True))
+                power = False
+            # Otherwise power + brightness + colour go out as ONE batched device
+            # operation (one lock, one connection, each frame ack-verified, power first).
+            if power or change:
                 await self._run_client_command(
                     self._device.turn_on(power=power, brightness=brightness, rgb=rgb, kelvin=kelvin)
                 )
@@ -457,7 +481,7 @@ class GoveeBleLocalSegmentLight(_SubLight):
                 self._attr_color_mode = ColorMode.RGB
                 if rgb != BLACK:
                     self._last_color = rgb
-            if ATTR_BRIGHTNESS in kwargs:
+            if ATTR_BRIGHTNESS in kwargs and has_segment_brightness(self._device):
                 pct = brightness_to_pct(kwargs[ATTR_BRIGHTNESS])
                 _LOGGER.debug(
                     "Setting segment %d of %s brightness to %d%%",
@@ -594,7 +618,7 @@ class GoveeBleLocalZoneLight(_SubLight):
                 await self._run_client_command(self._device.set_zone_rgb(self._zone_name, rgb))
                 self._attr_rgb_color = rgb
                 self._attr_color_mode = ColorMode.RGB
-            if ATTR_BRIGHTNESS in kwargs:
+            if ATTR_BRIGHTNESS in kwargs and has_segment_brightness(self._device):
                 pct = brightness_to_pct(kwargs[ATTR_BRIGHTNESS])
                 _LOGGER.debug(
                     "Setting zone %s of %s brightness to %d%%",

@@ -119,10 +119,20 @@ def device_zones() -> tuple[Zone, ...] | None:
 
 
 @pytest.fixture
-def mock_device(mock_device: Device, device_zones: tuple[Zone, ...] | None) -> Device:
-    """The shared test device, its profile's zones replaced (before setup) on request."""
+def device_readback() -> str | None:
+    """The read-back to give the device's profile in place of its model's (None: its own)."""
+    return None
+
+
+@pytest.fixture
+def mock_device(
+    mock_device: Device, device_zones: tuple[Zone, ...] | None, device_readback: str | None
+) -> Device:
+    """The shared test device, its profile's zones or read-back replaced before setup."""
     if device_zones is not None:
         mock_device.profile = dataclasses.replace(mock_device.profile, zones=device_zones)
+    if device_readback is not None:
+        mock_device.profile = dataclasses.replace(mock_device.profile, readback=device_readback)
     return mock_device
 
 
@@ -1335,6 +1345,44 @@ async def test_out_of_reach_light_keeps_the_grace_of_failed_polls(
     for _ in range(UNAVAILABLE_AFTER_FAILURES - 1):
         await coordinator.async_refresh()
     assert hass.states.get(MAIN_LIGHT).state == STATE_UNAVAILABLE
+
+
+@pytest.mark.parametrize("device_readback", ["none"])
+async def test_a_device_with_no_read_back_is_never_polled_and_available_while_heard(
+    hass: HomeAssistant,
+    air: Air,
+    entry: MockConfigEntry,
+    mock_device: Device,
+    hass_client: ClientSessionGenerator,
+    *,
+    mock_bluetooth: SimpleNamespace,
+    presence: SimpleNamespace,
+) -> None:
+    """A device the library reads nothing from (govee-ble-local 1.8.0's device-list card rows)
+    gets no poll: none after setup, none scheduled, none after a turn-on outside Home
+    Assistant, and a manual refresh reads nothing either. Its state is what its advertisement
+    and Home Assistant's commands say. No poll answers, so none counts against it: it is
+    available while a connectable scanner hears it, unavailable as soon as none does, and
+    back once one does."""
+    await light_service(hass, "turn_on", brightness=128)
+    air.advertise(on=False)
+    air.advertise(on=True)
+    await update_entity(hass)
+    await air.wait(MAX_POLL_INTERVAL_SECONDS + SLACK)
+    assert polls(mock_device) == 0
+    assert hass.states.get(MAIN_LIGHT).state == "on"
+    assert (await coordinator_diagnostics(hass, hass_client, entry))["poll_policy"] == "unread"
+
+    presence.connectable = False
+    presence.connectable_service_info = None
+    unavailable_callback(mock_bluetooth, connectable=True)(make_service_info())
+    assert hass.states.get(MAIN_LIGHT).state == STATE_UNAVAILABLE
+    presence.connectable = True
+    presence.connectable_service_info = SAME_AS_ANY_SCANNER
+    air.advertise(on=False)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert hass.states.get(MAIN_LIGHT).state == "off"
+    assert polls(mock_device) == 0
 
 
 @pytest.mark.parametrize(

@@ -1,11 +1,12 @@
 """Connection coordinator for a Govee BLE device, shared by all entities.
 
 ``Device.update()`` connects and reads back real state for devices that support
-it (profile ``readback`` of ``status``/``polled``/``plug``) and otherwise returns
-the device's best-known (optimistic) :class:`DeviceState`. This coordinator runs
+it (profile ``readback`` of ``status``/``polled``/``plug``). This coordinator runs
 that poll in the background on a jittered cadence with capped exponential
 backoff on failure; on/off is also tracked passively from advertisements (no
-connection).
+connection). A device with no read-back (``readback`` ``none``: govee-ble-local
+1.8.0's device-list card rows) is never polled: its state is what its
+advertisements and Home Assistant's own commands say (``PollPolicy.UNREAD``).
 
 How often a device is polled in the background is decided per device by one
 policy (``_async_policy_step``). While Home Assistant keeps hearing a device's
@@ -94,6 +95,7 @@ from .helpers import (
     advertised_broadcast,
     async_store_broadcast,
     kelvin_range,
+    reads_state,
 )
 
 if TYPE_CHECKING:
@@ -136,10 +138,12 @@ class PollPolicy(StrEnum):
     OFF = "off"
     # A relay plug followed by its advertisements: no background polls.
     RELAY = "relay"
+    # A device with no read-back (``helpers.reads_state``): no polls at all.
+    UNREAD = "unread"
 
 
 # The steps with no background polls.
-_UNPOLLED = frozenset({PollPolicy.OFF, PollPolicy.RELAY})
+_UNPOLLED = frozenset({PollPolicy.OFF, PollPolicy.RELAY, PollPolicy.UNREAD})
 
 
 def _poll_semaphore(hass: HomeAssistant) -> asyncio.Semaphore:
@@ -1467,8 +1471,9 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
     def _async_policy_step(self) -> PollPolicy:
         """Decide how this device is polled in the background: the policy's one decision.
 
-        Background polls stop only for a device HA otherwise follows: one the
-        policy covers (a library with the app's advertisement parser, a model
+        A device with no read-back is never polled: there is nothing to read.
+        Otherwise background polls stop only for a device HA otherwise follows:
+        one the policy covers (a library with the app's advertisement parser, a model
         not excluded), that HA polls at all (not disabled in system options,
         no rejected secret), that a connectable scanner currently sees (an
         absent device keeps the skip, count and return-poll handling of the
@@ -1479,6 +1484,8 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         a while after HA's own commands and reads), never from the raw byte.
         Anything else keeps the fixed cadence.
         """
+        if not reads_state(self._device):
+            return PollPolicy.UNREAD
         if not (
             self._advert_policy
             and self._polls_enabled
@@ -1659,6 +1666,11 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         # Any poll that runs (a manual refresh after an auth failure included)
         # means polling is scheduled again.
         self._auth_failed = False
+        if not reads_state(self._device):
+            # Nothing to read (the first poll after setup, or a manual refresh): the
+            # state is what HA follows. No connect, so nothing to fail or count
+            # against its availability.
+            return self._device.state
         if self._async_unreachable():
             raise self._async_skip_absent()
 

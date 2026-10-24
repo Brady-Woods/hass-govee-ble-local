@@ -7,7 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Ready for four models the next library release controls without reading them back:** the
+  H70B2, H6630, H8630 and H6631. `govee-ble-local` 1.8.0 adds them with power and brightness
+  only, the controls the Govee app's device list has for them, and reads nothing back from them.
+  Once that release is installed, each gets a light whose state is assumed: on/off follows the
+  light's own Bluetooth advertisement and the last command from Home Assistant, and brightness
+  the last command. Home Assistant never polls one, not even after setup, and the **Run
+  self-test** button sends its steps without checking them. It is available while a Bluetooth
+  adapter or proxy that can connect to it hears it, and unavailable as soon as none does. A
+  brightness asked of one that is off goes out after a power-on of its own, so the light stays on
+  when the brightness fails; once it is on, a brightness change sends no power-on. With
+  `govee-ble-local` 1.6.1 nothing changes: it has no such models.
+- **Ready for the next library release's segment rules:** `govee-ble-local` 1.8.0 gives the
+  H61D2-H61D6 segments that take a colour but no brightness, and a colour temperature that goes
+  to the whole light only. Their segment lights then offer colour alone, and a brightness asked
+  of one is dropped instead of refused. Other models, and 1.6.1, are unchanged.
+- Diagnostics show whether the library reads the device's state back and whether each write is
+  a Bluetooth session of its own.
+
 ### Changed
+- Tests: the stand-in for the library's connection also takes `send_once`, the one-write
+  session `govee-ble-local` 1.8.0 adds, and `tests/test_fake_transport.py` expects it only from a
+  library that has it. Against a build of the library's 1.8.0 work, that test was the one the
+  suite failed before this change. No change to the integration itself.
 - **A light that only switches on and off is a light, not a switch:** a model with power alone
   that isn't a relay smart plug (by its library profile) gets an on/off light, so it joins light
   groups, an area's lights and "turn off all the lights", which skipped it as a switch. The next

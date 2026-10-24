@@ -68,6 +68,13 @@ profile's capabilities:
     (the turn-on poll after it always counts as new);
   - a **relay plug** (H5083 family) gets no background polls: the relay is
     its only state.
+- A device with **no read-back** (profile `readback` `none`: govee-ble-local
+  1.8.0's device-list card rows H70B2, H6630, H8630 and H6631) is never polled
+  (`PollPolicy.UNREAD`), whatever it advertises: not after setup, not on a
+  turn-on, and a manual refresh reads nothing. Its light shows assumed state,
+  on/off from its advertisement and the last command, brightness from the
+  last command; a brightness asked of it while off goes out after a power-on
+  call of its own. Availability is presence alone, as for any unpolled device.
 - Everything else keeps the **fixed cadence** of 120 s + jitter: a device whose
   byte isn't heard (an H6006 heard only by a passive scanner, which never gets
   its scan response) or has gone stale, one no connectable scanner sees (its

@@ -95,9 +95,12 @@ REACHED_REAL_BLUETOOTH = "a test reached real Bluetooth"
 
 # The coroutine methods that would open or use a BLE link; FakeConnection replaces
 # exactly these. test_fake_connection_covers_every_io_method fails, by name, the day
-# the library adds another (instead of every test failing at random).
+# the library adds another (instead of every test failing at random). ``send_once``
+# (a write on a session of its own) is govee-ble-local 1.8.0's: FakeConnection has
+# it whatever the library, and it counts where the library has it.
 IO_METHODS = frozenset(
     {"connect", "send", "send_many", "send_unacked", "query", "disconnect", "close"}
+    | ({"send_once"} if hasattr(GoveeConnection, "send_once") else set())
 )
 
 
@@ -145,6 +148,9 @@ class FakeConnection(GoveeConnection):
 
     async def send_many(self, frames: list[bytes]) -> None:
         self._write(list(frames))
+
+    async def send_once(self, frame_plaintext: bytes) -> None:
+        self._write([frame_plaintext])
 
     async def send_unacked(
         self, frames: list[bytes] | Callable[[int], list[bytes]], *, gap: float = 0.0

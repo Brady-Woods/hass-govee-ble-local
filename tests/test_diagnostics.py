@@ -115,6 +115,8 @@ async def test_diagnostics_structure(
         "sku": "H60A6",
         "capabilities": ["brightness", "color_temp", "power", "rgb", "scenes", "segments"],
         "zones": ["main", "background"],
+        "reads_state": True,
+        "per_command_session": False,
         "scene_count": len(mock_device.scene_names),
         "scene_store_error": None,
     }
