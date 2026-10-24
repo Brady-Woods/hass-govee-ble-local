@@ -41,7 +41,7 @@ from govee_ble_local import (
     Zone,
 )
 
-from .helpers import BLE_ERRORS, mid_kelvin
+from .helpers import BLE_ERRORS, has_segment_color_temp, mid_kelvin
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -553,7 +553,7 @@ async def _exercise_fixture(
 
 
 async def _exercise_segments(device: Device, steps: _Steps) -> None:
-    """Segment 0 colour, brightness and (where supported) colour temperature."""
+    """Segment 0 colour, brightness and (where one segment takes it) colour temperature."""
     if Capability.SEGMENTS not in device.capabilities or not device.segment_count:
         return
     await steps.run(
@@ -566,7 +566,7 @@ async def _exercise_segments(device: Device, steps: _Steps) -> None:
         partial(device.set_segment_brightness, [0], _TEST_SEGMENT_BRIGHTNESS),
         lambda: _match(_segment_brightness(device.state, 0), _TEST_SEGMENT_BRIGHTNESS),
     )
-    if Capability.COLOR_TEMP in device.capabilities:
+    if has_segment_color_temp(device):
         await steps.run(
             "segment_0_color_temp",
             partial(device.set_segment_color_temp, [0], mid_kelvin(device)),
