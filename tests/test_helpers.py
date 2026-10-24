@@ -100,7 +100,7 @@ def test_clean_mac_placeholder(mac: str | None) -> None:
     assert clean_mac(mac) is None
 
 
-@pytest.mark.parametrize("mac", ["AA:BB:CC:DD:EE:05", "98-17-3c-b1-a2-d1", "00:00:00:00:00:01"])
+@pytest.mark.parametrize("mac", ["AA:BB:CC:DD:EE:05", "00-00-5e-00-53-21", "00:00:00:00:00:01"])
 def test_clean_mac_real(mac: str) -> None:
     """A real MAC is returned exactly as given."""
     assert clean_mac(mac) == mac

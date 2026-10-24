@@ -24,12 +24,12 @@ from .const import ADDRESS, SECRET_HEX, TITLE, broadcast_data
 
 REDACTED = "**REDACTED**"
 WIFI_MAC = "11:22:33:44:55:66"
-BLE_MAC = "77:88:99:AA:BB:CC"
+BLE_MAC = "00:00:5E:00:53:33"
 
 # The H60A6's Wi-Fi MAC is its BLE address minus one; its serial is the device
 # UID reversed.
 BURST_WIFI_MAC = "AA:BB:CC:DD:EE:04"
-BURST_SERIAL = "2D:DB:AA:BB:CC:DD:EE:04"
+BURST_SERIAL = "00:00:AA:BB:CC:DD:EE:04"
 # The start of an H60A6 status burst as the library logs it, one 20-byte chunk per
 # line, carrying the test device's identifiers. The device-info TLV holds the
 # reversed BLE address (chunk 01), the UID split across chunks 01/02 and the
@@ -37,12 +37,12 @@ BURST_SERIAL = "2D:DB:AA:BB:CC:DD:EE:04"
 BURST = [
     "ac000a000c0300010100040164050415010a8c5b",
     "ac0107070605eeddccbbaa07111004eeddccbb06",
-    "ac02aadb2d0100290104030000070d11aabbcc1a",
+    "ac02aa00000100290104030000070d11aabbccec",
     "ac03ddee040100290104031104001e0f0f1207a8",
 ]
 # Every piece of an identifier in BURST: the reversed address, the two halves
 # of the UID and the two halves of the Wi-Fi MAC.
-BURST_FRAGMENTS = ["05eeddccbbaa", "04eeddccbb", "aadb2d", "aabbcc", "ddee04"]
+BURST_FRAGMENTS = ["05eeddccbbaa", "04eeddccbb", "aa0000", "aabbcc", "ddee04"]
 
 
 def _octets(mac: str) -> list[str]:
