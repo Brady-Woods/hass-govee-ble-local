@@ -3024,15 +3024,16 @@ async def test_the_entry_reloads_once_for_each_reported_count_that_changes_the_l
 ) -> None:
     """A count two reads in a row report reloads the entry once when it differs from the
     segment lights built, however many polls report it after. One read alone (a bad one, a
-    failed poll after it included), counts that alternate, a state pushed again with no read,
-    one that matches the lights, or none reported, reload nothing."""
+    failed poll after it included), counts that alternate, one with a read of the stored count
+    between, a state pushed again with no read, one that matches the lights, or none reported,
+    reload nothing."""
     entry = await _set_up_strip(hass, mock_config_entry)
     push, fail = "push", "fail"  # the state pushed again without a read; a poll that fails
     with patch.object(
         hass.config_entries, "async_reload", wraps=hass.config_entries.async_reload
     ) as reload:
         reloads = []
-        for step in (16, 16, 9, push, 9, 9, None, 7, fail, 12, 7, 12, 12):
+        for step in (16, 16, 9, push, 9, 9, None, 7, fail, 9, 7, 12, 7, 12, 12):
             if step == push:
                 _seed(entry)
             elif step == fail:
@@ -3042,5 +3043,5 @@ async def test_the_entry_reloads_once_for_each_reported_count_that_changes_the_l
                 await _poll(hass, entry)
             reloads.append(reload.call_count)
 
-    assert reloads == [0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 2]
+    assert reloads == [0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2]
     assert _segment_lights(hass, entry) == set(range(12))

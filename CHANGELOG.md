@@ -33,11 +33,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     old entity IDs, with their names, areas and enabled or disabled setting, however long ago they
     were removed. Home Assistant keeps those settings for as long as the device stays set up in the
     integration. It forgets them only 30 days after you delete the device's entry.
-  - **Two reads in a row:** a count counts once two reads in a row report it, so a single bad read,
-    or counts that keep changing, remove nothing and reload nothing.
+  - **Two reads in a row:** a count counts once two reads in a row report it. A single bad read,
+    or a count that changes from one read to the next, removes nothing and reloads nothing. A count
+    that holds for two reads is taken each time it changes, so the entry reloads at each such
+    change. A read here is a poll that reached the device without failing, even one whose count
+    read went unanswered: the library keeps its last count then, so a bad count followed by such a
+    poll is taken.
   - **Restarts:** the count is stored, so a restart starts from it.
-  - **No count from the device:** none read yet, a read that timed out or went unanswered, or the
-    model's default. Nothing is removed and nothing reloads.
+  - **No count from the device yet:** none read yet, only reads that timed out or went unanswered,
+    or the model's default. Nothing is removed and nothing reloads.
 
   With 1.6.1, and any library release that doesn't report a confirmed count, nothing changes:
   segment lights are sized as before, and none is removed by count. No library floor bump.

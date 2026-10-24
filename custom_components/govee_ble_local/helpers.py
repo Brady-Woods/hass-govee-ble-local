@@ -137,6 +137,17 @@ def confirmed_segment_count(device: Device) -> int | None:
     return None
 
 
+def segment_count_read(entry: GoveeBleLocalConfigEntry) -> int:
+    """Return which read the device's confirmed segment count is taken to come from.
+
+    The polls that read the device without failing (``coordinator.device_reads``). One whose
+    count read went unanswered counts as a read too: the library then keeps its last count and
+    flag, and has no public stamp of the read that gave a count. A library stamp, bumped when
+    the device answers a count read, would replace this; nothing else reads it.
+    """
+    return entry.runtime_data.coordinator.device_reads
+
+
 def stored_segment_count(entry: GoveeBleLocalConfigEntry) -> int | None:
     """Return the last segment count the device reported, as the entry stores it (or None)."""
     count = entry.data.get(CONF_SEGMENT_COUNT)

@@ -429,9 +429,9 @@ class GoveeBleLocalCoordinator(DataUpdateCoordinator[DeviceState]):
         # back. They answer different questions: reachability vs. successful control.
         self.last_seen: datetime | None = None
         self.last_connected: datetime | None = None
-        # Polls that read the device without failing: the segment count is taken from two in a
-        # row (``_async_track_segment_count`` in __init__.py). Not a failed one: the library keeps
-        # the last count through it, so it would vouch for a count it didn't read.
+        # Polls that read the device without failing, whether or not it answered each read in
+        # them: the segment count is taken from two in a row (``helpers.segment_count_read``).
+        # Not a failed one: the library keeps the last count through it.
         self.device_reads = 0
         # last_connected on the Bluetooth monotonic clock (``power_confirmed_off``).
         self._read_back_at: float | None = None

@@ -68,8 +68,12 @@ bar only from long ago, and its `33 36` handler re-runs the power-on tail, which
 running scene or mode.
 
 Entity count: the segment count the device last reported, once the library says a count came from
-the device (`helpers.confirmed_segment_count`) and two reads in a row report it. It is stored in the
-entry, so a restart starts from it. Otherwise it is the library's `segment_count` (the profile's
+the device (`helpers.confirmed_segment_count`) and two reads in a row report it. A read is a poll
+that read the device without failing (`helpers.segment_count_read`), even one whose count read went
+unanswered, as the library keeps its last count then: a bad count followed by such a poll is taken.
+A library stamp of the read that gave a count would close that; it would replace
+`segment_count_read` alone. A count that holds for two reads is taken at each change. It is stored
+in the entry, so a restart starts from it. Otherwise it is the library's `segment_count` (the profile's
 until the device reports one). A reported count removes the segment lights past it, and a larger one
 reloads the entry to bring them back with their registry settings (Home Assistant keeps a removed
 entity's record while its config entry exists, and purges it 30 days after the entry is deleted). A

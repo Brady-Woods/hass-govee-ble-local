@@ -71,6 +71,7 @@ from .helpers import (
     has_fixture_light,
     has_zone_lights,
     parse_secret,
+    segment_count_read,
     stored_segment_count,
 )
 from .services import async_register_services
@@ -586,13 +587,17 @@ def _async_track_segment_count(hass: HomeAssistant, entry: GoveeBleLocalConfigEn
     """Follow the segment count the device reports (``confirmed_segment_count``).
 
     The library learns it from a read (on some strips, each poll's), after setup has built the
-    segment lights. A count is taken once two reads in a row report it: one read alone may be
-    a bad one, and counts that alternate would reload the entry on every poll. A count taken
-    that differs from the stored one is stored, so every later setup starts from it. One that
-    differs from the lights built too reloads the entry, once: the setup builds that many.
-    Otherwise the lights past it, which an earlier version built, are removed now. A count the
-    device hasn't reported changes nothing, so a read that failed, timed out or went unanswered
-    never removes a light; a larger count brings the removed ones back, with what Home
+    segment lights. A count is taken once two reads in a row report it, so one read alone (a
+    bad one) and counts that change from one read to the next change nothing; one that holds
+    for two reads is taken each time it changes. A read is a poll that read the device without
+    failing (``segment_count_read``), even one whose count read went unanswered: the library
+    keeps its last count then, so a bad count followed by such a poll is taken.
+
+    A count taken that differs from the stored one is stored, so every later setup starts from
+    it. One that differs from the lights built too reloads the entry, once: the setup builds
+    that many. Otherwise the lights past it, which an earlier version built, are removed now. A
+    count the device hasn't reported (none read yet, or the profile's) changes nothing, and
+    neither does a failed poll; a larger count brings the removed ones back, with what Home
     Assistant kept of them.
     """
     data = entry.runtime_data
@@ -600,7 +605,7 @@ def _async_track_segment_count(hass: HomeAssistant, entry: GoveeBleLocalConfigEn
     if Capability.SEGMENTS not in device.capabilities:
         return
     address: str = entry.data[CONF_ADDRESS]
-    # The count last reported, and the read (``coordinator.device_reads``) it was first seen at.
+    # The count last reported, and the read (``segment_count_read``) it was first seen at.
     seen: tuple[int, int] | None = None
 
     @callback
@@ -609,7 +614,7 @@ def _async_track_segment_count(hass: HomeAssistant, entry: GoveeBleLocalConfigEn
         count = confirmed_segment_count(device)
         if count is None or count == stored_segment_count(entry):
             return
-        reads = data.coordinator.device_reads
+        reads = segment_count_read(entry)
         if seen != (count, reads - 1):
             # A count read once (or pushed again by an advertisement or a command, with no
             # read since), or one after a read this didn't see: wait for the next read.
