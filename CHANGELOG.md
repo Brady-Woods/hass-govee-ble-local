@@ -35,9 +35,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     integration. It forgets them only 30 days after you delete the device's entry.
   - **Two reads in a row:** a count counts once two reads in a row report it. A read here is one
     the device answered with a count; a poll that failed, or whose count read went unanswered, is
-    not one. A single bad read, or a count that changes from one read to the next, removes nothing
-    and reloads nothing. A count that holds for two reads is taken each time it changes, so the
-    entry reloads at each such change.
+    not one. A single bad read, or a count that changes from one answered read to the next, removes
+    and reloads nothing. A count that holds for two answered reads is taken, and reloads the entry,
+    at each change, with no limit on how often.
   - **Restarts:** the count is stored, so a restart starts from it.
   - **No count from the device yet:** none read yet, only reads that timed out or went unanswered,
     or the model's default. Nothing is removed and nothing reloads.

@@ -591,9 +591,9 @@ def _async_track_segment_count(hass: HomeAssistant, entry: GoveeBleLocalConfigEn
     library. A poll whose count read failed or went unanswered, or a state pushed again with no
     read (an advertisement, a command), is none, and neither counts nor breaks a row. A count
     is taken once two reads in a row answer it, so one read alone (a bad one) and a count that
-    changes from one read to the next change nothing; one that holds for two reads is taken
-    each time it changes. A read of another count, of the stored one, or a count dropped back
-    to the profile's, breaks the row.
+    changes from one answered read to the next remove and reload nothing; one that holds for two
+    answered reads is taken, and reloads the entry, at each change, with no limit. A read of
+    another count, of the stored one, or a count dropped back to the profile's, breaks the row.
 
     A count taken that differs from the stored one is stored, so every later setup starts from
     it. One that differs from the lights built too reloads the entry, once: the setup builds
