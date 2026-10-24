@@ -58,9 +58,9 @@ OTHER_SECRET_HEX = "0011223344556677"
 PLUG_NO_COLON = PLUG_ADDRESS.replace(":", "").lower()
 # Govee device ids are 8 octets ending in the Wi-Fi MAC, which is one below the BLE
 # address the device advertises (the library's own example has the same pair).
-PLUG_DEVICE_ID = "86:9D:AA:BB:CC:DD:EE:06"
+PLUG_DEVICE_ID = "00:00:AA:BB:CC:DD:EE:06"
 PLUG_WIFI_MAC = "AA:BB:CC:DD:EE:06"
-OTHER_DEVICE_ID = "86:9D:00:00:5E:00:53:20"
+OTHER_DEVICE_ID = "00:00:00:00:5E:00:53:20"
 OTHER_BLE_MAC = "00:00:5E:00:53:21"
 
 

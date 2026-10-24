@@ -75,10 +75,10 @@ ATHOM = "00:00:5E:00:53:10"
 HCI0 = "00:00:5E:00:53:14"
 BT_PROXY = "00:00:5E:00:53:11"
 
-BULB = "5C:E7:53:00:00:01"
-BULB_2 = "5C:E7:53:00:00:02"
-BULB_3 = "5C:E7:53:00:00:03"
-BULB_4 = "5C:E7:53:00:00:04"
+BULB = "00:00:5E:00:53:01"
+BULB_2 = "00:00:5E:00:53:02"
+BULB_3 = "00:00:5E:00:53:03"
+BULB_4 = "00:00:5E:00:53:04"
 NIGHTSTAND = "00:00:5E:00:53:12"
 NIGHTSTAND_2 = "00:00:5E:00:53:13"
 
@@ -1001,7 +1001,7 @@ async def test_a_reconnected_proxy_is_not_avoided_for_its_old_scanner(
     """A proxy that reconnects registers a new scanner: the old one's silence, read once a
     call on it has failed, says nothing about the new one."""
     radios.athom.hear(NIGHTSTAND, -70)
-    source = "D8:BC:38:00:00:01"
+    source = "00:00:5E:00:53:15"
     old = Radio(source, "proxy", 3)
     unsetup, unregister = old.async_setup(), bluetooth.async_register_scanner(hass, old)
     old.hear(BULB, -60)

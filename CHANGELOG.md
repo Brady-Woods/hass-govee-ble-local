@@ -43,9 +43,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `chmod 600` fix, stops cleanly when the file is absent, and keeps every value out of its
   reports, `run.log` and journal. `.gitignore` covers such files, and `CONTRIBUTING.md` sets out
   the rules for secrets and lab identifiers in this public repository.
-- Tests: fixtures use only made-up identifiers. The addresses in `tests/test_connect_gate.py`,
-  `tests/test_config_flow.py` and `tests/test_helpers.py`, and two area names, are replaced with
-  documentation-range addresses (RFC 7042) and "Test Area".
+- Tests: fixtures use only made-up identifiers, with no real address or vendor prefix. Addresses
+  in `tests/test_connect_gate.py`, `tests/test_config_flow.py`, `tests/test_diagnostics.py` and
+  `tests/test_helpers.py` are replaced with documentation-range addresses (RFC 7042), and device
+  ids and a serial with made-up leading bytes; two area names become "Test Area".
 
 ### Changed
 - **A light that only switches on and off is a light, not a switch:** a model with power alone
