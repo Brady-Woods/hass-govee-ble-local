@@ -72,12 +72,12 @@ from the device (`helpers.confirmed_segment_count`) and two reads in a row give 
 the device answered with a count (a new stamp); a poll that failed, or whose count read went
 unanswered, is none. A count that holds for two answered reads is taken, and reloads the entry, at
 each change, with no limit; one that changes from one answered read to the next removes and reloads
-nothing. It is stored in the entry, so a restart starts from it. Otherwise it is the library's `segment_count` (the profile's
-until the device reports one). A reported count removes the segment lights past it, and a larger one
-reloads the entry to bring them back with their registry settings (Home Assistant keeps a removed
-entity's record while its config entry exists, and purges it 30 days after the entry is deleted). A
-count the device hasn't reported removes none. On a library without the stamp (1.6.1) the count is
-the profile's, as before.
+nothing. It is stored in the entry, so a restart starts from it. Otherwise it is the library's
+`segment_count` (the profile's until the device reports one). A reported count removes the segment
+lights past it, and a larger one reloads the entry to bring them back with their registry settings
+(Home Assistant keeps a removed entity's record while its config entry exists, and purges it 30 days
+after the entry is deleted). A count the device hasn't reported removes none. On a library without
+the stamp (1.6.1) the count is the profile's, as before.
 
 ---
 
