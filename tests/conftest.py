@@ -248,6 +248,21 @@ def make_power_only_light(**kwargs: Any) -> Device:
     return device
 
 
+def with_segment_color_temp(profile: Any, takes: bool) -> Any:
+    """Return ``profile``, its segments taking a colour temperature or not.
+
+    Which models' segments take one is the library's call (``segment_color_temp``); a test
+    that needs one answer sets it here. A library whose profiles don't have the field gets
+    it on the copy, which is all the integration reads, so the test runs on every library.
+    Set it last: a later ``dataclasses.replace`` drops it there.
+    """
+    if "segment_color_temp" in {field.name for field in dataclasses.fields(profile)}:
+        return dataclasses.replace(profile, segment_color_temp=takes)
+    copy = dataclasses.replace(profile)
+    object.__setattr__(copy, "segment_color_temp", takes)  # a frozen dataclass
+    return copy
+
+
 @contextmanager
 def runtime_segment_count(count: int) -> Iterator[None]:
     """Give every Device a runtime segment count other than its profile's.

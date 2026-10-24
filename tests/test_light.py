@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 import dataclasses
 import functools
 import logging
@@ -59,6 +60,7 @@ from .conftest import (
     make_power_only_light,
     make_service_info,
     runtime_segment_count,
+    with_segment_color_temp,
 )
 from .const import ADDRESS, pact_mfg
 
@@ -98,12 +100,20 @@ def drop_capabilities() -> frozenset[Capability]:
 
 
 @pytest.fixture
+def segment_color_temp() -> bool | None:
+    """Whether the device's segments take a colour temperature; None keeps the library's say."""
+    return None
+
+
+@pytest.fixture
 def mock_device(
     mock_device: Device,
     kelvin_range: tuple[int | None, int | None] | None,
     drop_capabilities: frozenset[Capability],
+    segment_color_temp: bool | None,
 ) -> Device:
-    """The shared test device, its profile's kelvin range or capabilities replaced on request."""
+    """The shared test device, its profile's kelvin range, capabilities or segment colour
+    temperature replaced on request."""
     if kelvin_range is not None:
         lo, hi = kelvin_range
         mock_device.profile = dataclasses.replace(mock_device.profile, min_kelvin=lo, max_kelvin=hi)
@@ -111,6 +121,8 @@ def mock_device(
         mock_device.profile = dataclasses.replace(
             mock_device.profile, capabilities=mock_device.profile.capabilities - drop_capabilities
         )
+    if segment_color_temp is not None:
+        mock_device.profile = with_segment_color_temp(mock_device.profile, segment_color_temp)
     return mock_device
 
 
@@ -876,6 +888,7 @@ async def test_color_mode_never_reports_unsupported_color_temp(
     assert "min_color_temp_kelvin" not in attrs or attrs["min_color_temp_kelvin"] is None
 
 
+@pytest.mark.parametrize("segment_color_temp", [True])  # the segment's range is checked too
 async def test_kelvin_range_follows_the_device_on_each_update(
     hass: HomeAssistant, enabled_entry: MockConfigEntry, mock_device: Device
 ) -> None:
@@ -898,6 +911,7 @@ async def test_kelvin_range_follows_the_device_on_each_update(
 
 
 @pytest.mark.parametrize("device_sku", ["H61A8"])
+@pytest.mark.parametrize("segment_color_temp", [True])  # the segment's range is checked too
 async def test_h61a8_range_is_refreshed_after_the_hardware_read(
     hass: HomeAssistant, enabled_entry: MockConfigEntry, mock_device: Device
 ) -> None:
@@ -1165,16 +1179,8 @@ async def cct_segment_entry(
     """
     lo, hi = (2000, 9000) if kelvin_range is None else kelvin_range
     device = make_device()
-    # A library whose profiles say whether segments take colour temperature says so of this
-    # one too (the model the profile starts from may say no).
-    takes_segment_kelvin = (
-        {"segment_color_temp": True}
-        if "segment_color_temp" in {field.name for field in dataclasses.fields(device.profile)}
-        else {}
-    )
     device.profile = dataclasses.replace(
         device.profile,
-        **takes_segment_kelvin,
         capabilities=frozenset(
             {
                 Capability.POWER,
@@ -1189,6 +1195,8 @@ async def cct_segment_entry(
         min_kelvin=lo,
         max_kelvin=hi,
     )
+    # The model the profile starts from may say its segments take none.
+    device.profile = with_segment_color_temp(device.profile, True)
     device.set_segment_color_temp.return_value = None
     entry = await _setup_custom(hass, mock_config_entry, device, mock_bluetooth)
     _seed(entry, is_on=True)
@@ -1271,6 +1279,63 @@ async def test_segment_colour_after_colour_temp_returns_to_rgb(
     attrs = hass.states.get(seg).attributes
     assert attrs["color_mode"] == "rgb"
     assert attrs["rgb_color"] == RED
+
+
+@pytest.mark.parametrize("segment_color_temp", [False])
+async def test_a_segment_taking_no_colour_temp_gets_one_as_its_rgb_colour(
+    hass: HomeAssistant, enabled_entry: MockConfigEntry, mock_device: Device
+) -> None:
+    """Where the library's profile says the segments take no colour temperature, a segment
+    light offers RGB alone, with no kelvin range, while a zone light keeps its colour
+    temperature. A colour temperature asked of the segment reaches the device as its RGB
+    colour (Home Assistant converts it), never as a segment colour temperature."""
+    _seed(enabled_entry, is_on=True, zone_power={0: True, 1: True})
+    seg = _segment(hass, SEG)
+    assert hass.states.get(seg).attributes["supported_color_modes"] == ["rgb"]
+    assert "min_color_temp_kelvin" not in hass.states.get(seg).attributes
+    zone = hass.states.get(_zone(hass, "main")).attributes
+    assert "color_temp" in zone["supported_color_modes"]
+    assert "min_color_temp_kelvin" in zone
+
+    await _call(hass, "turn_on", seg, color_temp_kelvin=4000, brightness=128)
+
+    mock_device.set_segment_color_temp.assert_not_awaited()
+    mock_device.set_segment_rgb.assert_awaited_once()
+    indices, rgb = mock_device.set_segment_rgb.await_args.args
+    assert indices == [SEG]
+    mock_device.set_segment_brightness.assert_awaited_once_with([SEG], 50)
+    attrs = hass.states.get(seg).attributes
+    assert attrs["color_mode"] == "rgb"
+    assert attrs["rgb_color"] == rgb
+
+
+@pytest.mark.parametrize(
+    ("light", "command"),
+    [
+        (functools.partial(_segment, index=SEG), "set_segment_color_temp"),
+        (functools.partial(_zone, name="main"), "set_zone_color_temp"),
+    ],
+    ids=["segment", "zone"],
+)
+@pytest.mark.parametrize("segment_color_temp", [True])
+async def test_a_refused_segment_or_zone_colour_temp_is_a_translated_error(
+    hass: HomeAssistant,
+    enabled_entry: MockConfigEntry,
+    mock_device: Device,
+    light: Callable[[HomeAssistant], str],
+    command: str,
+) -> None:
+    """A segment's or a zone's colour temperature the library refuses as not supported is
+    the integration's translated error, not the library's exception."""
+    _seed(enabled_entry, is_on=True, zone_power={0: True, 1: True})
+    getattr(mock_device, command).side_effect = GoveeBleNotSupported("no colour temperature")
+
+    with pytest.raises(ServiceValidationError) as exc:
+        await _call(hass, "turn_on", light(hass), color_temp_kelvin=4000)
+
+    assert exc.value.translation_domain == DOMAIN
+    assert exc.value.translation_key == "not_supported"
+    assert exc.value.translation_placeholders["error"] == "no colour temperature"
 
 
 async def test_segment_readback_black_is_off(

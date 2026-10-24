@@ -83,8 +83,11 @@ belt-and-suspenders rather than the thing hiding data. (Firmware/serial still on
 
 *Resolved:* Per-zone/per-segment **colour temperature** — the library added
 `set_zone_color_temp` / `set_segment_color_temp` (masked CCT) and corrected the H60A6 topology
-(main = segment 12, background = 0–11, independently addressable, live-verified). The zone and
-segment lights now expose `ColorMode.COLOR_TEMP` wherever the fixture supports kelvin.
+(main = segment 12, background = 0–11, independently addressable, live-verified). A zone light
+exposes `ColorMode.COLOR_TEMP` wherever the fixture supports kelvin and the zone has segments (a
+zone without segments is an on/off light). A segment light exposes it only where the library says
+the model's segments take one (`segment_color_temp`); elsewhere Home Assistant sends a colour
+temperature asked of a segment as an RGB colour.
 
 *Resolved:* `Device.read_secret()` (config-flow secret auto-read) and
 `Device.ingest_advertisement()` (passive on/off) were restored upstream and are used directly.

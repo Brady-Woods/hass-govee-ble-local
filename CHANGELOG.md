@@ -25,6 +25,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Deleted first, it hands its voice-assistant exposure back to the switch, so the new light gets
   the helper's entity ID and that exposure, but not a name or area you gave the helper: set
   those on the light. Left in place, it makes the new light's entity ID end in `_2`.
+- **A segment light offers colour temperature only where the model's segments take one**, once
+  `govee-ble-local` reports which models' segments take colour temperature. Elsewhere a segment
+  light offers RGB and brightness, and a colour temperature asked of it (by a script, a scene or a
+  light group) is sent as the RGB colour Home Assistant converts it to. Zone lights and the
+  whole-fixture light keep their colour temperature. The self-test (the **Run self-test** button
+  and `capture_session`) skips its segment colour-temperature step on such a model and still runs
+  each zone's. With a library that doesn't report it, every segment keeps its colour temperature,
+  and the requirement stays `govee-ble-local>=1.6.1,<2`.
 - Tests: the stand-in for the library's connection (`tests/conftest.py` `FakeConnection`) is now
   the library's own `GoveeConnection` with only its Bluetooth I/O replaced, instead of a
   hand-written copy put on the library's private `Device._conn`. A method the library adds that

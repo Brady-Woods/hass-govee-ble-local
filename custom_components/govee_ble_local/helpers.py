@@ -143,6 +143,22 @@ def has_power_switch(device: Device) -> bool:
     )
 
 
+def has_segment_color_temp(device: Device) -> bool:
+    """Return True if one segment can take a colour temperature.
+
+    COLOR_TEMP, unless the library's profile says the model's segments take none
+    (``segment_color_temp`` false), where the library refuses
+    ``set_segment_color_temp``. The Govee app sends no Kelvin to a selection of such a
+    model's segments: either its colour screen sends a Kelvin only over every segment
+    at once, or (a zoned model) it widens each Kelvin pick to the whole zones the pick
+    touches, which is why a zone's Kelvin (``set_zone_color_temp``) stays. A library
+    whose profiles don't say reads as True. Zones don't read it.
+    """
+    return Capability.COLOR_TEMP in device.capabilities and bool(
+        getattr(device.profile, "segment_color_temp", True)
+    )
+
+
 def has_zone_lights(device: Device) -> bool:
     """Return True if the device's zones are lights, else switches.
 

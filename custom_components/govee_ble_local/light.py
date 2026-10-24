@@ -27,6 +27,7 @@ from .entity import GoveeBleLocalEntity
 from .helpers import (
     brightness_to_pct,
     has_fixture_light,
+    has_segment_color_temp,
     has_zone_lights,
     kelvin_range,
     mid_kelvin,
@@ -67,19 +68,15 @@ def _apply_kelvin_range(light: LightEntity, device: Device) -> None:
         light._attr_min_color_temp_kelvin, light._attr_max_color_temp_kelvin = kelvin_range(device)
 
 
-def _sub_light_modes(device: Device, *, colour: bool) -> set[ColorMode]:
+def _sub_light_modes(*, colour: bool, color_temp: bool) -> set[ColorMode]:
     """Return the colour modes of a zone/segment sub-light.
 
-    RGB, plus COLOR_TEMP when the fixture supports colour temperature (the
-    library exposes masked, independently-addressable per-zone/segment kelvin).
+    RGB, plus COLOR_TEMP when it takes a colour temperature (``color_temp``).
     On/off alone for a zone that takes no colour (``zone_takes_colour``).
     """
     if not colour:
         return {ColorMode.ONOFF}
-    modes = {ColorMode.RGB}
-    if Capability.COLOR_TEMP in device.capabilities:
-        modes.add(ColorMode.COLOR_TEMP)
-    return modes
+    return {ColorMode.RGB, ColorMode.COLOR_TEMP} if color_temp else {ColorMode.RGB}
 
 
 async def async_setup_entry(
@@ -120,9 +117,15 @@ class _SubLight(GoveeBleLocalEntity, LightEntity):
 
     def __init__(self, entry: GoveeBleLocalConfigEntry, key: str, *, colour: bool = True) -> None:
         super().__init__(entry, key)
-        self._attr_supported_color_modes = _sub_light_modes(self._device, colour=colour)
+        self._attr_supported_color_modes = _sub_light_modes(
+            colour=colour, color_temp=self._takes_color_temp()
+        )
         _apply_kelvin_range(self, self._device)
         self._attr_color_mode = ColorMode.RGB if colour else ColorMode.ONOFF  # updated on command
+
+    @abstractmethod
+    def _takes_color_temp(self) -> bool:
+        """Return whether the device takes a colour temperature for this sub-light alone."""
 
     @abstractmethod
     def _sync_from_readback(self) -> None:
@@ -331,7 +334,13 @@ class GoveeBleLocalSegmentLight(_SubLight):
     still reports it), so a segment shows off whenever the whole fixture is
     known off, and is lit again with it; on a zoned fixture, likewise whenever
     the zone it belongs to is known off (an H60A6's main panel or ring, an
-    H6047 bar). The library doesn't track per-segment colour temperature, so
+    H6047 bar).
+
+    A segment offers a colour temperature only where the library's profile
+    says one segment takes it (``has_segment_color_temp``; the zone lights
+    don't follow it). Without it, Home Assistant converts a requested colour
+    temperature into an RGB colour, which goes out as the segment's colour.
+    The library doesn't track per-segment colour temperature, so
     while one is active the commanded state is kept instead of the read-back
     colour.
     """
@@ -351,6 +360,10 @@ class GoveeBleLocalSegmentLight(_SubLight):
         # Last non-black colour: what "turn on" restores after a black-out "off".
         self._last_color: tuple[int, int, int] | None = None
         self._sync_from_readback()
+
+    def _takes_color_temp(self) -> bool:
+        """Return whether one segment takes a colour temperature (the library's profile says)."""
+        return has_segment_color_temp(self._device)
 
     def _sync_from_readback(self) -> None:
         """Adopt the device's read-back colour/brightness for this segment."""
@@ -522,6 +535,10 @@ class GoveeBleLocalZoneLight(_SubLight):
         self._power_index = zone.power_index
         self._set_zone_name(zone.name)
         self._sync_from_readback()
+
+    def _takes_color_temp(self) -> bool:
+        """Return whether the zone takes a colour temperature (``set_zone_color_temp``)."""
+        return Capability.COLOR_TEMP in self._device.capabilities
 
     def _sync_from_readback(self) -> None:
         """Adopt a representative segment's read-back colour/brightness."""

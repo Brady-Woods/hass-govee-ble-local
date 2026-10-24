@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 import dataclasses
 import json
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -24,6 +25,7 @@ from custom_components.govee_ble_local.helpers import (
     clean_text,
     has_fixture_light,
     has_power_switch,
+    has_segment_color_temp,
     parse_secret,
     pct_to_brightness,
 )
@@ -73,6 +75,25 @@ def test_fixture_light_or_power_switch(
     device = build()
     assert has_fixture_light(device) is light
     assert has_power_switch(device) is switch
+
+
+@pytest.mark.parametrize(
+    ("capabilities", "profile", "expected"),
+    [
+        ({Capability.COLOR_TEMP}, SimpleNamespace(segment_color_temp=True), True),
+        ({Capability.COLOR_TEMP}, SimpleNamespace(segment_color_temp=False), False),
+        ({Capability.COLOR_TEMP}, SimpleNamespace(), True),
+        (set(), SimpleNamespace(segment_color_temp=True), False),
+    ],
+    ids=["segments_take_kelvin", "segments_take_none", "profile_doesnt_say", "no_color_temp"],
+)
+def test_segment_color_temp(
+    capabilities: set[Capability], profile: SimpleNamespace, expected: bool
+) -> None:
+    """One segment takes a colour temperature with COLOR_TEMP, unless the library's profile
+    says the segments take none; a profile that doesn't say (an older library) takes it."""
+    device = SimpleNamespace(capabilities=frozenset(capabilities), profile=profile)
+    assert has_segment_color_temp(device) is expected  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize(

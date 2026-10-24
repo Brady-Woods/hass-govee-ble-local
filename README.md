@@ -174,7 +174,8 @@ entry, and deleting the entry withdraws it.
 - On/off, brightness, RGB color, color temperature
 - Built-in scene/effect library (with an "off" entry to clear an effect)
 - Independent per-**zone** control (RGB **and** kelvin) where the fixture has physical zones
-- Per-**segment** lights (RGB + kelvin), registered disabled-by-default (opt in per segment)
+- Per-**segment** lights (RGB + brightness, plus kelvin where the library says the model's
+  segments take one), registered disabled-by-default (opt in per segment)
 - On/off tracked **passively from advertisements** (no connection needed), which also keeps
   background polling (each poll holds a scarce Bluetooth connection slot) to what it's needed for:
   none while a light is off or for a smart plug, one poll 5 s after a light is turned on outside
@@ -239,7 +240,7 @@ Per device (depending on its capabilities):
 | --- | --- | --- |
 | `light` | Main light | Whole-fixture power/brightness/RGB/color-temp/effects (on/off only, for a light with power alone) |
 | `light` | Zone light(s) | One per zone of a light fixture (RGB + kelvin); on/off only for a zone without segments (an H60A6 at protocol version 1,1) |
-| `light` | Segment light(s) | One per addressable segment (RGB + kelvin); **disabled by default** |
+| `light` | Segment light(s) | One per addressable segment (RGB, plus kelvin where the model's segments take one); **disabled by default** |
 | `switch` | Power / zone switch | Smart plugs (the H5083 family), and the zones of a plug switched per zone |
 | `sensor` | Signal strength, poll interval, connection failures, **last seen**, **last connected**, **connection source** | Diagnostic; signal strength, poll interval, last seen and last connected are **disabled by default** |
 | `binary_sensor` | Connectivity | Advertisement presence (reachable), not connect-poll success |

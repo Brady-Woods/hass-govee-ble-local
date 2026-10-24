@@ -32,7 +32,7 @@ from custom_components.govee_ble_local.capture import (
     session_capture,
 )
 
-from .conftest import make_device, runtime_segment_count
+from .conftest import make_device, runtime_segment_count, with_segment_color_temp
 from .const import ADDRESS, PLUG_ADDRESS, PLUG_NAME
 
 OTHER_ADDRESS = "11:22:33:44:55:66"
@@ -254,6 +254,7 @@ async def test_self_test_reads_with_the_library_default_connect_budget() -> None
 async def test_full_surface_run_on_h60a6() -> None:
     """Every capability is exercised, read-backs match and the state is restored."""
     device = make_device("H60A6")
+    device.profile = with_segment_color_temp(device.profile, True)  # H60A6_STEPS has its step
     _prime(device)
 
     report = await async_run_self_test(device)
@@ -384,6 +385,7 @@ async def test_readback_mismatch_fails_the_step_and_run() -> None:
 async def test_ble_error_in_step_is_recorded_not_raised() -> None:
     """A BLE failure marks the step (error text, not acked) and the run carries on."""
     device = make_device("H60A6")
+    device.profile = with_segment_color_temp(device.profile, True)  # H60A6_STEPS has its step
     _prime(device)
     device.set_rgb.side_effect = GoveeBleConnectionError("no slot")
 
@@ -410,6 +412,7 @@ async def test_a_step_the_library_refuses_as_not_supported_is_skipped_not_failed
         segments=4,
         zones=(),
     )
+    device.profile = with_segment_color_temp(device.profile, True)
     device.set_segment_color_temp.side_effect = GoveeBleNotSupported("no per-segment kelvin")
     _prime(device)
 
@@ -531,6 +534,36 @@ async def test_zone_without_segments_is_only_power_cycled() -> None:
     assert report["ok"] is True
 
 
+@pytest.mark.parametrize("takes", [True, False], ids=["segments_take_kelvin", "segments_take_none"])
+async def test_the_segment_colour_temp_step_runs_where_the_profile_says(takes: bool) -> None:
+    """The segment's colour-temperature step runs only where the library's profile says the
+    segments take one; each zone with segments gets its colour-temperature step either way."""
+    device = make_device("H60A6")
+    device.profile = with_segment_color_temp(
+        replace(
+            device.profile,
+            zones=(
+                Zone("main", power_index=0, segments=(4,)),
+                Zone("background", power_index=1, segments=(0, 1, 2, 3)),
+            ),
+            segments=5,
+        ),
+        takes,
+    )
+    _prime(device)
+
+    report = await async_run_self_test(device)
+
+    names = [s["step"] for s in report["steps"]]
+    assert ("segment_0_color_temp" in names) is takes
+    assert {name for name in names if name.startswith("zone_color_temp:")} == {
+        "zone_color_temp:main",
+        "zone_color_temp:background",
+    }
+    assert all(s["ok"] for s in _steps_that_ran(report))
+    assert report["ok"] is True
+
+
 @pytest.mark.parametrize(
     ("profile_segments", "runtime_count", "expected"),
     [
@@ -550,7 +583,9 @@ async def test_segment_step_gate_reads_the_runtime_segment_count(
     """
     device = make_device("H60A6")
     _prime(device)
-    device.profile = replace(device.profile, segments=profile_segments)
+    device.profile = with_segment_color_temp(
+        replace(device.profile, segments=profile_segments), True
+    )
 
     with runtime_segment_count(runtime_count):
         report = await async_run_self_test(device)
