@@ -1395,7 +1395,7 @@ async def test_power_switch_moves_over_to_the_light(
     assert await async_setup_component(hass, "homeassistant", {})
     device = make_device("H5083") if case == "relay_plug" else make_power_only_light()
     registry = er.async_get(hass)
-    area = ar.async_get(hass).async_create("Office")
+    area = ar.async_get(hass).async_create("Test Area")
     label = lr.async_get(hass).async_create("Desk")
     mock_config_entry.add_to_hass(hass)
     if case == "light_registered":  # e.g. from a release with the light, then a downgrade

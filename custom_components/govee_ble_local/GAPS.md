@@ -67,9 +67,17 @@ both bars first (`aa 36`, which can go unanswered) while it doesn't know them, o
 bar only from long ago, and its `33 36` handler re-runs the power-on tail, which may restart a
 running scene or mode.
 
-Entity count is the static `profile.segments` width; for IC-driven SKUs (e.g. H6641) the true group
-count is read live, so some declared segment entities may never report state until read-back is
-confirmed (see §2).
+Entity count: the segment count the device last reported, once the library stamps a count as read
+from the device (`helpers.confirmed_segment_count`) and two reads in a row give it. A read is one
+the device answered with a count (a new stamp); a poll that failed, or whose count read went
+unanswered, is none. A count that holds for two answered reads is taken, and reloads the entry, at
+each change, with no limit; one that changes from one answered read to the next removes and reloads
+nothing. It is stored in the entry, so a restart starts from it. Otherwise it is the library's
+`segment_count` (the profile's until the device reports one). A reported count removes the segment
+lights past it, and a larger one reloads the entry to bring them back with their registry settings
+(Home Assistant keeps a removed entity's record while its config entry exists, and purges it 30 days
+after the entry is deleted). A count the device hasn't reported removes none. On a library without
+the stamp (1.6.1) the count is the profile's, as before.
 
 ---
 

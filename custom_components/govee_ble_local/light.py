@@ -90,7 +90,8 @@ async def async_setup_entry(
       power-only light),
     - one light per zone (on/off only for a zone without segments; the zones of a
       device without a fixture light are switches instead - see switch.py),
-    - one light per addressable segment (disabled by default).
+    - one light per addressable segment (disabled by default), as many as setup sized
+      (the count the device reported, else the library's; see __init__.py).
 
     A relay plug (the H5083 family) gets none: it is a switch (see helpers.py).
     """
@@ -103,7 +104,8 @@ async def async_setup_entry(
         entities.extend(GoveeBleLocalZoneLight(entry, zone) for zone in device.zones)
     if Capability.SEGMENTS in device.capabilities:
         entities.extend(
-            GoveeBleLocalSegmentLight(entry, index) for index in range(device.segment_count)
+            GoveeBleLocalSegmentLight(entry, index)
+            for index in range(entry.runtime_data.segment_lights)
         )
     async_add_entities(entities)
 

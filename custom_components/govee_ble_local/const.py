@@ -26,6 +26,10 @@ CONF_ALLOW_MODELLED = "allow_modelled"
 # encrypt flag and broadcast version; helpers.Broadcast). Setup builds the device from it while
 # Home Assistant's record of the device carries none; absent until one is heard.
 CONF_BROADCAST = "broadcast"
+# The last segment count the device itself reported (helpers.confirmed_segment_count). Setup
+# builds that many segment lights, and removes any past it, before the device is read again;
+# absent until the device has reported one.
+CONF_SEGMENT_COUNT = "segment_count"
 
 # Colour-temperature range assumed when the library's profile doesn't give one.
 DEFAULT_MIN_KELVIN = 2700

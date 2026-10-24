@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Development: a pre-release field test through Home Assistant (`tools/ha_field_test`, runbook in
+  `docs/field-test-ha.md`), the Home Assistant route of the full test pass on every Govee device
+  in range before each release.
+  - **How it runs:** on the lab Home Assistant host with the standard library only, over Home
+    Assistant's REST and WebSocket APIs, with the token read from an owner-only file. The token
+    goes only to localhost, never through a proxy or along a redirect.
+  - **Steps:** built from what each entity supports: power, brightness, RGB and the white tint
+    pick, the Kelvin range's ends and middle, zones, enabled segment lights and a scene. The
+    refusals and conversions Home Assistant or the integration should make are recorded as
+    expected outcomes.
+  - **Run rules:** it is a dry run unless started with `--run`. A run:
+    - needs the expected integration and library versions, and tmux or screen;
+    - tests one device at a time and sends one call at a time;
+    - keeps to daytime, checked before every step;
+    - switches only the plugs and per-outlet relays the user names.
+  - **Restore:** it writes an fsynced restore journal before the first change. Every device goes
+    back as found after its test, on Ctrl-C, on SIGHUP (output can't stop it) or on any failure.
+    Colours are set while things are lit, and anything that was off is then switched off again.
+    The check covers each segment's colour and brightness.
+  - **Verdicts:** read back from Home Assistant after a forced poll. A step nothing could confirm
+    is "unverified".
+  - **`--restore-from`:** asks first, keeps to daytime and leaves alone what is already as found.
+  - **Reports:** Markdown and JSON, naming every device, scanner, area and entity by a neutral
+    label (`H60A6 #2`, `proxy A`, `area 3`, its role). They carry no MAC, not even a vendor
+    prefix, nor any entry title, entity ID or name.
+  - **Gate:** its unit tests run in the gate, on made-up identifiers only, and `scripts/check.sh`
+    lints and type-checks it.
+
+  Nothing in the integration changes.
+- Development: the field-test harness reads every credential from one owner-only file outside the
+  repository (`~/.config/govee-field-test/credentials`, `key = value`, `ha_token = …`; the older
+  bare `~/.ha_token` still works). It refuses a file that group or others can read, with the
+  `chmod 600` fix, stops cleanly when the file is absent, and keeps every value out of its
+  reports, `run.log` and journal. `.gitignore` covers such files, and `CONTRIBUTING.md` sets out
+  the rules for secrets and lab identifiers in this public repository.
+- Tests: fixtures use only made-up identifiers, with no real address or vendor prefix. Addresses
+  in `tests/test_connect_gate.py`, `tests/test_config_flow.py`, `tests/test_diagnostics.py` and
+  `tests/test_helpers.py` are replaced with documentation-range addresses (RFC 7042), and device
+  ids and a serial with made-up leading bytes; two area names become "Test Area".
+
 ### Changed
 - **A light that only switches on and off is a light, not a switch:** a model with power alone
   that isn't a relay smart plug (by its library profile) gets an on/off light, so it joins light
@@ -25,6 +66,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Deleted first, it hands its voice-assistant exposure back to the switch, so the new light gets
   the helper's entity ID and that exposure, but not a name or area you gave the helper: set
   those on the light. Left in place, it makes the new light's entity ID end in `_2`.
+- **Segment lights follow the segment count the device reports.** Some strips can report how
+  many segments they have, for example one that has been cut short. From the `govee-ble-local`
+  release that reports a confirmed segment count, Home Assistant follows it:
+  - **Fewer segments than lights:** the lights past the count are removed.
+  - **More segments than lights:** the entry reloads once. The removed lights come back on their
+    old entity IDs, with their names, areas and enabled or disabled setting, however long ago they
+    were removed. Home Assistant keeps those settings for as long as the device stays set up in the
+    integration. It forgets them only 30 days after you delete the device's entry.
+  - **Two reads in a row:** a count counts once two reads in a row report it. A read here is one
+    the device answered with a count; a poll that failed, or whose count read went unanswered, is
+    not one. A single bad read, or a count that changes from one answered read to the next, removes
+    and reloads nothing. A count that holds for two answered reads is taken, and reloads the entry,
+    at each change, with no limit on how often.
+  - **Restarts:** the count is stored, so a restart starts from it.
+  - **No count from the device yet:** none read yet, only reads that timed out or went unanswered,
+    or the model's default. Nothing is removed and nothing reloads.
+
+  With 1.6.1, and any library release that doesn't report a confirmed count, nothing changes:
+  segment lights are sized as before, and none is removed by count. No library floor bump.
 - **A segment light offers colour temperature only where the model's segments take one**, once
   `govee-ble-local` reports which models' segments take colour temperature. Elsewhere a segment
   light offers RGB and brightness, and a colour temperature asked of it (by a script, a scene or a

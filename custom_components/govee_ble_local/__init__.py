@@ -47,6 +47,7 @@ from .const import (
     CONF_ALLOW_MODELLED,
     CONF_BROADCAST,
     CONF_SECRET,
+    CONF_SEGMENT_COUNT,
     CONF_SKU,
     DOMAIN,
     FIRST_POLL_STAGGER_MAX_SECONDS,
@@ -62,13 +63,16 @@ from .const import (
 from .coordinator import GoveeBleLocalCoordinator
 from .helpers import (
     Broadcast,
+    SegmentCountRead,
     advertised_broadcast,
     async_store_broadcast,
     clean_mac,
     clean_text,
+    confirmed_segment_count,
     has_fixture_light,
     has_zone_lights,
     parse_secret,
+    stored_segment_count,
 )
 from .services import async_register_services
 
@@ -100,6 +104,8 @@ class GoveeBleLocalRuntimeData:
     # Why the library's scene store couldn't be read at setup (None: it could).
     # Then nothing reads the device's scenes: each read would hit the file again.
     scene_store_error: str | None = None
+    # How many segment lights setup built (_async_size_segment_lights).
+    segment_lights: int = 0
 
 
 type GoveeBleLocalConfigEntry = ConfigEntry[GoveeBleLocalRuntimeData]
@@ -299,6 +305,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: GoveeBleLocalConfigEntry
             _async_report_scene_store(hass, err)
 
     _async_remove_legacy_zone_entities(hass, entry, address, device)
+    segment_lights = _async_size_segment_lights(hass, entry, address, device)
     _async_move_power_switch_to_light(hass, entry, address, device)
 
     # Always-on WARNING+ capture so problems surface in the downloadable diagnostics
@@ -316,6 +323,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: GoveeBleLocalConfigEntry
         coordinator=coordinator,
         log_capture=log_capture,
         scene_store_error=scene_store_error,
+        segment_lights=segment_lights,
     )
 
     # The device is advertising (async_ble_device_from_address above found it),
@@ -340,6 +348,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: GoveeBleLocalConfigEntry
     )
 
     _async_track_device_registry(hass, entry)
+    _async_track_segment_count(hass, entry)
     _async_track_bluetooth(hass, entry)
     _async_close_on_stop(hass, entry)
 
@@ -505,22 +514,15 @@ def _async_track_bluetooth(hass: HomeAssistant, entry: GoveeBleLocalConfigEntry)
 def _async_remove_legacy_zone_entities(
     hass: HomeAssistant, entry: GoveeBleLocalConfigEntry, address: str, device: Device
 ) -> None:
-    """Remove orphaned zone-switch and segment-light entities left by earlier entity schemes.
+    """Remove orphaned zone-switch entities left by earlier entity schemes.
 
     1. Pre-v0.11 zone switches were keyed by integer index ({address}_zone_0 /
        _zone_1); they are now keyed by zone name (_zone_main / _zone_background).
     2. A light fixture's zones are lights (``has_zone_lights``), so a zone's old
        switch entity ({address}_zone_{name}) is orphaned: earlier versions made a
        zone a switch unless it had segments.
-    3. A device whose profile has no segments has no segment lights
-       ({address}_segment_{i}): an H60A6 advertising pact 1,1, which the
-       govee-ble-local release after 1.6.1 gives no segments, has them from an
-       earlier library, or from a setup without its pact (the entry is reloaded
-       once the pact is heard).
 
-    Drop them so only the current entities remain. Segment lights past the
-    device's segment count are kept while it has segments: a count read short
-    must not delete them.
+    Drop them so only the current entities remain.
     """
     registry = er.async_get(hass)
     stale_unique_ids = [f"{address}_zone_{i}" for i in ("0", "1")]
@@ -531,17 +533,113 @@ def _async_remove_legacy_zone_entities(
         if entity_id is not None:
             _LOGGER.debug("Removing orphaned zone switch %s", entity_id)
             registry.async_remove(entity_id)
-    if Capability.SEGMENTS in device.capabilities:
-        return
+
+
+@callback
+def _async_size_segment_lights(
+    hass: HomeAssistant, entry: GoveeBleLocalConfigEntry, address: str, device: Device
+) -> int:
+    """Return how many segment lights to build ({address}_segment_{i}), removing any past them.
+
+    - 0 on a device whose profile has no segments: an H60A6 advertising pact 1,1, which the
+      govee-ble-local release after 1.6.1 gives no segments, has them from an earlier library,
+      or from a setup without its pact (the entry is reloaded once the pact is heard).
+    - The count the device last reported (``stored_segment_count``), so the lights match the
+      device before it is read again: a strip cut short, or one an earlier version gave more.
+    - Otherwise the library's ``segment_count`` (the profile's, until the device has reported
+      its own). Nothing is removed by it: a count read short must not delete a light.
+    """
+    if Capability.SEGMENTS not in device.capabilities:
+        _async_remove_segment_lights(hass, entry, address, keep=0)
+        return 0
+    if (count := stored_segment_count(entry)) is None:
+        return device.segment_count
+    _async_remove_segment_lights(hass, entry, address, keep=count)
+    return count
+
+
+@callback
+def _async_remove_segment_lights(
+    hass: HomeAssistant, entry: GoveeBleLocalConfigEntry, address: str, *, keep: int
+) -> None:
+    """Remove this entry's segment lights for segments ``keep`` and up.
+
+    Home Assistant keeps what it knew of each (its entity id, name, area, enabled or not) while
+    the entry exists, and gives it back to a segment light set up again on the same unique id. It
+    purges the record only once it is orphaned, 30 days after the entry is deleted
+    (``ORPHANED_ENTITY_KEEP_SECONDS`` in its entity registry).
+    """
+    registry = er.async_get(hass)
     segment = f"{address}_segment_"
     for reg_entry in er.async_entries_for_config_entry(registry, entry.entry_id):
         if (
             reg_entry.domain == Platform.LIGHT
             and reg_entry.unique_id.startswith(segment)
-            and reg_entry.unique_id.removeprefix(segment).isdigit()
+            and (index := reg_entry.unique_id.removeprefix(segment)).isdigit()
+            and int(index) >= keep
         ):
-            _LOGGER.debug("Removing orphaned segment light %s", reg_entry.entity_id)
+            _LOGGER.debug("Removing segment light %s (past %d segments)", reg_entry.entity_id, keep)
             registry.async_remove(reg_entry.entity_id)
+
+
+@callback
+def _async_track_segment_count(hass: HomeAssistant, entry: GoveeBleLocalConfigEntry) -> None:
+    """Follow the segment count the device reports (``confirmed_segment_count``).
+
+    The library learns it from a read (on some strips, each poll's), after setup has built the
+    segment lights. A read here is one the device answered with a count: a new stamp from the
+    library. A poll whose count read failed or went unanswered, or a state pushed again with no
+    read (an advertisement, a command), is none, and neither counts nor breaks a row. A count
+    is taken once two reads in a row answer it, so one read alone (a bad one) and a count that
+    changes from one answered read to the next remove and reload nothing; one that holds for two
+    answered reads is taken, and reloads the entry, at each change, with no limit. A read of
+    another count, of the stored one, or a count dropped back to the profile's, breaks the row.
+
+    A count taken that differs from the stored one is stored, so every later setup starts from
+    it. One that differs from the lights built too reloads the entry, once: the setup builds
+    that many. Otherwise the lights past it, which an earlier version built, are removed now. A
+    count the device hasn't reported (none read yet, or the profile's) changes nothing; a larger
+    count brings the removed ones back, with what Home Assistant kept of them.
+    """
+    data = entry.runtime_data
+    device = data.device
+    if Capability.SEGMENTS not in device.capabilities:
+        return
+    address: str = entry.data[CONF_ADDRESS]
+    # The last read seen (its count and stamp), taken or not.
+    last: SegmentCountRead | None = None
+
+    @callback
+    def _check() -> None:
+        nonlocal last
+        read = confirmed_segment_count(device)
+        if read is None:
+            last = None  # back to the profile's count: the row starts over
+            return
+        if last is not None and read.read_at == last.read_at:
+            return  # no read since the last push
+        previous, last = last, read
+        if read.segments == stored_segment_count(entry):
+            return
+        if previous is None or previous.segments != read.segments:
+            return  # the first read of this count: wait for the next one
+        count = read.segments
+        hass.config_entries.async_update_entry(
+            entry, data={**entry.data, CONF_SEGMENT_COUNT: count}
+        )
+        if count != data.segment_lights:
+            _LOGGER.debug(
+                "%s reports %d segments (%d segment lights): reloading",
+                address,
+                count,
+                data.segment_lights,
+            )
+            hass.config_entries.async_schedule_reload(entry.entry_id)
+        else:
+            _async_remove_segment_lights(hass, entry, address, keep=count)
+
+    # A state listener: it follows every push (polls, commands) and keeps no poll timer running.
+    entry.async_on_unload(data.coordinator.async_add_state_listener(_check))
 
 
 @callback
