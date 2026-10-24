@@ -15,3 +15,9 @@ venv/
 
 # Local, untracked developer/agent working notes (not shipped)
 CLAUDE.local.md
+
+# Credentials for tests that use live devices: on the host that runs them, mode 600, never
+# committed (CONTRIBUTING.md). The default location is outside the repository.
+credentials
+*.credentials
+.ha_token
