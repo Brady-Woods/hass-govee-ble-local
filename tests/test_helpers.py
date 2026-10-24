@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+import contextlib
 import dataclasses
 import json
 from typing import Any
@@ -16,12 +17,14 @@ from pytest_homeassistant_custom_component.common import MockUser
 
 from custom_components.govee_ble_local.helpers import (
     BLE_ERRORS,
+    SEGMENT_COUNT_READ_AT_ATTR,
     Broadcast,
     advertised_broadcast,
     async_context_is_person,
     brightness_to_pct,
     clean_mac,
     clean_text,
+    confirmed_segment_count,
     has_fixture_light,
     has_power_switch,
     parse_secret,
@@ -238,3 +241,24 @@ def test_broadcast_round_trips_from_a_record_through_the_entry_to_the_library() 
     assert advertised_broadcast(None) is None
     assert Broadcast.from_data(None) is None
     assert Broadcast.from_data({"pact": "10,2"}) is None
+
+
+@pytest.mark.parametrize(
+    ("read_at", "confirmed"),
+    [("as installed", None), (None, None), (12.5, (9, 12.5))],
+    ids=["as_installed", "no_count_read", "count_read"],
+)
+def test_a_segment_count_is_confirmed_only_with_the_librarys_stamp_of_its_read(
+    read_at: float | str | None, confirmed: tuple[int, float] | None
+) -> None:
+    """Only a count the library stamps as read from the device is confirmed, with that stamp.
+    None from the library as installed (no release has the stamp yet), so nothing is removed by
+    its count; nor is a count a caller set a read of the device's."""
+    device = make_device("H6641")
+    device.set_segment_count(9)
+    with (
+        contextlib.nullcontext()
+        if read_at == "as installed"
+        else patch.object(Device, SEGMENT_COUNT_READ_AT_ATTR, read_at, create=True)
+    ):
+        assert confirmed_segment_count(device) == confirmed

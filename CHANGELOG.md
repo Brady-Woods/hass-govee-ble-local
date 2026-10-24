@@ -66,6 +66,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Deleted first, it hands its voice-assistant exposure back to the switch, so the new light gets
   the helper's entity ID and that exposure, but not a name or area you gave the helper: set
   those on the light. Left in place, it makes the new light's entity ID end in `_2`.
+- **Segment lights follow the segment count the device reports.** Some strips can report how
+  many segments they have, for example one that has been cut short. From the `govee-ble-local`
+  release that reports a confirmed segment count, Home Assistant follows it:
+  - **Fewer segments than lights:** the lights past the count are removed.
+  - **More segments than lights:** the entry reloads once. The removed lights come back on their
+    old entity IDs, with their names, areas and enabled or disabled setting, however long ago they
+    were removed. Home Assistant keeps those settings for as long as the device stays set up in the
+    integration. It forgets them only 30 days after you delete the device's entry.
+  - **Two reads in a row:** a count counts once two reads in a row report it. A read here is one
+    the device answered with a count; a poll that failed, or whose count read went unanswered, is
+    not one. A single bad read, or a count that changes from one answered read to the next, removes
+    and reloads nothing. A count that holds for two answered reads is taken, and reloads the entry,
+    at each change, with no limit on how often.
+  - **Restarts:** the count is stored, so a restart starts from it.
+  - **No count from the device yet:** none read yet, only reads that timed out or went unanswered,
+    or the model's default. Nothing is removed and nothing reloads.
+
+  With 1.6.1, and any library release that doesn't report a confirmed count, nothing changes:
+  segment lights are sized as before, and none is removed by count. No library floor bump.
 - Tests: the stand-in for the library's connection (`tests/conftest.py` `FakeConnection`) is now
   the library's own `GoveeConnection` with only its Bluetooth I/O replaced, instead of a
   hand-written copy put on the library's private `Device._conn`. A method the library adds that
