@@ -67,9 +67,12 @@ both bars first (`aa 36`, which can go unanswered) while it doesn't know them, o
 bar only from long ago, and its `33 36` handler re-runs the power-on tail, which may restart a
 running scene or mode.
 
-Entity count is the static `profile.segments` width; for IC-driven SKUs (e.g. H6641) the true group
-count is read live, so some declared segment entities may never report state until read-back is
-confirmed (see §2).
+Entity count: the segment count the device last reported, once the library says a count came from
+the device (`helpers.confirmed_segment_count`; stored in the entry, so a restart starts from it),
+else the library's `segment_count` (the profile's until the device reports one). A reported count
+removes the segment lights past it, and a larger one reloads the entry to bring them back; a count
+the device hasn't reported removes none. No released library has the flag yet, so on 1.6.1 the
+count is the profile's, as before.
 
 ---
 

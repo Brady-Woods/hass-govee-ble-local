@@ -400,7 +400,7 @@ async def test_diagnostic_listeners_are_released_with_their_entities(
     """Removing an entity, or unloading the entry, drops its diagnostic subscription."""
     coordinator = setup_integration.runtime_data.coordinator
     assert len(coordinator._diagnostic_listeners) == len(SENSOR_KEYS) + 1  # + connectivity
-    assert len(coordinator._state_listeners) == 1  # the device-registry sync
+    assert coordinator._state_listeners  # the device-registry sync, the segment count's
 
     # An entity removed while the entry stays loaded lets go of its listener.
     er.async_get(hass).async_remove(sensor_id(hass, "rssi"))

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+import contextlib
 import dataclasses
 import json
 from typing import Any
@@ -16,12 +17,14 @@ from pytest_homeassistant_custom_component.common import MockUser
 
 from custom_components.govee_ble_local.helpers import (
     BLE_ERRORS,
+    SEGMENT_COUNT_CONFIRMED_ATTR,
     Broadcast,
     advertised_broadcast,
     async_context_is_person,
     brightness_to_pct,
     clean_mac,
     clean_text,
+    confirmed_segment_count,
     has_fixture_light,
     has_power_switch,
     parse_secret,
@@ -238,3 +241,24 @@ def test_broadcast_round_trips_from_a_record_through_the_entry_to_the_library() 
     assert advertised_broadcast(None) is None
     assert Broadcast.from_data(None) is None
     assert Broadcast.from_data({"pact": "10,2"}) is None
+
+
+@pytest.mark.parametrize(
+    ("flag", "confirmed"),
+    [(None, None), (False, None), (True, 9)],
+    ids=["as_installed", "flag_false", "flag_true"],
+)
+def test_a_segment_count_is_confirmed_only_while_the_library_flags_it_the_devices(
+    flag: bool | None, confirmed: int | None
+) -> None:
+    """Only a count the library flags as read from the device is confirmed. None from the
+    library as installed (no release has the flag yet), so nothing is removed by its count; nor
+    is a count a caller set a read of the device's."""
+    device = make_device("H6641")
+    device.set_segment_count(9)
+    with (
+        contextlib.nullcontext()
+        if flag is None
+        else patch.object(Device, SEGMENT_COUNT_CONFIRMED_ATTR, flag, create=True)
+    ):
+        assert confirmed_segment_count(device) == confirmed

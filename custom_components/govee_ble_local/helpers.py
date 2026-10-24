@@ -1,4 +1,4 @@
-"""Small shared helpers: entity partition, zone state, device info, units, secrets, pacts."""
+"""Shared helpers: entities, zone state, segment counts, device info, units, secrets, pacts."""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ from homeassistant.exceptions import HomeAssistantError
 
 from .const import (
     CONF_BROADCAST,
+    CONF_SEGMENT_COUNT,
     DEFAULT_MAX_KELVIN,
     DEFAULT_MIN_KELVIN,
     DOMAIN,
@@ -116,6 +117,31 @@ def async_store_broadcast(
     """Store ``broadcast`` as the entry's header (CONF_BROADCAST), unless it already is."""
     if entry.data.get(CONF_BROADCAST) != (data := broadcast.as_data()):
         hass.config_entries.async_update_entry(entry, data={**entry.data, CONF_BROADCAST: data})
+
+
+# The library's flag that a read from the device set ``Device.segment_count`` (True), rather
+# than the count falling back to the profile's ``segments``. The library has none yet (asked
+# for the release that makes the count live, govee-ble-local 1.9.0), so its name is a stand-in
+# until it ships; this is the only place that names it.
+SEGMENT_COUNT_CONFIRMED_ATTR = "segment_count_confirmed"
+
+
+def confirmed_segment_count(device: Device) -> int | None:
+    """Return the device's segment count when the device itself reported it, else None.
+
+    None while the library has no count from the device (none read yet, or a read that went
+    unanswered, timed out or gave no usable count), and on a library without the flag (1.6.1):
+    such a count may be the profile's, so nothing may be removed by it.
+    """
+    if getattr(device, SEGMENT_COUNT_CONFIRMED_ATTR, False) is True:
+        return device.segment_count
+    return None
+
+
+def stored_segment_count(entry: GoveeBleLocalConfigEntry) -> int | None:
+    """Return the last segment count the device reported, as the entry stores it (or None)."""
+    count = entry.data.get(CONF_SEGMENT_COUNT)
+    return count if isinstance(count, int) and count >= 0 else None
 
 
 def has_fixture_light(device: Device) -> bool:

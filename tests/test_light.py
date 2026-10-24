@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Generator
 import dataclasses
 import functools
 import logging
@@ -2838,3 +2839,175 @@ async def test_an_on_off_zone_light_switches_its_zone_alone(
     await _call(hass, "turn_off", zone)
     device.set_zone_power.assert_awaited_once_with("background", False)
     assert hass.states.get(zone).state == STATE_OFF
+
+
+# -- 12. segment lights follow the count the device reports -----------------------------
+
+
+@pytest.fixture
+def reported() -> Generator[SimpleNamespace]:
+    """The segment count the device has reported, as the integration's one reader of it gives it.
+
+    ``.count`` None (to start): none reported. The library's flag isn't released yet, so a
+    test sets what the reader returns (``confirmed_segment_count``) instead.
+    """
+    reported = SimpleNamespace(count=None)
+    with patch(
+        "custom_components.govee_ble_local.confirmed_segment_count",
+        side_effect=lambda _device: reported.count,
+    ):
+        yield reported
+
+
+@pytest.fixture
+def strip_segments() -> int:
+    """The segment count the strip's profile gives (override per test)."""
+    return 16
+
+
+@pytest.fixture
+def strip(strip_segments: int) -> Generator[Device]:
+    """An unzoned strip that every setup in the test gets, ``strip_segments`` by its profile."""
+    device = make_device("H6641")
+    device.profile = dataclasses.replace(device.profile, segments=strip_segments, zones=())
+    with patch("custom_components.govee_ble_local.create_device", return_value=device):
+        yield device
+
+
+async def _set_up_strip(hass: HomeAssistant, entry: MockConfigEntry) -> MockConfigEntry:
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    return entry
+
+
+async def _poll(hass: HomeAssistant, entry: MockConfigEntry) -> None:
+    """Poll the device, and let a reload the poll starts finish."""
+    await entry.runtime_data.coordinator.async_refresh()
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+
+def _segment_lights(hass: HomeAssistant, entry: MockConfigEntry) -> set[int]:
+    """The segments the entry has a light registered for."""
+    prefix = f"{ADDRESS}_segment_"
+    return {int(u.removeprefix(prefix)) for u in _lights(hass, entry) if u.startswith(prefix)}
+
+
+@pytest.mark.parametrize(
+    ("strip_segments", "earlier", "count"),
+    [(16, 16, 9), (14, 16, 14)],
+    ids=["fewer_than_built", "as_many_as_built"],
+)
+@pytest.mark.usefixtures("strip", "mock_bluetooth")
+async def test_a_reported_count_removes_the_segment_lights_past_it(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    reported: SimpleNamespace,
+    earlier: int,
+    count: int,
+) -> None:
+    """A segment count the device reports removes the segment lights past it: those setup
+    built, and those an earlier version registered (an H6641 it gave 16)."""
+    mock_config_entry.add_to_hass(hass)
+    registry = er.async_get(hass)
+    for index in range(earlier):
+        registry.async_get_or_create(
+            "light", DOMAIN, f"{ADDRESS}_segment_{index}", config_entry=mock_config_entry
+        )
+    entry = await _set_up_strip(hass, mock_config_entry)
+    assert _segment_lights(hass, entry) == set(range(earlier))
+
+    reported.count = count
+    await _poll(hass, entry)
+
+    assert entry.state is ConfigEntryState.LOADED
+    assert _segment_lights(hass, entry) == set(range(count))
+    # And for good: a later setup, before the device is read again, builds as many.
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert _segment_lights(hass, entry) == set(range(count))
+
+
+@pytest.mark.parametrize("earlier", [None, 9], ids=["none_reported", "reported_earlier"])
+@pytest.mark.usefixtures("mock_bluetooth")
+async def test_a_count_the_device_hasnt_reported_removes_no_segment_light(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    strip: Device,
+    reported: SimpleNamespace,
+    earlier: int | None,
+) -> None:
+    """No count read from the device (none yet, a poll that failed or read no count, the
+    profile's after a restart, a lower one the library holds without the device's word) removes
+    a segment light, nor brings back one a count reported earlier removed."""
+    entry = await _set_up_strip(hass, mock_config_entry)
+    if earlier is not None:
+        reported.count = earlier
+        await _poll(hass, entry)
+    lights = _segment_lights(hass, entry)
+    assert lights == set(range(earlier or 16))
+    reported.count = None
+
+    strip.update.side_effect = GoveeBleConnectionError("read failed")  # type: ignore[attr-defined]
+    await _poll(hass, entry)
+    strip.update.side_effect = None  # type: ignore[attr-defined]
+    strip.set_segment_count(5)
+    await _poll(hass, entry)
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    await _poll(hass, entry)
+
+    assert entry.state is ConfigEntryState.LOADED
+    assert _segment_lights(hass, entry) == lights
+
+
+@pytest.mark.usefixtures("strip", "mock_bluetooth")
+async def test_a_larger_reported_count_brings_the_segment_lights_back_as_they_were(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, reported: SimpleNamespace
+) -> None:
+    """A segment light removed by a shorter count comes back, at a larger one, on its unique
+    id with what Home Assistant kept of it: its entity id, name and enabled or not."""
+    entry = await _set_up_strip(hass, mock_config_entry)
+    registry = er.async_get(hass)
+    enabled = registry.async_update_entity(_segment(hass, 12), disabled_by=None, name="Desk end")
+    untouched = registry.async_get(_segment(hass, 13))
+    assert untouched is not None
+    assert untouched.disabled_by is er.RegistryEntryDisabler.INTEGRATION
+    reported.count = 9
+    await _poll(hass, entry)
+    assert 12 not in _segment_lights(hass, entry)
+
+    reported.count = 16
+    await _poll(hass, entry)
+
+    assert _segment_lights(hass, entry) == set(range(16))
+    for before in (enabled, untouched):
+        after = registry.async_get(_segment(hass, int(before.unique_id.rsplit("_", 1)[1])))
+        assert after is not None
+        assert (after.id, after.entity_id, after.name, after.disabled_by) == (
+            before.id,
+            before.entity_id,
+            before.name,
+            before.disabled_by,
+        )
+    assert hass.states.get(enabled.entity_id) is not None  # the enabled one is set up again
+
+
+@pytest.mark.usefixtures("strip", "mock_bluetooth")
+async def test_the_entry_reloads_once_for_each_reported_count_that_changes_the_lights(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, reported: SimpleNamespace
+) -> None:
+    """A reported count reloads the entry once when it differs from the segment lights built,
+    however many polls report it; one that matches them, or none reported, reloads nothing."""
+    entry = await _set_up_strip(hass, mock_config_entry)
+    with patch.object(
+        hass.config_entries, "async_reload", wraps=hass.config_entries.async_reload
+    ) as reload:
+        reloads = []
+        for count in (16, 16, 9, 9, None, 12, 12):
+            reported.count = count
+            await _poll(hass, entry)
+            reloads.append(reload.call_count)
+
+    assert reloads == [0, 0, 1, 1, 1, 2, 2]
+    assert _segment_lights(hass, entry) == set(range(12))
